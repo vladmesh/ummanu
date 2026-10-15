@@ -755,6 +755,8 @@ class FakeHost:
         self.crash_after_task_doc: BaseException | None = None
 
     _card_audit = CommandHostRuntime._card_audit
+    head_run_end = CommandHostRuntime.head_run_end
+    _local_pty_root = CommandHostRuntime._local_pty_root
     _select_revision_bound_worker_feedback = CommandHostRuntime._select_revision_bound_worker_feedback
     _validated_worker_prerequisites = CommandHostRuntime._validated_worker_prerequisites
     _bound_marker_body = staticmethod(CommandHostRuntime._bound_marker_body)

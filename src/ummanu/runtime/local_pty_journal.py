@@ -20,6 +20,7 @@ from ummanu.runtime.head.local_pty.journal import (
     SCOPE_BOUND,
     _unique,
 )
+from ummanu.runtime.head.local_pty.run_end import RunEnd, run_end
 from ummanu.runtime.local_pty_values import _Address
 
 
@@ -387,6 +388,24 @@ def head_run_loss_reason(root: str | os.PathLike[str], run_id: str) -> str | Non
             return MEMORY_LIMIT_REASON
         return None
     return None
+
+
+def head_run_end(
+    root: str | os.PathLike[str], run_id: str, *, heartbeat_state: str, launched_boot: str
+) -> RunEnd | None:
+    """`run_end` for the run `run_id` names, over its own journal under `root`.
+
+    A journal that is missing, unreadable, malformed or out of order contributes no events.
+    """
+    events: tuple[dict[str, Any], ...] = ()
+    if run_id:
+        try:
+            reading = head_run_journal_read(protocol.run_dir_for(root, run_id))
+        except OSError:
+            reading = None
+        if reading is not None and not reading.malformed and reading.ordered:
+            events = tuple(event for event in reading.events if event.get("run_id") == run_id)
+    return run_end(events, heartbeat_state=heartbeat_state, launched_boot=launched_boot)
 
 
 def _last_event_at(address: _Address) -> float:

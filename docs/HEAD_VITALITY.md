@@ -79,6 +79,25 @@ Mappings:
   journal cannot account for → `Unknown` + unavailable. It never answers Process, so it is never
   `Dead`.
 
+### Proven run end
+
+`runtime.head.local_pty.run_end.run_end` is the one rule that a head's run has ended from facts
+that survive a reboot. The run ended when its own `journal.jsonl` holds `run.exited` after the run's
+last `run.started` (the reason carries the recorded signal), or when its pid heartbeat is
+`not-yet-written` or `unreadable` and the boot id recorded at launch differs from the current one. A
+missing journal, or a record with no launch boot, proves nothing on its own. The dispatcher reads it
+through `CommandHostRuntime.head_run_end` over the run's directory under `<data>/heads`.
+
+Two consumers, same tick:
+
+- worker wait tick: `DispatcherRecord.worker_launch_boot` is stamped with the launch intent. A proven
+  end replaces the `pid_heartbeat` snapshot with `Process=Dead`, so the verdict is `Dead` and the
+  ordinary respawn runs: workspace, branch and report round kept, no Blocked;
+- observer: `ObserverRecord.launched_boot` is stamped at launch. A proven end reads as a dead head
+  (`pid_known`), so the fence says `observer_head_dead` and the reconcile relaunches on the same
+  tick. While the head has not written its identity inside its launch grace, the reconcile reports
+  `observer-launch-pending`, never `observer-idle`.
+
 ### Supervisor journal
 
 `command_terminal_status` reads it for a supervised run whose heartbeat is a `live-match`, through

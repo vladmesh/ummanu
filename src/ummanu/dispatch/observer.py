@@ -68,7 +68,6 @@ from ummanu.dispatch.tui import (
 )
 from ummanu.dispatch.types import HostError
 from ummanu.dispatch.watchdog import (
-    HEARTBEAT_NOT_YET_WRITTEN,
     head_run_process_status,
     heartbeat_is_dead,
     heartbeat_is_live_match,
@@ -88,6 +87,7 @@ from ummanu.role_skills import skill_delivery
 from ummanu.runtime import head as head_ops
 from ummanu.runtime.codex_preflight import CodexFanoutRecordingError
 from ummanu.runtime.head.identity import current_boot_id
+from ummanu.runtime.local_pty_head import RunEnd
 from ummanu.runtime.role_env import observer_binding
 from ummanu.sprint_observer import (
     KIND_HEAD,
@@ -178,30 +178,35 @@ confirmed-dead process permits a replacement.
     )
 
 
-def observer_head_is_dead(record: ObserverRecord, status: dict[str, Any]) -> bool:
-    """Whether the observer's recorded process is positively dead.
-
-A readable identity naming a pid gone or unreaped on this boot, or no identity
-at all from a head launched in an earlier boot. Anything else is inconclusive.
-    """
-    return heartbeat_is_dead(status) or _unwritten_in_earlier_boot(record, status)
-
-
-def _unwritten_in_earlier_boot(record: ObserverRecord, status: dict[str, Any]) -> bool:
-    return (
-        str(status.get("state") or "") == HEARTBEAT_NOT_YET_WRITTEN
-        and bool(record.launched_boot)
-        and record.launched_boot != current_boot_id()
+def observer_head_end(runtime: Any, record: ObserverRecord, status: dict[str, Any]) -> RunEnd | None:
+    """This observer run's proven end, or None, from its journal and launch boot."""
+    return runtime.host.head_run_end(
+        record.head_run,
+        heartbeat_state=str(status.get("state") or ""),
+        launched_boot=record.launched_boot,
     )
 
 
+def observer_head_is_dead(status: dict[str, Any], end: RunEnd | None) -> bool:
+    """Whether the observer's recorded process is positively dead.
+
+A readable identity naming a pid gone or unreaped on this boot, or a proven run end.
+Anything else is inconclusive.
+    """
+    return heartbeat_is_dead(status) or end is not None
+
+
 def observer_alive(
-    record: ObserverRecord, *, now: float | None = None, status: dict[str, Any] | None = None
+    record: ObserverRecord,
+    *,
+    end: RunEnd | None = None,
+    now: float | None = None,
+    status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Observer liveness with its evidence.
 
-An unreadable pid file is inconclusive, not death; a new head is treated as
-alive during its grace period. Reuse a supplied status when available.
+A proven run end (`observer_head_end`) is death; an unreadable pid file alone is
+inconclusive; a new head is alive during its grace period. Reuse a supplied status.
     """
     now = time.time() if now is None else now
     status = observer_head_status(record) if status is None else status
@@ -212,10 +217,10 @@ alive during its grace period. Reuse a supplied status when available.
             "pid_known": True,
             "identity_mismatch": True,
         }
+    if end is not None:
+        return {"alive": False, "reason": end.describe(), "pid_known": True}
     if status.get("known"):
         return {"alive": heartbeat_is_live_match(status), "reason": "pid", "pid_known": True}
-    if _unwritten_in_earlier_boot(record, status):
-        return {"alive": False, "reason": "launched-in-an-earlier-boot", "pid_known": True}
     grace = initial_output_stall_seconds()
     if record.launched_at and now - record.launched_at <= grace:
         return {"alive": True, "reason": "pid-not-written-yet", "pid_known": False}
@@ -336,7 +341,7 @@ their observer has been adopted. No tracked heads and no open sprints is a no-op
                 _stop_observer(runtime, payload, observers, ref, reason="sprint is no longer open")
             )
         for ref in sorted(open_sprints):
-            dead = _dead_launch(observers.get(ref))
+            dead = _dead_launch(runtime, observers.get(ref))
             outcome = _reconcile_open_sprint(
                 runtime,
                 payload,
@@ -360,7 +365,7 @@ their observer has been adopted. No tracked heads and no open sprints is a no-op
 _BROUGHT_UP = frozenset({"observer-launched", "observer-relaunched"})
 
 
-def _dead_launch(record: ObserverRecord | None) -> int | None:
+def _dead_launch(runtime: Any, record: ObserverRecord | None) -> int | None:
     """Return the launch count if this observer is confirmed dead at tick start.
 
 Use the same liveness classifier as reconciliation, before it mutates records.
@@ -375,7 +380,9 @@ Deliberate stops and pending stops are not deaths.
     ):
         return None
     try:
-        return record.launches if observer_head_is_dead(record, observer_head_status(record)) else None
+        status = observer_head_status(record)
+        dead = observer_head_is_dead(status, observer_head_end(runtime, record, status))
+        return record.launches if dead else None
     except Exception:  # noqa: BLE001 - the bell's reading never decides a tick
         return None
 
@@ -540,13 +547,14 @@ def _reconcile_open_sprint(
     # intent and an abandoned handle both mean "not the live observer of this sprint" whatever the
     # process is doing — so the two are kept apart instead of one standing in for the other.
     head_status = observer_head_status(record) if head_may_be_running else {}
-    head_liveness = observer_alive(record, status=head_status) if head_may_be_running else {}
+    head_end = observer_head_end(runtime, record, head_status) if head_may_be_running else None
+    head_liveness = observer_alive(record, end=head_end, status=head_status) if head_may_be_running else {}
     head_process_alive = bool(head_liveness.get("alive"))
     # Positive death of this record's launch identity, from the same reading. It is what makes a
     # bring-up over a headless open sprint conditional on the head rather than on the queue: a
     # process that is provably gone cannot be woken and cannot be the second head a launch would
     # put beside a live one.
-    head_is_dead = head_may_be_running and observer_head_is_dead(record, head_status)
+    head_is_dead = head_may_be_running and observer_head_is_dead(head_status, head_end)
     head_is_live = (
         head_may_be_running and not unresolved_intent and not record.abandoned_handle and head_process_alive
     )
@@ -581,6 +589,17 @@ def _reconcile_open_sprint(
         if event["pending"]:
             return _wake_for_event(runtime, payload, observers, ref, record, event)
         work = _observer_work_state(runtime, ref, record)
+        if work["state"] == "idle" and not head_liveness["pid_known"]:
+            # The fence holds this sprint until the head writes its launch identity: not idle yet.
+            return {
+                "status": "skipped",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-launch-pending",
+                "head": record.head,
+                "launches": record.launches,
+                "reason": "the head is within its launch grace and has written no launch identity yet",
+            }
         if work["state"] == "idle":
             _mark_idle_grace(record, since=work["since"], reason=work["reason"])
             return {
@@ -1909,7 +1928,8 @@ def _adopt_launch_intent(
 Adopt a readable live pid with the reserved attempt. Wait through the initial
 heartbeat grace period; otherwise clean up intent residue before relaunch.
     """
-    liveness = observer_alive(record)
+    status = observer_head_status(record)
+    liveness = observer_alive(record, end=observer_head_end(runtime, record, status), status=status)
     if liveness.get("identity_mismatch"):
         return {
             "status": "degraded",

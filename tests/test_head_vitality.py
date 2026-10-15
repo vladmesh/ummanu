@@ -33,9 +33,11 @@ from ummanu.dispatch.head_vitality import (
 from ummanu.dispatch.watchdog import (
     HEARTBEAT_DEAD,
     HEARTBEAT_LIVE_MATCH,
+    HEARTBEAT_NOT_YET_WRITTEN,
     head_process_status,
 )
 from ummanu.runtime.head import identity, with_pid_heartbeat
+from ummanu.runtime.head.local_pty.run_end import RUN_END_EXITED, RunEnd
 
 RUN_ID = "run-1"
 
@@ -52,6 +54,19 @@ class StatusObservationTests(unittest.TestCase):
             with self.subTest(status=status):
                 self.assertFalse(status_has_vitality_observation(status))
                 self.assertEqual(snapshots_from_status(status, run_id=RUN_ID, observed_at=1.0), [])
+
+    def test_a_proven_run_end_reads_the_pid_channel_as_dead(self) -> None:
+        unwritten = {"known": False, "alive": False, "match": False, "state": HEARTBEAT_NOT_YET_WRITTEN}
+        end = RunEnd(RUN_END_EXITED, 15)
+        for status in ({"pid_status": unwritten, "run_end": end}, {"run_end": end}):
+            with self.subTest(status=status):
+                self.assertTrue(status_has_vitality_observation(status))
+                [snapshot] = snapshots_from_status(status, run_id=RUN_ID, observed_at=1.0)
+                self.assertEqual(
+                    (snapshot.source, snapshot.availability, snapshot.process),
+                    (SnapshotSource.PID_HEARTBEAT, SourceAvailability.AVAILABLE, ProcessState.DEAD),
+                )
+                self.assertIn("run-exited (signal 15)", snapshot.reason)
 
 
 def _heartbeat_identity(run_id: str = RUN_ID) -> dict[str, str]:

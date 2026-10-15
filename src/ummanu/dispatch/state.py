@@ -849,6 +849,8 @@ class DispatcherRecord:
     # Most recent output from the tracked head pane.  This is deliberately pane-scoped: output
     # from an unrelated shell in the same worktree must not keep a broken head alive.
     worker_started_at: float = 0.0
+    # The kernel boot the worker head was launched in; empty on a record that never stored one.
+    worker_launch_boot: str = ""
     worker_progress_at: float = 0.0
     # Since when the head has been ready for input with nothing delivered for the round being
     # waited on (secretary-1063), 0.0 when it is working or its readiness cannot be read. A head
@@ -1077,6 +1079,7 @@ class DispatcherRecord:
             ),
             "worker_respawns": self.worker_respawns,
             "worker_started_at": self.worker_started_at,
+            "worker_launch_boot": self.worker_launch_boot,
             "worker_head_run": self.worker_head_run.to_json(),
             "review_head_run": self.review_head_run.to_json(),
             "worker_run": self.worker_run.to_json(),
@@ -1215,6 +1218,7 @@ class DispatcherRecord:
             worker_waiting_since=float(payload.get("worker_waiting_since") or 0.0),
             worker_respawns=int(payload.get("worker_respawns") or 0),
             worker_started_at=float(payload.get("worker_started_at") or 0.0),
+            worker_launch_boot=str(payload.get("worker_launch_boot") or ""),
             worker_progress_at=float(payload.get("worker_progress_at") or 0.0),
             worker_idle_since=float(payload.get("worker_idle_since") or 0.0),
             worker_idle_confirmations=int(payload.get("worker_idle_confirmations") or 0),

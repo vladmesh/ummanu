@@ -34,6 +34,8 @@ from ummanu.dispatch.observer import (
     load_observers,
     observer_alive,
     observer_decision,
+    observer_head_end,
+    observer_head_status,
     observer_unreachable,
     stage_event,
 )
@@ -297,7 +299,8 @@ def _sprint_verdict(
             "message": (f"declared observer {head} is not up: {record.deferred_reason or record.state}"),
             "head": head,
         }
-    liveness = observer_alive(record)
+    status = observer_head_status(record)
+    liveness = observer_alive(record, end=observer_head_end(runtime, record, status), status=status)
     if not liveness["pid_known"]:
         # The lifecycle grace window reads a head that has not written its pid yet as alive, and
         # that is right for deciding whether to relaunch it. It is not proof of adoption, and this

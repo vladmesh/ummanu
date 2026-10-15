@@ -76,6 +76,7 @@ from ummanu.dispatch.production import (
     _reconcile_sprint_budget,
 )
 from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.dispatch.state import DispatcherRecord
 from ummanu.dispatch.tui import (
     DeliveryEvidence,
     claude_project_dir_name,
@@ -101,6 +102,8 @@ from ummanu.runtime.head import (
     TaskRef,
     operations as head_ops,
 )
+from ummanu.runtime.head.identity import current_boot_id
+from ummanu.runtime.head.local_pty import journal as head_journal
 from ummanu.runtime.provider_errors import KIND_QUOTA, ProviderError
 from ummanu.runtime.role_env import (
     OBSERVER_GENERATION_ENV,
@@ -278,6 +281,38 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             }
         )
         path.write_text(json.dumps(heartbeat), encoding="utf-8")
+
+    def worker_record(self, reference: str = "ummanu-510") -> DispatcherRecord:
+        return self.runtime.production_state.records(self.runtime.production_state.load())[reference]
+
+    def worker_actions(self, result: dict, reference: str = "ummanu-510") -> list[str]:
+        return [
+            action["action"]
+            for action in result["actions"]
+            if action.get("step") == "advance" and action.get("pilot_ref") == reference
+        ]
+
+    def lose_pid_files(self, *, launched_boot: str) -> None:
+        """What a reboot or a stopped head scope leaves: the observer's and the worker's pid files are
+        gone, and both records name `launched_boot` as the boot their head was launched in."""
+        payload = self.runtime.production_state.load()
+        observers = load_observers(payload)
+        Path(observers["sprint:1"].pid_file).unlink()
+        observers["sprint:1"].launched_boot = launched_boot
+        put_observers(payload, observers)
+        records = self.runtime.production_state.records(payload)
+        Path(records["ummanu-510"].worker_pid_file).unlink()
+        records["ummanu-510"].worker_launch_boot = launched_boot
+        self.runtime.production_state.put_records(payload, records)
+        self.runtime.production_state.save(payload)
+
+    def end_run(self, run_id: str) -> None:
+        """The supervisor's own record of a head stopped with its scope: `run.exited`, signal 15."""
+        path = Path(self.host._local_pty_root()) / run_id / "journal.jsonl"
+        path.parent.mkdir(parents=True)
+        with head_journal.JournalWriter(path, run_id) as writer:
+            writer.append(head_journal.RUN_STARTED, head_pid=os.getpid())
+            writer.append(head_journal.RUN_EXITED, signal=15, exit_code=None)
 
     def acknowledge_delivery(
         self,
@@ -1026,7 +1061,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         """
         self.open_sprint()
         self.runtime.production_tick()
-        Path(self.observers()["sprint:1"].pid_file).unlink()
+        worker_run = self.worker_record().worker_head_run.get("run_id")
+        self.lose_pid_files(launched_boot=current_boot_id())
         self.expire_launch_grace()
 
         result = self.runtime.production_tick()
@@ -1034,19 +1070,18 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         [action] = self.actions(result)
         self.assertEqual(action["action"], "observer-unconfirmed")
         self.assertIn("pid-file-is-unreadable", action["reason"])
+        self.assertNotIn("worker-respawned", self.worker_actions(result))
+        worker = self.worker_record()
+        self.assertEqual((worker.worker_respawns, worker.worker_head_run.get("run_id")), (0, worker_run))
         record = self.observers()["sprint:1"]
         self.assertEqual(record.launches, 1)
         self.assertEqual(self.host.stopped_observers, [])
 
-    def test_an_observer_launched_before_a_reboot_is_relaunched_on_the_first_tick(self) -> None:
+    def test_one_tick_after_a_reboot_relaunches_the_observer_and_replaces_the_worker(self) -> None:
         self.open_sprint()
         self.runtime.production_tick()
-        Path(self.observers()["sprint:1"].pid_file).unlink()
-        payload = self.runtime.production_state.load()
-        observers = load_observers(payload)
-        observers["sprint:1"].launched_boot = "an-earlier-boot"
-        put_observers(payload, observers)
-        self.runtime.production_state.save(payload)
+        before = self.worker_record()
+        self.lose_pid_files(launched_boot="an-earlier-boot")
         self.expire_launch_grace()
 
         relaunched = self.runtime.production_tick()
@@ -1058,9 +1093,34 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             [action["observer_reason"] for action in self.actions(relaunched, "observer-fence")],
             ["observer_head_dead"],
         )
+        self.assertEqual(self.worker_actions(relaunched), ["worker-respawned"])
+        worker = self.worker_record()
+        self.assertEqual(worker.worker_respawns, 1)
+        self.assertEqual(
+            (worker.workspace, worker.report_generation, worker.attempt_round),
+            (before.workspace, before.report_generation, before.attempt_round),
+        )
+        self.assertNotEqual(worker.worker_head_run.get("run_id"), before.worker_head_run.get("run_id"))
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "in_progress")
         self.assertEqual(
             [action["action"] for action in self.actions(cleared, "observer-fence")], ["observer-fence-cleared"]
         )
+
+    def test_heads_whose_journals_record_a_scope_stop_are_replaced_on_one_tick(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.lose_pid_files(launched_boot=current_boot_id())
+        self.end_run(self.observers()["sprint:1"].head_run["run_id"])
+        self.end_run(self.worker_record().worker_head_run.get("run_id"))
+        self.expire_launch_grace()
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-relaunched"])
+        self.assertEqual(self.observers()["sprint:1"].launches, 2)
+        self.assertEqual(self.worker_actions(result), ["worker-respawned"])
+        self.assertEqual(self.worker_record().worker_respawns, 1)
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "in_progress")
 
     def test_an_unreadable_launch_identity_is_not_evidence_of_a_dead_head(self) -> None:
         """secretary-1478: a half-written or corrupt record answers nothing, so nothing is done."""

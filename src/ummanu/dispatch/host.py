@@ -146,7 +146,7 @@ from ummanu.runtime.head_runtime_backends import (
     is_legacy_record,
 )
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
-from ummanu.runtime.local_pty_head import head_run_turn_reading
+from ummanu.runtime.local_pty_head import RunEnd, head_run_end, head_run_turn_reading
 from ummanu.runtime.paths import configured_product_root
 from ummanu.runtime.prompt_document import PromptDocumentError
 from ummanu.runtime.role_env import BOARD_ACTOR_ENV
@@ -603,6 +603,17 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
 
         run_id = str((run or {}).get("run_id") or "") if isinstance(run, dict) else ""
         return head_run_loss_reason(self._local_pty_root(), run_id) if run_id else None
+
+    def head_run_end(
+        self, run: Mapping[str, Any], *, heartbeat_state: str, launched_boot: str
+    ) -> RunEnd | None:
+        """Whether this run has ended, read from its own run directory under this host's root."""
+        return head_run_end(
+            self._local_pty_root(),
+            str(run.get("run_id") or ""),
+            heartbeat_state=heartbeat_state,
+            launched_boot=launched_boot,
+        )
 
     def safe_recover_worker_continuation(
         self,

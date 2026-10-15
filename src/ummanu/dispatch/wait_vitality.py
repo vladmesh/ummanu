@@ -72,6 +72,7 @@ from ummanu.dispatch.worker_launch import (
 )
 from ummanu.dispatch.worker_report import prompt_worker_report as _prompt_worker_report
 from ummanu.runtime.head import HeadRun as _HeadRun
+from ummanu.runtime.local_pty_head import RunEnd
 
 
 def _wait_outcome(
@@ -134,6 +135,18 @@ def wait_watchdog(
             action=f"{kind}-heartbeat-identity-mismatch",
             reason="the heartbeat names a live process with a mismatching launch identity",
         )
+    if kind == "worker":
+        # A run proven ended (its journal's exit, or a launch identity lost with an earlier boot)
+        # reduces to Dead below, however the pid heartbeat reads.
+        pid_status = status.get("pid_status")
+        with tick_stage("observation"):
+            end = runtime.host.head_run_end(
+                record.worker_head_run,
+                heartbeat_state=str(pid_status.get("state") or "") if isinstance(pid_status, dict) else "",
+                launched_boot=record.worker_launch_boot,
+            )
+        if end is not None:
+            status = {**status, "run_end": end}
     # A turn that ended on a provider error is a provider verdict, and it outranks every
     # stall reading below (secretary-1799): a head idle at its prompt after a 401 is not late, it
     # was refused, and the answer is the next head of its chain, not a nudge, a respawn into the
@@ -267,6 +280,7 @@ def _decide_wait_by_verdict(
         # The heartbeat names a gone process: the existing not-live handling, from
         # the same evidence the reduction used.
         loss_reason = status.get("head_loss_reason")
+        run_end = status.get("run_end")
         return _trigger_wait_watchdog(runtime,
             task,
             record,
@@ -277,6 +291,8 @@ def _decide_wait_by_verdict(
             trigger=(
                 "memory_limit: the supervisor recorded a head memory-limit kill"
                 if loss_reason == "memory_limit"
+                else f"the head's run has ended ({run_end.describe()})"
+                if isinstance(run_end, RunEnd)
                 else "the pid heartbeat names a gone or unreaped process"
             ),
         )

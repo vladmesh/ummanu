@@ -82,6 +82,7 @@ from ummanu.runtime.head.handoff import (
     PromptHandoff,
 )
 from ummanu.runtime.head.local_pty import protocol
+from ummanu.runtime.head.local_pty.run_end import RunEnd as RunEnd
 from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from ummanu.runtime.head.memory import MemoryScopeError as MemoryScopeError
 from ummanu.runtime.head.operations import (
@@ -134,6 +135,7 @@ from ummanu.runtime.local_pty_inspection import (
 from ummanu.runtime.local_pty_journal import (
     _has_exited as _has_exited,
     _last_event_at,
+    head_run_end as head_run_end,
     head_run_first_record as head_run_first_record,
     head_run_journal as head_run_journal,
     head_run_journal_read as head_run_journal_read,
