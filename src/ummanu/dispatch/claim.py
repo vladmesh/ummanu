@@ -19,6 +19,8 @@ from ummanu.dispatch.helpers import _worker_id, scrub_host_output
 from ummanu.dispatch.host import _blocked_actions_and_their_infrastructure_twins
 from ummanu.dispatch.host_runtime.catalog import live_root_project_refusal
 from ummanu.dispatch.launch import (
+    CAUSE_ADMISSION_REFUSED,
+    FAILURE_CLASS_ADMISSION,
     STAGE_CLAIM,
     WORKER_ROLE,
     BringUpFailure,
@@ -316,7 +318,14 @@ def _sprint_admission_blocked(
     refusal: SprintAdmissionRefusal,
 ) -> dict[str, Any]:
     """Write the sprint admission refusal decided before the claim, immediately after it."""
-    failure = _unclaimed_preflight_failure(attempt_id=attempt_id, detail=refusal.detail)
+    failure = BringUpFailure(
+        failure_class=FAILURE_CLASS_ADMISSION,
+        cause=CAUSE_ADMISSION_REFUSED,
+        stage=STAGE_CLAIM,
+        role=WORKER_ROLE,
+        attempt_id="",
+        detail=refusal.detail,
+    )
     reason = (
         "the card was not given to a worker: it was refused at admission, so no workspace and "
         f"no head were created. [sprint admission: refusal={refusal.code}, "
@@ -498,7 +507,8 @@ def _write_claim_preflight_block(
     reason: str,
 ) -> None:
     """Nothing is computed here and nothing is read: the transition is the first statement made
-    about the claimed card, and the dispatcher's own bookkeeping only follows it.
+    about the claimed card, and the dispatcher's own bookkeeping only follows it. An admission
+    refusal releases the claim in that transition, since no work ever held it.
     """
     attempt_accounting.terminal_effect(runtime, 
         task,
@@ -525,6 +535,7 @@ def _write_claim_preflight_block(
         terminal_state="blocked",
         disposition="blocked",
         blocked_reason=_bring_up_terminal_reason(failure),
+        release_claim=failure.failure_class == FAILURE_CLASS_ADMISSION,
     )
     records.pop(ref, None)
     runtime.save_records(payload, records)

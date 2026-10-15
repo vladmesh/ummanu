@@ -556,6 +556,7 @@ def run_task_create(args: argparse.Namespace) -> int:
 
     def command() -> object:
         _validate_codex_mode_for_create(args)
+        _refuse_unrunnable_project(Path(_instance(args)), args.project, args.type)
         description = _read_body(args.body_file) if args.body_file else args.description
         writer = TaskWriter(card_client(_instance(args)), data_dir=resolve_data_dir(args))
         return writer.create(
@@ -591,6 +592,29 @@ def run_task_create(args: argparse.Namespace) -> int:
         )
 
     return run_task_command(command)
+
+
+def _refuse_unrunnable_project(instance: Path, project: str, task_type: str) -> None:
+    """A new card names a registered project; one a head runs needs it enabled, and a code card
+    needs a broad check whose receipt can attest the candidate.
+    """
+    from ummanu.board.completion_evidence import is_headless
+    from ummanu.product_issues import registered_bindings
+    from ummanu.projects.contract import candidate_receipt_refusal
+
+    binding = registered_bindings(instance).get(project.strip())
+    if binding is None:
+        raise TaskError("project_not_registered", f"project {project!r} is not in the instance project registry", 2)
+    if is_headless({"type": task_type.strip()}):
+        return
+    if binding.get("enabled") is not True:
+        raise TaskError(
+            "project_not_enabled",
+            f"project {project!r} is registered but not enabled for workloads, so no head would run this card",
+            2,
+        )
+    if task_type.strip() == "code" and (refusal := candidate_receipt_refusal(binding, instance=instance)):
+        raise TaskError("broad_check_not_attestable", f"{refusal}; cut research or change the adapter", 2)
 
 
 def _po_turn_session() -> str:

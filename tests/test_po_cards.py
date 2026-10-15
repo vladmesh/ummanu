@@ -19,6 +19,7 @@ import tempfile
 import threading
 import unittest
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
@@ -568,6 +569,8 @@ class CreateValidationTests(unittest.TestCase):
                 mock.patch("ummanu.task_commands.card_client"),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
+                (Path(tmp) / "projects").mkdir()
+                (Path(tmp) / "projects" / "ummanu.yaml").write_text("id: ummanu\n", encoding="utf-8")
                 code = main(
                     ["task", "create", "--role", "observer", "--instance", tmp, "--data-dir", tmp,
                      "--project", "ummanu", "--type", kind, "--title", "T", "--sprint", SPRINT]

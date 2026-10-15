@@ -207,7 +207,6 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             target="ready",
             reference="ummanu-2",
             sprint=sprint_ref,
-            blocked_by="ummanu-1",
             request_id="create-recovery-two",
             seed_ref="a" * 40,
             supersedes="ummanu-1",
@@ -218,6 +217,12 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             "saveTaskMetadata",
             task_id=int(str(first["id"]).rsplit("_", 1)[1]),
             values={"future_task_key": "opaque", "issues": "issue:recovery"},
+        )
+        # A stored dependency on the superseded card, which create refuses and recovery still carries.
+        client.call(
+            "saveTaskMetadata",
+            task_id=int(str(second["id"]).rsplit("_", 1)[1]),
+            values={"blocked_by": "ummanu-1"},
         )
         self.assertEqual(second["workspace"]["supersedes"], "ummanu-1")
         with client.transaction():

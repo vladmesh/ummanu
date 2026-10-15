@@ -138,13 +138,18 @@ def _comment_was_saved(result: Any) -> bool:
 
 
 def registered_projects(instance: str | Path) -> set[str]:
+    return set(registered_bindings(instance))
+
+
+def registered_bindings(instance: str | Path) -> dict[str, dict[str, Any]]:
+    """Every project registry entry of the instance, by its `id`."""
     root = Path(instance).expanduser()
     if root.name == "instance.yaml":
         root = root.parent
     projects = root / "projects"
     if not projects.is_dir():
         raise TaskError("validation", "project registry is unavailable", 2)
-    result: set[str] = set()
+    result: dict[str, dict[str, Any]] = {}
     for path in projects.glob("*.yaml"):
         try:
             payload = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -152,7 +157,7 @@ def registered_projects(instance: str | Path) -> set[str]:
             raise TaskError("validation", f"cannot read project registry entry {path.name}", 2) from None
         project_id = payload.get("id") if isinstance(payload, dict) else None
         if isinstance(project_id, str) and project_id:
-            result.add(project_id)
+            result[project_id] = payload
     return result
 
 

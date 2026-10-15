@@ -487,6 +487,25 @@ def module_contract(
     )
 
 
+def candidate_receipt_refusal(binding: dict[str, Any], *, instance: Path) -> str:
+    """Why this project's declared broad check can never attest a candidate tree, or `""`.
+
+    A standard-library `import_package` always resolves outside the candidate, so its receipt
+    fails import provenance whatever the tree holds. Refused and open contracts are the claim's.
+    """
+    verdict = decide(binding, instance=instance, workspace=None)
+    contract = verdict.contract or verdict.declared_contract
+    if contract is None:
+        return ""
+    package = contract.import_package.partition(".")[0]
+    if package not in sys.stdlib_module_names:
+        return ""
+    return (
+        f"the broad check of adapter {verdict.adapter!r} imports {package!r} from the standard "
+        "library, outside any candidate, so no receipt can attest a code card here"
+    )
+
+
 def _executable(interpreter: str) -> bool:
     try:
         return os.access(interpreter, os.X_OK) and Path(interpreter).is_file()

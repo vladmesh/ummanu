@@ -10,7 +10,7 @@ import yaml
 
 from ummanu.config import validate_instance
 from ummanu.dispatch.e2e import parse_e2e
-from ummanu.dispatch.launch import CAUSE_BASE_BRANCH_CONTRACT
+from ummanu.dispatch.launch import CAUSE_BASE_BRANCH_CONTRACT, CAUSE_PROJECT_NOT_ENABLED
 from ummanu.dispatch.launcher import (
     HeadLaunchError,
     claude_launch_model as _claude_launch_model,
@@ -97,9 +97,13 @@ class InstanceCatalog:
         if not binding:
             registered = getattr(self, "registered_bindings", self.bindings)
             if any(name in registered for name in candidates):
-                raise HostError(f"project {project!r} is registered but not enabled for workloads")
+                raise HostError(
+                    f"project {project!r} is registered but not enabled for workloads",
+                    bring_up_cause=CAUSE_PROJECT_NOT_ENABLED,
+                )
             raise HostError(
-                f"project {project!r} is not registered in the instance and is not enabled for workloads"
+                f"project {project!r} is not registered in the instance and is not enabled for workloads",
+                bring_up_cause=CAUSE_PROJECT_NOT_ENABLED,
             )
         repo = binding.get("repo")
         if not isinstance(repo, str) or not repo:
