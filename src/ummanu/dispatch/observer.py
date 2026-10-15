@@ -211,14 +211,16 @@ alive during its grace period. Reuse a supplied status when available.
 def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Observer state as an operator reads it, without opening a transcript."""
     rows = []
+    now = time.time()
     for ref, record in sorted(load_observers(payload).items()):
-        liveness = observer_alive(record)
+        liveness = observer_alive(record, now=now)
+        idle_reason = _idle_reason_at(record, now)
         rows.append(
             {
                 "sprint": ref,
                 "head": record.head,
                 "state": record.state,
-                "state_reason": record.state_reason,
+                "state_reason": idle_reason or record.state_reason,
                 "workspace": record.workspace,
                 "handle": record.handle,
                 "leaf": record.leaf,
@@ -239,8 +241,8 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "deferred_reason": record.deferred_reason,
                 "stopped_reason": record.stopped_reason,
                 "paused": record.paused_at > 0,
-                "idle_since": record.idle_since,
-                "idle_reason": record.idle_reason,
+                "idle_since": record.idle_since if idle_reason else 0.0,
+                "idle_reason": idle_reason,
                 "delivery": record.delivery.to_json(),
                 "wake_liveness": record.wake_liveness.to_json(),
                 "launch_attempts": record.launch_attempts,
@@ -248,6 +250,15 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _idle_reason_at(record: ObserverRecord, now: float) -> str:
+    """The idle explanation of a head idle right now, its quiet age read at `now`; empty otherwise."""
+    if record.state != "idle-grace":
+        return ""
+    if not record.idle_since:
+        return record.idle_reason
+    return f"{record.idle_reason}; its terminal has been quiet for {int(now - record.idle_since)}s"
 
 
 def observer_ack_deadline_seconds() -> int:
@@ -564,7 +575,7 @@ def _reconcile_open_sprint(
                 "action": "observer-idle",
                 "head": record.head,
                 "launches": record.launches,
-                "reason": work["reason"],
+                "reason": _idle_reason_at(record, time.time()),
             }
         if work["state"] == "waiting":
             _set_observer_state(record, "waiting", reason=work["reason"])
@@ -1729,14 +1740,10 @@ def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict
         last_activity = float(status.get("last_activity"))
     except (TypeError, ValueError):
         return {"state": "unknown", "reason": "the observer terminal has no activity timestamp"}
-    age = time.time() - last_activity
     return {
         "state": "idle",
         "since": last_activity,
-        "reason": (
-            "the observer head finished its turn and its terminal has been quiet for "
-            f"{int(age)}s with no unacknowledged significant card event"
-        ),
+        "reason": "the observer head finished its turn with no unacknowledged significant card event",
     }
 
 
