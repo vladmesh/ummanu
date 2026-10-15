@@ -69,8 +69,8 @@
     },
     "open_sprint_limit": {
       "type": "integer",
-      "enum": [1, 2],
-      "description": "How many sprints this installation may hold open at once. Absent means 1, which is the singleton every installation has by default. 2 is the pilot, and admits a second open sprint only when it is disjoint from the first."
+      "enum": [1, 2, 3],
+      "description": "How many sprints this installation may hold open at once. Absent means 1, which is the singleton every installation has by default. 2 or 3 admit another open sprint only when it is disjoint from every open one."
     },
     "po": {
       "type": "object",

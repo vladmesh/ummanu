@@ -1187,6 +1187,60 @@ class ProductIssueStore:
                 raise self._host_error(exc) from None
             return self.show_product(product_id)
 
+    def edit_product_projects(
+        self,
+        *,
+        product_id: str,
+        add: list[str],
+        remove: list[str],
+        reason: str,
+        actor: str,
+        request_id: str | None = None,
+        role: str = "po",
+    ) -> dict[str, Any]:
+        """Add and remove registered projects of one Product through the native audited replace;
+        PO only. A Product keeps at least one project, and a change to nothing writes nothing.
+        """
+        admit_role(role, actor, {"po"})
+        if not add and not remove:
+            raise TaskError("validation", "product edit needs --add-project, --remove-project or both", 2)
+        if set(add) & set(remove):
+            raise TaskError("validation", "a project is either added or removed, not both", 2)
+        if not reason.strip():
+            raise TaskError("validation", "product edit requires a non-empty reason", 2)
+        reference = f"product:{product_id}"
+        request_id = request_id or str(uuid.uuid4())
+        with self.transactions.reference_lock(reference) as lock, held_lock(lock):
+            self._reject_other_pending_reference_operation(reference, request_id)
+            self._reject_other_pending_typed_operation(reference, request_id)
+            from ummanu.board.host import Replace
+            from ummanu.board.models import Actor, EntityKind, Product
+
+            host = self._host()
+            try:
+                known = host.canon.event(request_id) if host.canon is not None else None
+            except ValueError as exc:
+                raise TaskError("validation", str(exc), 2) from None
+            current = host.read(EntityKind.PRODUCT, reference)
+            if not isinstance(current, Product):
+                raise TaskError("validation", f"{reference} is not a Product", 2)
+            if known is None:
+                unknown = sorted(set(add) - registered_projects(self.instance))
+                if unknown:
+                    raise TaskError("validation", "unknown registered project(s): " + ", ".join(unknown), 2)
+            projects = tuple(sorted((set(current.projects) | set(add)) - set(remove)))
+            if not projects:
+                raise TaskError("validation", f"{reference} would keep no project; a Product needs one", 2)
+            if known is None and projects == current.projects:
+                return self.show_product(product_id)
+            desired = Product(current.ref, current.title, current.state, projects, current.description)
+            try:
+                operation = Replace(desired, Actor(role, actor), reason, request_id=request_id)
+                self._host_mutation(lambda: host.replace(operation))
+            except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
+                raise self._host_error(exc) from None
+            return self.show_product(product_id)
+
     def create_issue(
         self,
         *,

@@ -1720,6 +1720,20 @@ payload names `add` (the owner's N), `authorized_by` (the comment's event id) an
 or stopped sprint refuses it. The waiting
 cards dispatch on the next tick, and the PO completes the decision card as usual.
 
+**A run dispatched by hand.** A stand run the PO starts itself (`workflow_dispatch`) is charged before
+the run:
+
+```bash
+python3 -P -m ummanu sprint e2e-charge --ref <sprint> --role po --run <run URL or id> --card <card> [--request-id ID]
+```
+
+`--role po` only, `--card` a card of that sprint, `--run` a GitHub Actions run URL or its numeric id.
+The charge is the dispatcher's conditional charge with dispatch id `manual-run-<run id>`, recorded with
+one `e2e_charged` audit event (`run`, `card`, `dispatch_id`); the default request id is
+`e2e-charge-<run id>`. A run already charged answers `already_charged` and charges nothing. A spent
+budget or a standing `e2e_refusal` refuses it (`e2e_budget_spent`, exit status 3) and nothing is
+written; a sprint that is not open is refused (`closed`).
+
 **Budget spent, a card outside every sprint.** At its cap the stage dispatches nothing:
 
 - a card with a PO origin ([PO delegation](#po-delegation)) gets the same decision card, cut with that
@@ -1883,6 +1897,7 @@ board export, checkpoint and restore carry their metadata and comments.
 
 ```bash
 python3 -P -m ummanu product create --role po --id ummanu --project ummanu --title Ummanu
+python3 -P -m ummanu product edit --role po --id ummanu --add-project PROJECT --remove-project PROJECT --reason REASON
 python3 -P -m ummanu issue create --role po --product ummanu --kind feature --priority P2 --title TITLE
 python3 -P -m ummanu issue create --role observer --kind improvement --priority P3 --title TITLE
 python3 -P -m ummanu issue list --product ummanu
@@ -1899,7 +1914,7 @@ Who writes what:
 
 | Verb | `po` | `observer` |
 | --- | --- | --- |
-| `product create` | yes | not offered |
+| `product create`, `product edit` | yes | not offered |
 | `issue create` | yes, any product (`--product` required) | yes, under the [identity guard](#the-sprint-guard), for its sprint's product |
 | `issue update-priority`, `issue append`, `issue edit` | yes | `role_forbidden` |
 | `issue close` | yes | `role_forbidden` (an observer's `sprint close` closes its sprint's declared issues on its verdicts, in its name) |
@@ -1918,7 +1933,10 @@ role, a worker or reviewer head the profile the dispatcher launched), and a PO s
 exit 2, before anything is read.
 
 A Product id is stable and unique; its non-empty project set may contain only ids registered under
-the instance `projects/` directory. Every new issue requires its Product, one kind (`bug`, `feature`,
+the instance `projects/` directory. `product edit` adds and removes projects of that set (each option
+repeatable, an added one must be registered, the set never becomes empty) with a non-empty reason, as
+one `entity.updated` audit event; a repeat of the request id replays, the same request id with another
+change is `validation`, and a change that leaves the set as it is writes nothing. Every new issue requires its Product, one kind (`bug`, `feature`,
 `question`, `improvement`) and one priority (`P0`–`P3`). A priority change requires a non-empty
 reason, adds an `[issue:priority]` board comment and a durable audit event. Only the PO closes an
 issue with `issue close`, with exactly one of `resolved`, `invalid`, `duplicate` or `wont_do`; closure
@@ -2277,6 +2295,8 @@ What `SprintWriter._write` answers for every sprint write it handles when the sp
 | `commented` | `accepted` |
 | `current_task_set` | `refused` — `closed`, exit status `3` |
 | `e2e_budget_raised` | `refused` — `closed`, exit status `3` |
+| `e2e_charged` | `refused` — `closed`, exit status `3` |
+| `executors_set` | `refused` — `closed`, exit status `3` |
 | `po_session_set` | `accepted` |
 | `production_allowed` | `refused` — `closed`, exit status `3` |
 | `owner_decisions_recorded` | `refused` — `closed`, exit status `3` |
@@ -2285,9 +2305,9 @@ What `SprintWriter._write` answers for every sprint write it handles when the sp
 
 A late budget charge updates the totals `show` reports but cannot stop the sprint again or change its
 status (the hard-limit edge is taken only from `open`). A restore rebuilds fields from a backup and is
-accepted on any status. `po_session_set` is written only by the PO service's resolver, which refuses to
-start a re-seed on a sprint that is not open; a repeat that finishes one begun while the sprint was open
-still records its session.
+accepted on any status. `po_session_set` is written by the PO service's resolver, which refuses to
+start a re-seed on a sprint that is not open (a repeat that finishes one begun while the sprint was open
+still records its session), and by `sprint set-po-session`, which refuses a sprint that is not open.
 
 ### Budget
 
@@ -2385,7 +2405,7 @@ state read, visit resolution, staged board/audit write) is serialized per card.
 
 ### The open-sprint limit
 
-The instance setting `open_sprint_limit` is `1` or `2`; absent means `1`. A value the schema refuses
+The instance setting `open_sprint_limit` is an integer from `1` to `3`; absent means `1`. A value the schema refuses
 fails closed to `1` (never widening the limit or stopping admission), and `validate_instance` reports
 an `open_sprint_limit` finding. The limit is read from installation config at admission time, so
 changes need no restart; an unreadable config answers `1`.
@@ -2395,10 +2415,10 @@ first board write, in this order:
 
 1. **disjoint project reservations**, at either limit: a project another open sprint reserves is
    refused, naming the project and holder;
-2. **a different product**, at limit 2 only: two open sprints may not share the owning Product. A
+2. **a different product**, at a limit above 1 only: two open sprints may not share the owning Product. A
    sprint with no product cannot be proven disjoint and is refused, whichever side it is on (the
    candidate is judged on its own value first);
-3. **non-overlapping canonical repository roots**, at limit 2 only, compared as absolute resolved
+3. **non-overlapping canonical repository roots**, at a limit above 1 only, compared as absolute resolved
    paths; nesting counts as overlap. A stored root that is not absolute is refused on either side, not
    resolved at check time. The candidate's own roots are judged before any pairwise comparison, whether
    or not another sprint is open;
@@ -2464,6 +2484,19 @@ option. A named profile is resolved against the head registry at `sprint create`
 field or audit event; an unknown profile or unreadable registry is refused. `sprint reopen` does not
 restate pins; they survive a close.
 
+The PO re-pins an open sprint with
+
+```bash
+python3 -P -m ummanu sprint executors --ref <sprint> --role po [--worker HEAD] [--reviewer HEAD] [--request-id ID]
+```
+
+At least one option; a role left out keeps its pin. The profiles are checked as at create, the write
+holds the admission lock and records one `executors_set` audit event (`pins`, `previous`). Cards cut
+after it run on the new pins; a card already cut keeps the profiles it was written with until a
+`task edit` restates them. A repeat of the request id replays, the same request id with other pins is
+`validation`, pins equal to the stored ones answer `already_set` with no event, and a sprint that is not
+open is refused (`closed`).
+
 The observer launch document prints both roles in an `## Executors` section: the pinned profile, or
 that the owner fixed none and the observer chooses per card.
 
@@ -2505,7 +2538,8 @@ session id or `null`) and `allowed_productions` (a list); a sprint opened before
 `[]`. The observer launch document prints both, as `## PO session` and `## Allowed productions`. The
 checkpoint export carries each only where set, restore writes it back, and sprint parity compares both.
 Neither is changed after create except `po_session` by the PO service's resolver below (the audit kind
-of that write is `po_session_set`, role `po`, actor `po-service`), and `allowed_productions`, which the
+of that write is `po_session_set`, role `po`, actor `po-service`) and by the PO's switch below, and
+`allowed_productions`, which the
 PO only extends with `sprint allow-production` ([Production rights](#production-rights), audit kind
 `production_allowed`).
 
@@ -2528,6 +2562,19 @@ answers `{session_id, created, repeated}`:
   none> no longer exists; opened <new> seeded with <why-doc path | no why-document found> and NOTES.md`,
   and then records the new session as its `po_session`. Closed replacements say `is closed`;
   missing replacements say `no longer exists`.
+
+**The switch.** The PO points an open sprint at another open PO session:
+
+```bash
+python3 -P -m ummanu sprint set-po-session --ref <sprint> --role po --session <session id> --request-id <ID>
+```
+
+The session has to exist and be open, else `validation`. The write records `po_session_set` (role `po`,
+the caller's actor, payload `po_session` and `previous`) and a sprint comment (role `po`, actor
+`po-service`): `the PO session of <sprint> switched from <old or none> to <new> by <actor>`. A repeat of
+the request id replays; the same request id with another session is `validation`; a session equal to
+the recorded one answers `already_set` with nothing written; a sprint that is not open is refused
+(`closed`). The switch seeds nothing: the session is already one the owner works in.
 
 `po.context_budget_bytes` in `instance.yaml` declares the sprint session budget, default `262144`.
 It must be a positive integer; malformed or unreadable configuration refuses before writes.

@@ -3358,6 +3358,8 @@ class TerminalSprintWriteTests(SprintProtocolFixture):
         "commented": ("accepted",),
         "current_task_set": REFUSED,
         "e2e_budget_raised": REFUSED,
+        "e2e_charged": REFUSED,
+        "executors_set": REFUSED,
         "po_session_set": ("accepted",),
         "production_allowed": REFUSED,
         "owner_decisions_recorded": REFUSED,

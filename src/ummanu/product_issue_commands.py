@@ -44,6 +44,13 @@ def add_product_issue_subcommands(subparsers) -> None:
     _common(show)
     show.add_argument("--id", required=True)
     show.set_defaults(handler=run_product_show)
+    edit = product_sub.add_parser("edit", help="PO only: add or remove registered projects of a Product")
+    _common(edit, write=True, roles=("po",))
+    edit.add_argument("--id", required=True)
+    edit.add_argument("--add-project", action="append", default=[])
+    edit.add_argument("--remove-project", action="append", default=[])
+    edit.add_argument("--reason", required=True)
+    edit.set_defaults(handler=run_product_edit)
     lanes = product_sub.add_parser(
         "reconcile-lanes",
         help="move Product and Issue rows into the lane of their product; plans unless --apply",
@@ -177,6 +184,21 @@ def run_product_list(args):
 
 def run_product_show(args):
     return _run(args, lambda store: store.show_product(args.id))
+
+
+def run_product_edit(args):
+    return _write(
+        args,
+        lambda store, actor: store.edit_product_projects(
+            product_id=args.id,
+            add=args.add_project,
+            remove=args.remove_project,
+            reason=args.reason,
+            actor=actor,
+            request_id=args.request_id,
+            role=args.role,
+        ),
+    )
 
 
 def run_product_reconcile_lanes(args):

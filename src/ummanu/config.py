@@ -25,7 +25,7 @@ from referencing.jsonschema import DRAFT202012
 #: paid four times per dashboard.
 _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
-from ummanu.kernel.sprint_policy import budget_thresholds, open_sprint_limit_invalid
+from ummanu.kernel.sprint_policy import MAX_OPEN_SPRINT_LIMIT, budget_thresholds, open_sprint_limit_invalid
 from ummanu.runtime.paths import instance_file as config_file
 
 # schema name -> file in ummanu/schemas/
@@ -386,13 +386,14 @@ def validate_instance(path: Path) -> InstanceReport:
             )
         # The schema says which values are accepted; this says what the installation
         # does with one it refuses, because failing closed is silent otherwise: the
-        # limit stays at one open sprint and an operator who set 3 sees no effect.
+        # limit stays at one open sprint and an operator who set 4 sees no effect.
         if open_sprint_limit_invalid(instance):
             errors.append(
                 SchemaError(
                     instance_file.name,
                     "open_sprint_limit",
-                    "must be the integer 1 or 2; this installation holds one open sprint until it is",
+                    f"must be an integer from 1 to {MAX_OPEN_SPRINT_LIMIT}; "
+                    "this installation holds one open sprint until it is",
                 )
             )
     name = instance.get("name", "") if isinstance(instance, dict) else ""

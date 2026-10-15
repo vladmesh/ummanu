@@ -229,7 +229,48 @@ def add_sprint_subcommands(subparsers) -> None:
     decisions.add_argument("--request-id")
     _add_data_dir_args(decisions)
     decisions.set_defaults(handler=run_owner_decisions)
+    _add_po_edit_subcommands(commands)
     sprint.set_defaults(handler=usage_handler("sprint subcommand required"))
+
+
+def _add_po_edit_subcommands(commands) -> None:
+    """The PO's edits of an open sprint. Every board role parses: the writer admits `po` only and
+    answers the others with `role_forbidden`.
+    """
+    executors = commands.add_parser(
+        "executors",
+        help="PO only: re-pin the worker and/or reviewer profile of an open sprint; cards cut after it "
+        "run on the new pins",
+    )
+    for executor in ("worker", "reviewer"):
+        executors.add_argument(
+            f"--{executor}", help=f"head profile the sprint's next cards run their {executor} on; omit it to keep the pin"
+        )
+    _add_po_edit_arguments(executors, run_executors)
+    switched = commands.add_parser(
+        "set-po-session", help="PO only: point an open sprint at another open PO session"
+    )
+    switched.add_argument("--session", required=True, help="the open PO session the sprint answers to from now on")
+    _add_po_edit_arguments(switched, run_set_po_session, request_id_required=True)
+    charged = commands.add_parser(
+        "e2e-charge",
+        help="PO only: charge one manually dispatched e2e run to the sprint's e2e budget before the run; "
+        "a repeat of the same run charges nothing",
+    )
+    charged.add_argument("--run", required=True, help="the workflow run URL, or its run id")
+    charged.add_argument("--card", required=True, help="the sprint card the run verifies")
+    _add_po_edit_arguments(charged, run_e2e_charge)
+
+
+def _add_po_edit_arguments(
+    command: argparse.ArgumentParser, handler: Callable[[argparse.Namespace], int], *, request_id_required: bool = False
+) -> None:
+    command.add_argument("--ref", required=True)
+    command.add_argument("--role", required=True, choices=tuple(role.value for role in Role))
+    command.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
+    command.add_argument("--request-id", required=request_id_required)
+    _add_data_dir_args(command)
+    command.set_defaults(handler=handler)
 
 
 def _runs(minimum: int) -> Callable[[str], int]:
@@ -544,6 +585,47 @@ def run_e2e_budget(args: argparse.Namespace) -> int:
             reference=args.ref,
             add=args.add,
             authorized_by=args.authorized_by,
+            request_id=args.request_id,
+        ),
+    )
+
+
+def run_executors(args: argparse.Namespace) -> int:
+    return _write(
+        args,
+        lambda writer: writer.set_executors(
+            role=args.role,
+            actor=args.actor or args.role,
+            reference=args.ref,
+            worker=args.worker,
+            reviewer=args.reviewer,
+            request_id=args.request_id,
+        ),
+    )
+
+
+def run_set_po_session(args: argparse.Namespace) -> int:
+    return _write(
+        args,
+        lambda writer: writer.switch_po_session(
+            role=args.role,
+            actor=args.actor or args.role,
+            reference=args.ref,
+            session_id=args.session,
+            request_id=args.request_id,
+        ),
+    )
+
+
+def run_e2e_charge(args: argparse.Namespace) -> int:
+    return _write(
+        args,
+        lambda writer: writer.charge_manual_e2e(
+            role=args.role,
+            actor=args.actor or args.role,
+            reference=args.ref,
+            run=args.run,
+            card=args.card,
             request_id=args.request_id,
         ),
     )
