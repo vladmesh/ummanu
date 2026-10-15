@@ -2013,7 +2013,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         )
         before = self.board_snapshot()
 
-        with self.assertRaisesRegex(TaskError, "one active code task") as raised:
+        with self.assertRaisesRegex(TaskError, "waiting for a code slot of project ummanu .*ummanu-999") as raised:
             self.writer.claim(
                 role="dispatcher",
                 actor="d",
@@ -2168,13 +2168,44 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         )
         before = self.board_snapshot()
 
-        with self.assertRaisesRegex(TaskError, "one active code task") as raised:
+        with self.assertRaisesRegex(TaskError, "waiting for a code slot of project ummanu .*ummanu-999") as raised:
             self.writer.claim(
                 role="dispatcher",
                 actor="d",
                 reference="ummanu-468",
                 worker="ummanu-468-runtime",
             )
+
+        self.assertEqual(raised.exception.code, "capacity_reached")
+        self.assertBoardUnchanged(before)
+
+    def test_a_project_code_concurrency_of_two_admits_a_second_code_card(self) -> None:
+        self.clear_card_metadata("ummanu-468", "claim")
+        self.add_card(
+            reference="ummanu-999",
+            title="Other code",
+            state="in_progress",
+            metadata={"project": "ummanu", "task_type": "code", "claim": "other-worker"},
+        )
+
+        claimed = self.writer.claim(
+            role="dispatcher", actor="d", reference="ummanu-468", worker="ummanu-468-runtime", code_cap=2
+        )
+
+        self.assertEqual(claimed["task"]["state"], "in_progress")
+
+    def test_a_full_installation_names_the_cards_holding_its_slots(self) -> None:
+        self.clear_card_metadata("ummanu-468", "claim")
+        self.add_card(
+            reference="other-1",
+            title="Research elsewhere",
+            state="in_progress",
+            metadata={"project": "other", "task_type": "research", "claim": "other-worker"},
+        )
+        before = self.board_snapshot()
+
+        with self.assertRaisesRegex(TaskError, r"waiting for a slot \(head_capacity 1\): other-1") as raised:
+            self.writer.claim(role="dispatcher", actor="d", reference="ummanu-468", worker="w", cap=1)
 
         self.assertEqual(raised.exception.code, "capacity_reached")
         self.assertBoardUnchanged(before)
@@ -2191,7 +2222,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         )
         before = self.board_snapshot()
 
-        with self.assertRaisesRegex(TaskError, "one active code task") as raised:
+        with self.assertRaisesRegex(TaskError, "waiting for a code slot of project ummanu .*ummanu-999") as raised:
             self.writer.claim(
                 role="dispatcher",
                 actor="d",

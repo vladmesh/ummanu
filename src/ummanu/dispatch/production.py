@@ -73,6 +73,7 @@ from ummanu.dispatch.tick_telemetry import (
 from ummanu.dispatch.types import STOPPED_BY_RECONCILIATION, HostError
 from ummanu.dispatch.wait_cards import pending_wait_blockers
 from ummanu.infra.checkpoint_run import load_checkpoint_state
+from ummanu.kernel.capacity_policy import code_slot_wait
 from ummanu.kernel.errors import TaskError
 from ummanu.runtime.head.handoff import (
     active_budget,
@@ -1466,11 +1467,10 @@ def _production_claim_ready(
     fence = fence or {"sprints": set(), "projects": set(), "refs": set()}
     blocked_sprints = set((blocked_scopes or {}).get("sprints") or ())
     blocked_projects = set((blocked_scopes or {}).get("projects") or ())
-    active_code_projects = {
-        str(task.get("project") or "")
-        for task in _production_tasks(runtime, set(ACTIVE_STATES))
-        if task.get("type") == "code" and task.get("project") and not is_steward_report(task)
-    }
+    active_code: dict[str, list[str]] = {}
+    for active in _production_tasks(runtime, set(ACTIVE_STATES)):
+        if active.get("type") == "code" and active.get("project") and not is_steward_report(active):
+            active_code.setdefault(str(active["project"]), []).append(str(active["ref"]))
     skipped: list[dict[str, str]] = []
     sprint_cache: dict[str, dict[str, Any]] = {}
     sprint_errors: dict[str, str] = {}
@@ -1536,14 +1536,12 @@ def _production_claim_ready(
             if sprint.get("status") != "open":
                 skipped.append({"ref": task["ref"], "reason": "linked sprint is stopped or closed"})
                 continue
-        if task.get("type") == "code" and task.get("project") in active_code_projects:
-            skipped.append(
-                {
-                    "ref": task["ref"],
-                    "reason": "project has an active code task",
-                }
-            )
-            continue
+        if task.get("type") == "code" and project:
+            code_cap = runtime.catalog.code_concurrency(project)
+            holders = active_code.get(project, [])
+            if len(holders) >= code_cap:
+                skipped.append({"ref": task["ref"], "reason": code_slot_wait(project, code_cap, holders)})
+                continue
         attempt_id = new_attempt_id()
         resume_workspaces = payload.get("resume_workspaces")
         resume_workspace = isinstance(resume_workspaces, dict) and task["ref"] in resume_workspaces

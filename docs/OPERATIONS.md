@@ -3495,6 +3495,14 @@ reason under `skipped_ready`, and the scan continues with the next card.
 - `probe_broken`: run the registry's probe string by hand under the dispatcher's environment and repair
   what it names; `doctor` prints the failing line.
 
+### Claim capacity
+
+`head_capacity` in `instance.yaml` (default 3) bounds the cards with a head (code, research, infra)
+active at once across the installation; decision, operation and wait cards take no slot. A project's
+`policy.code_concurrency` (default 1, 0 claims none) bounds its own active code cards inside that.
+`ummanu status` prints both. A card the limits keep in Ready is skipped with the reason `waiting for a
+slot` and the cards holding the slots.
+
 ### Head status in a live workspace
 
 Whether a workspace that looks empty has a head:

@@ -1764,6 +1764,21 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.reader.show("ummanu-511")["state"], "ready")
         self.assertEqual(self.reader.show("other-1")["state"], "in_progress")
         self.assertEqual(claimed["skipped_ready"][0]["ref"], "ummanu-511")
+        self.assertEqual(
+            claimed["skipped_ready"][0]["reason"],
+            "waiting for a code slot of project ummanu (code_concurrency 1): ummanu-510",
+        )
+
+    def test_a_project_code_concurrency_of_two_claims_a_second_code_card(self) -> None:
+        self.board.move(12, "in_progress")
+        self.board.save_metadata(12, {"claim": "ummanu-510-pilot", "resolved_head": "codex"})
+        self.runtime.catalog.code_caps["ummanu"] = 2
+
+        result = self.runtime.production_tick()
+
+        claimed = next(action for action in result["actions"] if action.get("step") == "claim")
+        self.assertEqual(claimed["pilot_ref"], "ummanu-511")
+        self.assertEqual(self.reader.show("ummanu-511")["state"], "in_progress")
 
     # A blocked card suppresses claims in its own sprint and its own project, and nowhere else
     # (secretary-1047). The helpers below build the two-open-sprint installation the pilot setting

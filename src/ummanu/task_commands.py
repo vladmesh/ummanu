@@ -26,6 +26,7 @@ from ummanu.board.task_routing import (
 from ummanu.cli_output import print_error, print_json, usage_handler
 from ummanu.config import ConfigError, DataDirError, instance_data_dir, load_config
 from ummanu.head_registry import HeadRegistryConfigError, installed_pair, missing_snapshot
+from ummanu.kernel.capacity_policy import DEFAULT_HEAD_CAPACITY
 from ummanu.kernel.errors import TaskError
 from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV
 from ummanu.runtime.cli_composition import add_command_parser
@@ -345,7 +346,7 @@ def add_task_subcommands(subparsers) -> None:
     task_claim.add_argument("--resolved-review-head", default="")
     task_claim.add_argument("--slug", default="")
     task_claim.add_argument("--base-branch", default="")
-    task_claim.add_argument("--cap", type=int, default=3)
+    task_claim.add_argument("--cap", type=int, default=DEFAULT_HEAD_CAPACITY)
     task_claim.set_defaults(handler=run_task_claim)
     reconcile_audit = task_subcommands.add_parser("reconcile-audit")
     _add_data_dir_args(reconcile_audit)

@@ -763,6 +763,9 @@ def run_status(args: argparse.Namespace) -> int:
         return 0
     print(f"Ummanu status: {snapshot['installation']['name'] or 'unnamed'}")
     print(f"active attempts: {len(snapshot['dispatcher']['active_attempts'])}")
+    capacity = snapshot["installation"]["capacity"]
+    code = ", ".join(f"{project} {cap}" for project, cap in sorted(capacity["code_concurrency"].items()))
+    print(f"capacity: {capacity['head_capacity']} cards with a head at once; code cards per project: {code or 'none'}")
     canon = snapshot["installation"]["head_registry"]
     if canon["error"]:
         print(f"head registry: {canon['error']}")
