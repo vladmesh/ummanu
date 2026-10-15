@@ -156,13 +156,15 @@ class _GhHost:
     `check_runs` as a list is served the way GitHub serves it: in pages of the requested size, each
     carrying the list's length as `total_count`. As a callable it answers each page number itself;
     anything else is the raw answer for every page. `status` as a list is a well-formed combined
-    status for the merge commit; anything else is its raw answer.
+    status for the merge commit; anything else is its raw answer. `dynamic_runs` as a list holds the
+    ids of the commit's `dynamic` workflow runs; anything else is their raw answer.
     """
 
     def __init__(self, *, check_runs: Any = (), status: Any = (), logs: dict[str, str] | None = None,
-                 required: list[str] | None = None, merge_commit: str = SHA) -> None:
+                 required: list[str] | None = None, merge_commit: str = SHA, dynamic_runs: Any = ()) -> None:
         self.check_runs = check_runs
         self.status = status
+        self.dynamic_runs = dynamic_runs
         self.logs = logs or {}
         self.merge_commit = merge_commit
         self.calls: list[list[str]] = []
@@ -205,6 +207,11 @@ class _GhHost:
                 if isinstance(self.status, (list, tuple)):
                     return self._answer({"sha": SHA, "total_count": len(self.status), "statuses": list(self.status)})
                 return self._answer(self.status)
+            if path.endswith("/actions/runs") and query.get("event") == "dynamic" and query.get("head_sha") == SHA:
+                if isinstance(self.dynamic_runs, (list, tuple)):
+                    runs = [{"id": run_id, "event": "dynamic"} for run_id in self.dynamic_runs]
+                    return self._answer({"total_count": len(runs), "workflow_runs": runs})
+                return self._answer(self.dynamic_runs)
         if args[:3] == ["gh", "run", "view"] and "--log-failed" in args:
             return _completed(self.logs.get(args[3], ""))
         raise AssertionError(f"unexpected gh call {args}")
@@ -547,6 +554,19 @@ class ResolutionTests(unittest.TestCase):
             [o["result"] for o in post_merge.reconcile_post_merge_watches(runtime, payload, {}, now=1001.0)],
             ["green"],
         )
+
+    def test_a_dynamic_workflow_run_is_not_a_check_of_the_merge(self) -> None:
+        """A failed Dependabot Updates job beside a green push CI is green; an unreadable list of the
+        dynamic runs holds the reading."""
+        checks = [_check("unit"), _check("Dependabot", conclusion="failure", run="777")]
+        runtime = _runtime(_GhHost(check_runs=checks, dynamic_runs=[777]))
+        payload: dict = {}
+        _watch(payload, workspace=_workspace(self.root, PUSH_MAIN))
+        outcomes = post_merge.reconcile_post_merge_watches(runtime, payload, {}, now=1001.0)
+        self.assertEqual([outcome["result"] for outcome in outcomes], ["green"])
+        self.assertEqual([run["id"] for run in runtime.writer.events[0]["payload"]["post_merge_ci"]["runs"]], ["501"])
+
+        self._never_green_until_timeout(_GhHost(check_runs=checks, dynamic_runs=HostError("gh: connection reset")))
 
     def test_check_runs_are_judged_only_across_every_page(self) -> None:
         """Page 1 is all green; a later page holds a pending and then a failed check. Partial pages
