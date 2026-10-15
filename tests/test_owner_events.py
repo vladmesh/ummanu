@@ -409,6 +409,7 @@ class SprintProducerTests(unittest.TestCase):
 
         writer = SprintWriter.__new__(SprintWriter)
         writer.client = SimpleNamespace(owner_events=self.events, _depth=1)
+        writer.data_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
         return writer
 
     def setUp(self) -> None:
