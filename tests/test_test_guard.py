@@ -11,8 +11,10 @@ from unittest import mock
 
 from ummanu.broad_check import _PROVENANCE_BOOTSTRAP, CheckSpec
 from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.host_runtime.workspace import TEST_GUARD_SKIPS_FILE
 from ummanu.dispatch.types import HostError
 from ummanu.runtime import role_env, test_guard
+from ummanu.runtime.role_env import WORKSPACE_NAMESPACE
 
 
 class TestGuardTests(unittest.TestCase):
@@ -204,8 +206,13 @@ class HostGuardOwnershipTests(unittest.TestCase):
         bin_alias.mkdir()
         (bin_alias / "bin").symlink_to(self.external / "bin")
         before = self.snapshot(self.external)
-        for interpreter in ("/usr/bin/python3", str(self.external / "bin/python"),
-                            ".shared/bin/python", "alias/bin/python", "missing/bin/python"):
+        for interpreter, reason in (
+            ("/usr/bin/python3", "outside the candidate"),
+            (str(self.external / "bin/python"), "outside the candidate"),
+            (".shared/bin/python", "outside the candidate"),
+            ("alias/bin/python", "outside the candidate"),
+            ("missing/bin/python", "absent"),
+        ):
             with self.subTest(interpreter=interpreter):
                 self.adapter["broad_check"]["interpreter"] = interpreter
                 self.host._install_workspace_test_guards(self.root, project="fixture")
@@ -213,6 +220,12 @@ class HostGuardOwnershipTests(unittest.TestCase):
                 self.assertTrue((site / test_guard.STARTUP_FILE).is_file())
                 self.assertTrue((site / test_guard.MODULE_FILE).is_file())
                 self.assertEqual(self.snapshot(self.external), before)
+                (line,) = self.skip_evidence()
+                self.assertIn(interpreter, line)
+                self.assertIn(reason, line)
+
+    def skip_evidence(self) -> list[str]:
+        return (self.root / WORKSPACE_NAMESPACE / TEST_GUARD_SKIPS_FILE).read_text().splitlines()
 
     def test_relative_and_absolute_local_venvs_guard_the_prefix_despite_executable_symlink(self) -> None:
         local = self.venv(self.root / ".venv")
@@ -223,6 +236,7 @@ class HostGuardOwnershipTests(unittest.TestCase):
                 site = next(local.glob("lib/python3*/site-packages"))
                 self.assertTrue((site / test_guard.STARTUP_FILE).is_file())
                 (site / test_guard.STARTUP_FILE).unlink()
+                self.assertEqual(self.skip_evidence(), [])
 
     def test_escaped_optional_site_is_skipped_but_required_failure_is_closed(self) -> None:
         local = self.root / "escaped"
@@ -235,6 +249,8 @@ class HostGuardOwnershipTests(unittest.TestCase):
         self.adapter["broad_check"]["interpreter"] = str(local / "bin/python")
         self.host._install_workspace_test_guards(self.root, project="fixture")
         self.assertEqual(self.snapshot(self.external), before)
+        (line,) = self.skip_evidence()
+        self.assertIn("site-packages escapes the prefix", line)
         (self.default / "pyvenv.cfg").unlink()
         with self.assertRaises(HostError):
             self.host._install_workspace_test_guards(self.root, project="fixture")
