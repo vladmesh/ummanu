@@ -114,6 +114,22 @@ def workspace_dirt(workspace: str | os.PathLike[str]) -> list[str]:
     return durability_dirt(completed.stdout)
 
 
+def workspace_head(workspace: str | os.PathLike[str]) -> str | None:
+    """The full commit id a checkout's HEAD names, or None when it has none to read."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "--verify", "HEAD^{commit}"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    head = completed.stdout.strip()
+    return head if completed.returncode == 0 and head else None
+
+
 def _sprint_guard_denial_request_id(request_id: str) -> str:
     """Keep a denied guard check from consuming the operation's retry key."""
     return "sprint-guard-denied-" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()

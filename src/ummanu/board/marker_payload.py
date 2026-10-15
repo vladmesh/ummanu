@@ -7,11 +7,30 @@ project back to the released dictionary shape when an event is staged.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
 WireItems: TypeAlias = tuple[tuple[str, object], ...]
+
+REPORT_STATUSES = frozenset({"done", "blocked", "partial"})
+_FULL_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+
+
+def check_report_fields(status: str, classification: object, partial_commit: object) -> None:
+    """A report's status-dependent fields: a blocked one is classified, only a partial one names a commit."""
+    if status == "blocked":
+        if classification not in {"external_fact", "wrong_task_definition"}:
+            raise ValueError("blocked Card report requires a supported classification")
+    elif classification is not None:
+        raise ValueError(f"{status} Card report carries no classification")
+    if partial_commit is None:
+        return
+    if status != "partial":
+        raise ValueError(f"{status} Card report carries no partial_commit")
+    if not isinstance(partial_commit, str) or not _FULL_COMMIT.match(partial_commit):
+        raise ValueError("partial Card report partial_commit must be a full 40-character commit id")
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,18 +38,15 @@ class ReportPayload:
     status: str
     body: str
     classification: str | None = None
+    partial_commit: str | None = None
     wire_items: WireItems = ()
 
     def __post_init__(self) -> None:
-        if self.status not in {"done", "blocked"}:
-            raise ValueError("Card report status must be done or blocked")
+        if self.status not in REPORT_STATUSES:
+            raise ValueError("Card report status must be done, blocked or partial")
         if not isinstance(self.body, str) or not self.body.strip():
             raise ValueError("Card report body must be non-empty")
-        if self.status == "blocked":
-            if self.classification not in {"external_fact", "wrong_task_definition"}:
-                raise ValueError("blocked Card report requires a supported classification")
-        elif self.classification is not None:
-            raise ValueError("done Card report carries no classification")
+        check_report_fields(self.status, self.classification, self.partial_commit)
 
     @property
     def marker(self) -> str:
@@ -42,6 +58,8 @@ class ReportPayload:
         data: dict[str, object] = {"marker": self.marker, "body": self.body, "status": self.status}
         if self.classification is not None:
             data["classification"] = self.classification
+        if self.partial_commit is not None:
+            data["partial_commit"] = self.partial_commit
         return data
 
 
@@ -122,9 +140,12 @@ def marker_payload_from_data(kind: str, reason: str, data: Mapping[str, Any]) ->
         classification = data.get("classification")
         if not isinstance(status, str):
             raise ValueError("Card report event has an unsupported marker payload")
+        partial_commit = data.get("partial_commit")
         if classification is not None and not isinstance(classification, str):
             raise ValueError("Card report classification must be a string or null")
-        payload: MarkerPayload = ReportPayload(status, body, classification, wire_items)
+        if partial_commit is not None and not isinstance(partial_commit, str):
+            raise ValueError("partial Card report partial_commit must be a full 40-character commit id")
+        payload: MarkerPayload = ReportPayload(status, body, classification, partial_commit, wire_items)
     elif kind == "card.verdict":
         status = data.get("status")
         if not isinstance(status, str):
@@ -145,9 +166,11 @@ def marker_payload_from_data(kind: str, reason: str, data: Mapping[str, Any]) ->
 
 
 __all__ = [
+    "REPORT_STATUSES",
     "DecisionPayload",
     "MarkerPayload",
     "ReportPayload",
     "VerdictPayload",
+    "check_report_fields",
     "marker_payload_from_data",
 ]

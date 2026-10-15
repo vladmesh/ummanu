@@ -42,6 +42,7 @@ NO_CANDIDATE_KINDS = frozenset({TaskType.RESEARCH.value, TaskType.INFRA.value, W
 INFRA_COMPLETION_MARKER = "completion:infra"
 RESEARCH_COMPLETION_MARKER = "completion:research"
 INFRA_REPORT_SECTIONS = ("What was done", "How to verify")
+PARTIAL_REPORT_SECTIONS = ("Done", "Not working", "Propose to extract")
 #: A PO-executed card's completion record: its marker and its two sections, by kind.
 PO_COMPLETION_MARKERS = {
     TaskType.DECISION.value: "completion:decision",
@@ -129,16 +130,19 @@ def _sections(body: str) -> dict[str, str]:
     return {name: "\n".join(lines).strip() for name, lines in found.items()}
 
 
-def _required_sections(body: str, names: tuple[str, ...], what: str) -> tuple[dict[str, str], str]:
+def _required_sections(
+    body: str, names: tuple[str, ...], what: str, hint: str = " (a command or an observation)"
+) -> tuple[dict[str, str], str]:
     """The named non-empty level-2 sections of `body`, and why it lacks some (`""` when it has all)."""
     sections = _sections(body)
     fields = {name: sections.get(name, "") for name in names}
     missing = [f"`## {name}`" for name, text in fields.items() if not text]
     if not missing:
         return fields, ""
+    listed = [f"`## {name}`" for name in names]
     return fields, (
-        f"{what} must carry two non-empty sections, `## {names[0]}` and `## {names[1]}` (a command "
-        "or an observation); missing or empty: " + ", ".join(missing)
+        f"{what} must carry the non-empty sections {', '.join(listed[:-1])} and {listed[-1]}{hint}; "
+        "missing or empty: " + ", ".join(missing)
     )
 
 
@@ -152,6 +156,11 @@ def _render_completion_record(marker: str, names: tuple[str, ...], fields: Mappi
 def infra_report_fields(body: str) -> tuple[dict[str, str], str]:
     """The two infra report fields, and why the body lacks them (`""` when it has both)."""
     return _required_sections(body, INFRA_REPORT_SECTIONS, "an infra done report")
+
+
+def partial_report_fields(body: str) -> tuple[dict[str, str], str]:
+    """The three partial report sections, and why the body lacks some (`""` when it has all)."""
+    return _required_sections(body, PARTIAL_REPORT_SECTIONS, "a partial report", hint="")
 
 
 def render_infra_completion_record(fields: Mapping[str, str]) -> str:

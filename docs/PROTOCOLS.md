@@ -2811,6 +2811,16 @@ must moving one in); it is a card comment carried by the transition event. The `
 the authoritative copy of block classifications. The report vocabulary is defined once, in
 `ummanu.tasks`.
 
+`report --kind partial` records progress the worker cannot finish in this card, as marker
+`report:partial` with status `partial` and no classification (`--classification` is refused). Its body
+must carry three non-empty level-2 sections: `## Done` (what works), `## Not working` (what the worker
+cannot get working) and `## Propose to extract` (what should become a separate card); a missing or
+empty one is refused with a `validation` error naming it, and nothing is written. On a card with a
+candidate (`code`) it refuses an uncommitted workspace as `done` does, needs no broad-check receipt,
+and records the checkout's HEAD as a full 40-character `partial_commit` in the `reported` event data,
+the seed for a later reslice. A `research` or `infra` partial report records no commit. The dispatcher
+treats it as neither a done nor a blocked report.
+
 ### Rejected SHAs and gate infrastructure reruns
 
 The dispatcher remembers the SHA a mechanical gate or red review rejected in the current attempt. A

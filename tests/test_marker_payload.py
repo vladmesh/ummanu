@@ -26,6 +26,34 @@ class MarkerPayloadTests(unittest.TestCase):
         self.assertIsInstance(operation.payload, ReportPayload)
         self.assertEqual(operation.data, data)
 
+    def test_partial_report_dictionary_keeps_its_commit(self) -> None:
+        data = {
+            "marker": "report:partial",
+            "body": "## Done\nparser\n## Not working\nwriter\n## Propose to extract\nwriter",
+            "status": "partial",
+            "classification": None,
+            "partial_commit": "f" * 40,
+        }
+        operation = MarkerComment(
+            "card:1",
+            EventKind.CARD_REPORTED,
+            Actor("worker", "worker-1"),
+            data["body"],
+            data,
+        )
+        self.assertIsInstance(operation.payload, ReportPayload)
+        self.assertEqual(operation.payload.partial_commit, "f" * 40)
+        self.assertEqual(operation.data, data)
+
+    def test_typed_partial_report_projects_its_commit(self) -> None:
+        payload = ReportPayload("partial", "progress", partial_commit="e" * 40)
+        self.assertEqual(
+            payload.to_event_data(),
+            {"marker": "report:partial", "body": "progress", "status": "partial", "partial_commit": "e" * 40},
+        )
+        with self.assertRaisesRegex(ValueError, "no classification"):
+            ReportPayload("partial", "progress", classification="external_fact")
+
     def test_verdict_dictionary_normalizes_without_changing_wire_shape(self) -> None:
         data = {
             "marker": "review:green",
