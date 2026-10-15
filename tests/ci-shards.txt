@@ -339,3 +339,7 @@ integration-dispatcher tests/test_broad_check_process.py
 unit tests/test_installation_retirement.py
 unit tests/test_cli_cold_composition.py
 unit tests/test_process_receipts.py
+unit tests/test_automation_run_findings.py
+unit tests/test_dispatcher_tick_exit.py
+unit tests/test_ready_skips.py
+unit tests/test_runs_journal.py
