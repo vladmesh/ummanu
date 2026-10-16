@@ -14506,9 +14506,9 @@ class DispatcherGateTests(unittest.TestCase):
         seen: list[str] = []
         real = gate_module._backend_call
 
-        def spy(host, args, label, *, cwd=None, project=""):
+        def spy(host, args, label, *, cwd=None, project="", extra_env=None):
             seen.append(label)
-            return real(host, args, label, cwd=cwd, project=project)
+            return real(host, args, label, cwd=cwd, project=project, extra_env=extra_env)
 
         return seen, mock.patch.object(gate_module, "_backend_call", spy)
 
