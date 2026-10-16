@@ -10278,11 +10278,12 @@ class HeadPromptTests(unittest.TestCase):
         for head in ("claude-opus", "codex", "gemini"):
             with self.subTest(head=head):
                 doc = self.host._review_prompt(self.task, "attempt-1", 3, record=self._head_record(head))
-                policy = doc.partition("\n## No subagents\n")[2]
+                opening, _, policy = doc.partition("\n## No subagents\n")
                 self.assertTrue(policy, "the review packet has a `## No subagents` section")
                 for anchor in anchors:
                     self.assertIn(anchor, policy)
-                self.assertEqual(len(self._command_lines(policy)), 2, "the verdict commands follow the policy")
+                self.assertEqual(len(self._command_lines(opening)), 2, "the verdict commands open the packet")
+                self.assertEqual(self._command_lines(policy), [])
 
     def test_worker_packet_points_at_the_receipt_and_forbids_a_scrolled_pane_rerun(self) -> None:
         """secretary-1406: the packet used to leave the evidence in the terminal, so the only way
