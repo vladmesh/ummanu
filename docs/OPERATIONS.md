@@ -154,8 +154,10 @@ runtime user's global `core.hooksPath` at that directory of the product checkout
 role's managed git config names it too. The hook refuses a remote ref deletion and a non-fast-forward
 update (what `--force` and `--force-with-lease` produce) and names the ref. Set
 `UMMANU_ALLOW_REMOTE_REWRITE=1` on the one push that must rewrite or delete; launched roles never
-inherit it. The dispatcher sets it only on its leased branch publication. The global path shadows a
-checkout's own `.git/hooks`; a repository-local `core.hooksPath` still wins. `ummanu doctor` reports
+inherit it. The dispatcher sets it only on its leased branch publication. The global path would hide a
+checkout's default hooks directory, so the step refuses, naming each hook, while a registered checkout
+or any of its linked worktrees has an executable hook there and no repository or worktree
+`core.hooksPath` of its own. `ummanu doctor` reports
 `git_hooks_path` when the hook is missing or the global path names anything else; `ummanu upgrade`
 repairs it.
 

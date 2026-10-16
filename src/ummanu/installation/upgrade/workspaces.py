@@ -110,7 +110,10 @@ def step_git_hooks(context: UpgradeContext) -> StepResult:
         return StepResult("git-hooks", "failed", "installation runtime home is unresolved")
     target = git_hooks.hooks_dir(context.product_root)
     try:
-        changed = git_hooks.install_hooks_path(context.runtime_home, context.product_root, dry_run=context.dry_run)
+        checkouts = [binding["repo"] for binding in context.report.bindings if isinstance(binding.get("repo"), str)]
+        changed = git_hooks.install_hooks_path(
+            context.runtime_home, context.product_root, checkouts, dry_run=context.dry_run
+        )
         if changed and not context.dry_run:
             _set_runtime_owner(context.runtime_home / ".gitconfig", context.runtime_user)
     except (git_hooks.GitHooksError, GitError) as exc:

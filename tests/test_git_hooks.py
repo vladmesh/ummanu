@@ -39,7 +39,7 @@ class HookedRepositoryFixture(unittest.TestCase):
         self.addCleanup(environment.stop)
         for name in ("GIT_CONFIG_GLOBAL", "XDG_CONFIG_HOME", "GIT_DIR", "GIT_WORK_TREE", git_hooks.REWRITE_OPT_OUT_ENV):
             os.environ.pop(name, None)
-        self.assertTrue(git_hooks.install_hooks_path(self.home, PRODUCT_ROOT))
+        self.assertTrue(git_hooks.install_hooks_path(self.home, PRODUCT_ROOT, []))
         self.bare = self.root / "remote.git"
         self.git(self.root, "init", "--quiet", "--bare", "--initial-branch", "main", str(self.bare))
         self.work = self.root / "work"
@@ -136,8 +136,8 @@ class HooksPathInstallTests(unittest.TestCase):
         assert unset is not None
         self.assertIn("(unset)", str(unset["message"]))
 
-        self.assertTrue(git_hooks.install_hooks_path(self.home, PRODUCT_ROOT))
-        self.assertFalse(git_hooks.install_hooks_path(self.home, PRODUCT_ROOT))
+        self.assertTrue(git_hooks.install_hooks_path(self.home, PRODUCT_ROOT, []))
+        self.assertFalse(git_hooks.install_hooks_path(self.home, PRODUCT_ROOT, []))
 
         self.assertEqual(git_hooks.configured_hooks_path(self.home), str(git_hooks.hooks_dir(PRODUCT_ROOT)))
         self.assertIsNone(git_hooks.hooks_path_finding(self.home, PRODUCT_ROOT))
@@ -162,8 +162,74 @@ class HooksPathInstallTests(unittest.TestCase):
         assert finding is not None
         self.assertIn("missing", str(finding["message"]))
         with self.assertRaises(git_hooks.GitHooksError):
-            git_hooks.install_hooks_path(self.home, product)
+            git_hooks.install_hooks_path(self.home, product, [])
         self.assertEqual(git_hooks.configured_hooks_path(self.home), "")
+
+
+class ShadowedCheckoutHookTests(unittest.TestCase):
+    """A registered checkout or linked worktree that runs its own hook keeps the global path unset."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.checkout = self.root / "project"
+        self.git("init", "--quiet", "--initial-branch", "main", str(self.checkout))
+        self.git("-C", str(self.checkout), "commit", "--quiet", "--allow-empty", "-m", "initial")
+        self.hooks = self.checkout / ".git" / "hooks"
+        self.hooks.mkdir(exist_ok=True)
+
+    def git(self, *args: str) -> None:
+        subprocess.run(
+            ["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid", *args],
+            env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+
+    def hook(self, name: str) -> Path:
+        path = self.hooks / name
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def assert_refused_naming(self, hook: Path) -> None:
+        with self.assertRaisesRegex(git_hooks.GitHooksError, str(hook)):
+            git_hooks.install_hooks_path(self.home, PRODUCT_ROOT, [self.checkout])
+        self.assertEqual(git_hooks.configured_hooks_path(self.home), "")
+
+    def test_an_executable_default_hook_of_a_registered_checkout_refuses_the_install(self) -> None:
+        self.assert_refused_naming(self.hook("pre-commit"))
+
+    def test_a_linked_worktree_that_runs_the_default_hooks_refuses_the_install(self) -> None:
+        hook = self.hook("pre-commit")
+        own = self.root / "own-hooks"
+        own.mkdir()
+        self.git("-C", str(self.checkout), "config", "extensions.worktreeConfig", "true")
+        self.git("-C", str(self.checkout), "config", "--worktree", "core.hooksPath", str(own))
+        self.assertEqual(git_hooks.shadowed_hooks([self.checkout]), [])
+
+        linked = self.root / "linked"
+        self.git("-C", str(self.checkout), "worktree", "add", "--quiet", str(linked))
+        self.git("-C", str(linked), "config", "--worktree", "--unset", "core.hooksPath")
+
+        self.assertEqual(git_hooks.shadowed_hooks([self.checkout]), [str(hook)])
+        self.assert_refused_naming(hook)
+
+    def test_samples_a_local_hooks_path_and_an_absent_checkout_do_not_refuse(self) -> None:
+        (self.hooks / "pre-commit.sample").write_text("#!/bin/sh\n", encoding="utf-8")
+        (self.hooks / "pre-commit.sample").chmod(0o755)
+        self.hook("pre-push")
+        self.git("-C", str(self.checkout), "config", "core.hooksPath", str(self.root / "own-hooks"))
+
+        self.assertTrue(
+            git_hooks.install_hooks_path(self.home, PRODUCT_ROOT, [self.checkout, self.root / "absent"])
+        )
+        self.assertEqual(git_hooks.configured_hooks_path(self.home), str(git_hooks.hooks_dir(PRODUCT_ROOT)))
 
 
 class DispatcherPublicationTests(HookedRepositoryFixture):
