@@ -96,7 +96,7 @@ def _contained_in_candidate(host, workspace: str, sha: str, head: str) -> bool:
 
 
 def _push_leased(host, workspace: str, branch: str, expected: str, project: str):
-    """Push the candidate under a lease on `expected` — the empty string meaning "must not exist".
+    """Push the candidate under a lease on `expected`; the empty string means "must not exist".
 
     Only this push opts out of the host pre-push hook; the lease is its fence against foreign writes.
     """

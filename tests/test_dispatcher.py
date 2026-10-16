@@ -13509,12 +13509,12 @@ class DispatcherGateTests(unittest.TestCase):
             host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
             original = host.run_capture
 
-            def forged(args, label, *, cwd=None):
+            def forged(args, label, *, cwd=None, extra_env=None):
                 if label == "gate candidate history":
                     return subprocess.CompletedProcess(
                         args, 0, "Co-Authored-By: Claude <noreply@anthropic.com>\n", ""
                     )
-                return original(args, label, cwd=cwd)
+                return original(args, label, cwd=cwd, extra_env=extra_env)
 
             with mock.patch.object(host, "run_capture", side_effect=forged):  # noqa: SIM117
                 with self.assertRaisesRegex(HostError, "candidate history could not be read"):
@@ -13546,10 +13546,10 @@ class DispatcherGateTests(unittest.TestCase):
             host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
             original = host.run_capture
 
-            def message_fails(args, label, *, cwd=None):
+            def message_fails(args, label, *, cwd=None, extra_env=None):
                 if label == "gate candidate history message":
                     return subprocess.CompletedProcess(args, 128, "", "fatal: bad object")
-                return original(args, label, cwd=cwd)
+                return original(args, label, cwd=cwd, extra_env=extra_env)
 
             with mock.patch.object(host, "run_capture", side_effect=message_fails):  # noqa: SIM117
                 with self.assertRaisesRegex(HostError, "candidate history could not be read for"):
@@ -13561,10 +13561,10 @@ class DispatcherGateTests(unittest.TestCase):
             host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
             original = host.run_capture
 
-            def decoding_fails(args, label, *, cwd=None):
+            def decoding_fails(args, label, *, cwd=None, extra_env=None):
                 if label == "gate candidate history message":
                     raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
-                return original(args, label, cwd=cwd)
+                return original(args, label, cwd=cwd, extra_env=extra_env)
 
             with mock.patch.object(host, "run_capture", side_effect=decoding_fails):  # noqa: SIM117
                 with self.assertRaisesRegex(HostError, "could not be decoded"):
@@ -13576,10 +13576,10 @@ class DispatcherGateTests(unittest.TestCase):
             host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
             original = host.run_capture
 
-            def only_the_history_fails(args, label, *, cwd=None):
+            def only_the_history_fails(args, label, *, cwd=None, extra_env=None):
                 if label == "gate candidate history":
                     return subprocess.CompletedProcess(args, 128, "", "fatal: bad revision")
-                return original(args, label, cwd=cwd)
+                return original(args, label, cwd=cwd, extra_env=extra_env)
 
             with mock.patch.object(  # noqa: SIM117
                 host, "run_capture", side_effect=only_the_history_fails
@@ -13797,8 +13797,8 @@ class DispatcherGateTests(unittest.TestCase):
             foreign: list[str] = []
             real = host.run_capture
 
-            def move_the_remote_after_the_read(args, label, *, cwd=None):
-                answer = real(args, label, cwd=cwd)
+            def move_the_remote_after_the_read(args, label, *, cwd=None, extra_env=None):
+                answer = real(args, label, cwd=cwd, extra_env=extra_env)
                 if label == "gate remote branch sha" and not foreign:
                     foreign.append(self._foreign_push(root, branch, "race"))
                 return answer
