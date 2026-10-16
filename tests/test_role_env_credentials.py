@@ -65,6 +65,47 @@ class RoleCredentialEnvTests(unittest.TestCase):
                 self.assertEqual(self._git(env, "config", "user.email").stdout, f"{OWNER_EMAIL}\n")
                 self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
 
+    def test_an_inherited_command_scope_git_config_names_no_helper_under_any_role(self) -> None:
+        hostile = {
+            **self._owner_env(),
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "!gh auth git-credential",
+            "GIT_CONFIG_PARAMETERS": "'credential.helper'='!gh auth git-credential'",
+        }
+        self.assertIn("gh auth", self._git(hostile, "config", "--get-all", "credential.helper").stdout)
+        for role in role_env.ROLE_ALLOWLIST:
+            with self.subTest(role=role):
+                env = role_env.runtime_env(role, base_env=hostile, env_file=self.home / "absent.env")
+                helpers = self._git(env, "config", "--get-all", "credential.helper")
+                self.assertEqual((helpers.returncode, helpers.stdout), (1, ""))
+
+    def test_an_inherited_askpass_program_is_never_asked_for_a_login_under_any_role(self) -> None:
+        marker = self.home / "askpass-called"
+        askpass = self.home / "owner-askpass"
+        askpass.write_text(f"#!/bin/sh\necho called >> {marker}\necho owner-secret\n", encoding="utf-8")
+        askpass.chmod(0o755)
+        hostile = {**self._owner_env(), "GIT_ASKPASS": str(askpass), "SSH_ASKPASS": str(askpass)}
+        request = "protocol=https\nhost=github.com\n\n"
+
+        def fill(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+            # The owner's gh helper would reach the network; leave askpass as the only source.
+            return subprocess.run(
+                ["git", "-c", "credential.helper=", "credential", "fill"],
+                cwd=self.repo, env=env, input=request, capture_output=True, text=True, timeout=30, check=False,
+            )
+
+        self.assertIn("password=owner-secret", fill(hostile).stdout)
+        marker.unlink()
+        for role in role_env.ROLE_ALLOWLIST:
+            with self.subTest(role=role):
+                env = role_env.runtime_env(role, base_env=hostile, env_file=self.home / "absent.env")
+                self.assertNotIn("SSH_ASKPASS", env)
+                filled = fill(env)
+                self.assertNotEqual(filled.returncode, 0)
+                self.assertNotIn("owner-secret", filled.stdout)
+                self.assertFalse(marker.exists())
+
     def test_every_role_points_gh_at_an_empty_managed_config_directory(self) -> None:
         for role in role_env.ROLE_ALLOWLIST:
             with self.subTest(role=role):

@@ -27,7 +27,9 @@ behavior.
 Every role the launcher builds an environment for runs gh and git without the owner's GitHub
 login. `GH_CONFIG_DIR` names an empty directory and `GIT_CONFIG_GLOBAL` a gitconfig holding only
 the owner's `user.name` and `user.email`, both under `~/.local/state/ummanu/head-config` and
-rewritten on each launch; system git config is not read and git never prompts for credentials.
+rewritten on each launch. System git config, inherited command-scope git config (`GIT_CONFIG_PARAMETERS`
+and the `GIT_CONFIG_COUNT` bundle) and `SSH_ASKPASS` are dropped, `GIT_ASKPASS` is empty and git
+never prompts for credentials.
 A head push or `gh` call therefore fails authentication. Dispatcher Git operations use the managed
 credential in `infra/github_credential.py`; the PO keeps the owner's environment.
 

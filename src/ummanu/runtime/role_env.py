@@ -203,8 +203,9 @@ SENSITIVE_ENV_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Git reads COUNT, KEY_n and VALUE_n as one unit and refuses to run on a partial one.
-GIT_CONFIG_BUNDLE_RE = re.compile(r"GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)")
+# Command-scope git configuration (`-c` parameters and the COUNT/KEY_n/VALUE_n bundle) outranks the
+# managed global config, so it could name a credential helper; a launched role never inherits it.
+GIT_COMMAND_CONFIG_RE = re.compile(r"GIT_CONFIG(_PARAMETERS|_COUNT|_KEY_\d+|_VALUE_\d+)?")
 
 
 def is_sensitive_env_name(name: str) -> bool:
@@ -226,6 +227,10 @@ GIT_CONFIG_GLOBAL_ENV = "GIT_CONFIG_GLOBAL"
 GIT_CONFIG_NOSYSTEM_ENV = "GIT_CONFIG_NOSYSTEM"
 # Without a helper git would ask the head's terminal for a username and wait there.
 GIT_TERMINAL_PROMPT_ENV = "GIT_TERMINAL_PROMPT"
+# An empty GIT_ASKPASS ends git's askpass lookup before core.askPass and SSH_ASKPASS, so an inherited
+# credential prompt program is never asked.
+GIT_ASKPASS_ENV = "GIT_ASKPASS"
+SSH_ASKPASS_ENV = "SSH_ASKPASS"
 # Relative to the launching user's HOME, the same HOME the owner's identity is read from.
 HEAD_CONFIG_DIR = Path(".local") / "state" / "ummanu" / "head-config"
 _IDENTITY_KEYS = ("user.name", "user.email")
@@ -261,10 +266,9 @@ def _owner_identity(home: Path) -> dict[str, str]:
 
 
 def head_credential_env(home: Path | str) -> dict[str, str]:
-    """gh and git bindings that resolve no login and no credential helper, materialized under `home`.
+    """gh and git bindings under `home` that resolve no login, credential helper, prompt or askpass.
 
-    `GH_CONFIG_DIR` is an empty managed directory; `GIT_CONFIG_GLOBAL` holds only the owner's
-    user.name and user.email; system git config is not read and git never prompts for a login.
+    `GH_CONFIG_DIR` is an empty managed directory; `GIT_CONFIG_GLOBAL` holds only the owner's identity.
     """
     home = Path(home).expanduser()
     root = home / HEAD_CONFIG_DIR
@@ -291,6 +295,7 @@ def head_credential_env(home: Path | str) -> dict[str, str]:
         GIT_CONFIG_GLOBAL_ENV: str(gitconfig),
         GIT_CONFIG_NOSYSTEM_ENV: "1",
         GIT_TERMINAL_PROMPT_ENV: "0",
+        GIT_ASKPASS_ENV: "",
     }
 
 
@@ -372,10 +377,8 @@ def runtime_env(
         if _is_sensitive_name(key) and key not in allowed:
             continue
         env[key] = value
-    git_config = [key for key in base if GIT_CONFIG_BUNDLE_RE.fullmatch(key)]
-    if any(key not in env for key in git_config):
-        for key in git_config:
-            env.pop(key, None)
+    for key in [key for key in env if GIT_COMMAND_CONFIG_RE.fullmatch(key)]:
+        env.pop(key)
 
     # Only trusted ambient bindings cross this seam; runtime.env grants neither spelling.
     for name in (RUNTIME_ENV_FILE_ENV, RUNTIME_PYTHONPATH_ENV):
@@ -394,6 +397,7 @@ def runtime_env(
         elif key in base:
             env[key] = base[key]
 
+    env.pop(SSH_ASKPASS_ENV, None)
     env.update(head_credential_env(base.get("HOME") or Path.home()))
 
     # Derived by the trusted launcher, never inherited or taken from runtime.env.
