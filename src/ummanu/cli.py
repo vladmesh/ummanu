@@ -587,6 +587,7 @@ def run_config_check(args: argparse.Namespace) -> int:
 def run_doctor(args: argparse.Namespace) -> int:
     from ummanu.config import validate_instance
     from ummanu.infra.doctor_findings import accepted, active_findings
+    from ummanu.infra.head_credential_findings import HEAD_CREDENTIAL_FINDING, INSPECTED_ROLES
     from ummanu.infra.identifier_findings import MACHINE_ID_INVALID
     from ummanu.runtime import interactive_workspace
     from ummanu.runtime.git_hooks import HOOKS_PATH_FINDING
@@ -644,6 +645,10 @@ def run_doctor(args: argparse.Namespace) -> int:
     print_checkpoint_status(report, findings=inspection.checkpoint)
     print_secret_store_status(report, findings=inspection.secret_store)
     print_board_schema_status(inspection.board_schema)
+    if not inspect_host or args.host_fixture:
+        print("role head github login: not inspected")
+    elif not any(finding["code"] == HEAD_CREDENTIAL_FINDING for finding in inspection.findings):
+        print(f"role head github login: ok ({', '.join(INSPECTED_ROLES)})")
 
     for finding in inspection.findings:
         if finding["code"] in {"root_disk_low", "root_disk_unavailable"}:
@@ -659,6 +664,7 @@ def run_doctor(args: argparse.Namespace) -> int:
         elif str(finding["code"]).startswith("live_root.") or finding["code"] in {
             MACHINE_ID_INVALID,
             HOOKS_PATH_FINDING,
+            HEAD_CREDENTIAL_FINDING,
         }:
             print(f"{finding['code']}: {finding['message']}")
         if accepted(finding):
@@ -944,6 +950,7 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     from ummanu.infra.checkpoint_run import load_checkpoint_state
     from ummanu.infra.doctor_findings import apply_acceptance
     from ummanu.infra.fallback import fallback_errors
+    from ummanu.infra.head_credential_findings import role_head_credential_findings
     from ummanu.infra.identifier_findings import stored_identifier_findings
     from ummanu.infra.recovery_inventory import collect_recovery_inventory
 
@@ -961,6 +968,7 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     findings.extend(doctor_live_root_findings(report, args, inspect_host=inspect_host))
     if inspect_host and not args.host_fixture:
         findings.extend(doctor_git_hooks_findings(report))
+        findings.extend(role_head_credential_findings())
     findings.extend(stored_identifier_findings(report.instance_path.parent))
     collected: CollectResult | None = None
     expected = None
