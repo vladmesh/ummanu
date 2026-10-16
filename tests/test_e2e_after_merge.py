@@ -545,10 +545,10 @@ class QueueingTests(AfterMergeFixture, unittest.TestCase):
 
 
 class ExactShaTests(AfterMergeFixture, unittest.TestCase):
-    def test_released_notice_and_pending_uncertain_run_get_one_holder_before_retry(self) -> None:
+    def test_released_pending_uncertain_run_gets_one_holder_before_retry(self) -> None:
         cards = self.three_merged_in_one_run()
         self.host.ran_on = _sha("9")
-        # The actual 0024 producer: uncertain outcome -> notice/comment -> pending.
+        # The actual producer: uncertain outcome -> comment -> pending.
         def released(runtime, project, carrier, state, run, entries, queue):
             run.resolution, run.acted = "blocked", True
             for item in run.covered:
@@ -558,7 +558,6 @@ class ExactShaTests(AfterMergeFixture, unittest.TestCase):
                 e2e_after_merge._remark(runtime, item["ref"], carrier, state, state="pending", dispatch_id="", run_url="")
             e2e_after_merge._persist(runtime, carrier, state)
             queue["pending"] = [{**entry, "marked": True} for entry in entries]
-            e2e_after_merge._bell(runtime, carrier, "Released unconfirmed result", "released-notice")
             return {"action": "released"}
         with mock.patch.object(e2e_after_merge, "_act", side_effect=released):
             self.am_tick()
