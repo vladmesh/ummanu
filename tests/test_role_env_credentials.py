@@ -8,8 +8,12 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from ummanu.runtime import role_env
+from ummanu.runtime import git_hooks, role_env
+from ummanu.runtime.paths import PRODUCT_ENV
+
+PRODUCT_ROOT = Path(__file__).resolve().parents[1]
 
 OWNER_NAME = 'Owner "q" \\ name'
 OWNER_EMAIL = "owner@example.test"
@@ -105,6 +109,27 @@ class RoleCredentialEnvTests(unittest.TestCase):
                 self.assertNotEqual(filled.returncode, 0)
                 self.assertNotIn("owner-secret", filled.stdout)
                 self.assertFalse(marker.exists())
+
+    def test_every_role_refuses_a_remote_branch_deletion_and_inherits_no_opt_out(self) -> None:
+        bare = self.home / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, env=self._owner_env())
+        owner = self._owner_env()
+        (self.repo / "file").write_text("x\n", encoding="utf-8")
+        for args in (("add", "file"), ("commit", "-qm", "x"), ("remote", "add", "origin", str(bare))):
+            self.assertEqual(self._git(owner, *args).returncode, 0)
+        self.assertEqual(self._git(owner, "push", "-q", "origin", "HEAD:refs/heads/doomed").returncode, 0)
+        inherited = {**owner, git_hooks.REWRITE_OPT_OUT_ENV: "1"}
+        product = {PRODUCT_ENV: str(PRODUCT_ROOT)}
+        with mock.patch.dict(os.environ, product):
+            for name in role_env.RUNTIME_PYTHONPATH_ENVS:
+                os.environ.pop(name, None)
+            for role in role_env.ROLE_ALLOWLIST:
+                with self.subTest(role=role):
+                    env = role_env.runtime_env(role, base_env=inherited, env_file=self.home / "absent.env")
+                    self.assertNotIn(git_hooks.REWRITE_OPT_OUT_ENV, env)
+                    refused = self._git(env, "push", "origin", ":refs/heads/doomed")
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertIn("refusing to delete refs/heads/doomed", refused.stderr)
 
     def test_every_role_points_gh_at_an_empty_managed_config_directory(self) -> None:
         for role in role_env.ROLE_ALLOWLIST:

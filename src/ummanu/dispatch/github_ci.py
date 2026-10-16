@@ -103,18 +103,29 @@ def _answer(completed) -> str:
     return (completed.stderr or completed.stdout or "").strip()
 
 
-def _backend_call(host, args: list[str], label: str, *, cwd: Path | None = None, project: str = ""):
+def _backend_call(
+    host,
+    args: list[str],
+    label: str,
+    *,
+    cwd: Path | None = None,
+    project: str = "",
+    extra_env: dict[str, str] | None = None,
+):
     """Invoke the gate backend and classify unanswered remote calls.
 
 Keep a determinate non-zero response as a response. Raise GateTransportError
 only for failures to reach the backend. Project Git access refusals propagate
-as ProjectGitAccessError rather than retryable silence.
+as ProjectGitAccessError rather than retryable silence. `extra_env` reaches only
+a project remote Git child.
     """
     try:
         if project:
             if args[:2] != ["git", "-C"] or len(args) < 4:
                 raise HostError(f"{label}: a project remote Git operation must name its checkout")
-            completed = host.remote_git(project, args[2], args[3:], label)
+            completed = host.remote_git(project, args[2], args[3:], label, extra_env=extra_env)
+        elif extra_env:
+            raise HostError(f"{label}: an environment overlay needs a project remote Git operation")
         else:
             completed = host.run_capture(args, label, cwd=cwd)
     except ProjectGitAccessError:

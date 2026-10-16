@@ -208,6 +208,7 @@ unit tests/test_retro_search_log.py
 unit tests/test_retro_pending.py
 integration-heads tests/test_role_env.py
 unit tests/test_role_env_credentials.py
+unit tests/test_git_hooks.py
 unit tests/test_runtime_env.py
 runtime-component tests/test_docker_guard.py
 unit tests/test_procfs.py

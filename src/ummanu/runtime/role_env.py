@@ -20,7 +20,7 @@ from pathlib import Path
 
 from ummanu import _proc
 from ummanu.board.local_run import parse_local_run_policy
-from ummanu.runtime import docker_guard, test_guard
+from ummanu.runtime import docker_guard, git_hooks, test_guard
 from ummanu.runtime.paths import PRODUCT_ENV, default_instance_path, env_value, legacy_name
 from ummanu.runtime_env import RuntimeEnvError, parse_runtime_env
 
@@ -268,7 +268,8 @@ def _owner_identity(home: Path) -> dict[str, str]:
 def head_credential_env(home: Path | str) -> dict[str, str]:
     """gh and git bindings under `home` that resolve no login, credential helper, prompt or askpass.
 
-    `GH_CONFIG_DIR` is an empty managed directory; `GIT_CONFIG_GLOBAL` holds only the owner's identity.
+    `GH_CONFIG_DIR` is an empty managed directory; `GIT_CONFIG_GLOBAL` holds the owner's identity and
+    the product's hooks path.
     """
     home = Path(home).expanduser()
     root = home / HEAD_CONFIG_DIR
@@ -279,6 +280,8 @@ def head_credential_env(home: Path | str) -> dict[str, str]:
     for key in _IDENTITY_KEYS:
         if key in identity:
             lines.append(f"\t{key.split('.')[1]} = {_quote_git_value(identity[key])}\n")
+    hooks = str(git_hooks.hooks_dir(runtime_product_root()))
+    lines.append(f"[core]\n\thooksPath = {_quote_git_value(hooks)}\n")
     content = "".join(lines)
     try:
         gh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -398,6 +401,7 @@ def runtime_env(
             env[key] = base[key]
 
     env.pop(SSH_ASKPASS_ENV, None)
+    env.pop(git_hooks.REWRITE_OPT_OUT_ENV, None)
     env.update(head_credential_env(base.get("HOME") or Path.home()))
 
     # Derived by the trusted launcher, never inherited or taken from runtime.env.

@@ -37,7 +37,7 @@ from ummanu.memory.client_config import (
 )
 from ummanu.memory.pack import MemoryPackError, load_product_pack, materialize_product_pack
 from ummanu.po import workspace as po_workspace
-from ummanu.runtime import interactive_workspace
+from ummanu.runtime import git_hooks, interactive_workspace
 from ummanu.runtime.paths import env_value
 
 
@@ -102,6 +102,23 @@ def step_codex_home(context: UpgradeContext) -> StepResult:
     if not seeded:
         return StepResult("codex-home", "unchanged", "CODEX_HOME files current")
     return StepResult("codex-home", "changed", f"seeded {seeded} CODEX_HOME file(s)")
+
+
+def step_git_hooks(context: UpgradeContext) -> StepResult:
+    """Point the runtime user's global `core.hooksPath` at the hooks this product checkout ships."""
+    if context.runtime_home is None:
+        return StepResult("git-hooks", "failed", "installation runtime home is unresolved")
+    target = git_hooks.hooks_dir(context.product_root)
+    try:
+        changed = git_hooks.install_hooks_path(context.runtime_home, context.product_root, dry_run=context.dry_run)
+        if changed and not context.dry_run:
+            _set_runtime_owner(context.runtime_home / ".gitconfig", context.runtime_user)
+    except (git_hooks.GitHooksError, GitError) as exc:
+        return StepResult("git-hooks", "failed", str(exc))
+    if not changed:
+        return StepResult("git-hooks", "unchanged", f"global core.hooksPath is {target}")
+    action = "would set" if context.dry_run else "set"
+    return StepResult("git-hooks", "changed", f"{action} global core.hooksPath to {target}")
 
 
 def step_po_workspace(context: UpgradeContext) -> StepResult:

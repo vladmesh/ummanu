@@ -21,7 +21,7 @@ class ScriptedGateHost:
     def _run(self, args, label):
         return self.run_capture(args, label)
 
-    def remote_git(self, project, workspace, args, label):
+    def remote_git(self, project, workspace, args, label, *, extra_env=None):
         full = ["git", "-C", workspace, *args]
         self.calls.append((full, label, None, project))
         self.events.append(label)

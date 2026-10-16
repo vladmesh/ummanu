@@ -2138,14 +2138,20 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
         return execution.preflight_project(repo)
 
     def remote_git(
-        self, project: str, checkout: str | Path, args: list[str], label: str
+        self,
+        project: str,
+        checkout: str | Path,
+        args: list[str],
+        label: str,
+        *,
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Run one remote Git operation of a registered project's checkout and return Git's answer."""
         checkout = Path(checkout)
         execution = self._project_remote(project, checkout)
         if execution.transport in {"local", "ssh", "unmanaged"}:
-            return self.run_capture(["git", "-C", str(checkout), *args], label)
-        return self._managed_remote_git(project, execution, checkout, args, label)
+            return self.run_capture(["git", "-C", str(checkout), *args], label, extra_env=extra_env)
+        return self._managed_remote_git(project, execution, checkout, args, label, extra_env=extra_env)
 
     def _remote_git_checked(
         self, project: str, checkout: str | Path, args: list[str], label: str
@@ -2169,10 +2175,17 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
             raise ProjectGitAccessError(project, exc.code, str(exc)) from None
 
     def _managed_remote_git(
-        self, project: str, execution: RemoteExecution, checkout: Path, args: list[str], label: str
+        self,
+        project: str,
+        execution: RemoteExecution,
+        checkout: Path,
+        args: list[str],
+        label: str,
+        *,
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         try:
-            completed = execution.run_project(checkout, args, label=label)
+            completed = execution.run_project(checkout, args, label=label, extra_env=extra_env)
         except CredentialError as exc:
             if exc.code in PROJECT_ACCESS_REFUSALS:
                 raise ProjectGitAccessError(project, exc.code, str(exc)) from None
@@ -2203,13 +2216,18 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
         return completed
 
     def run_capture(
-        self, args: list[str], label: str, *, cwd: Path | None = None
+        self,
+        args: list[str],
+        label: str,
+        *,
+        cwd: Path | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Like _run but returns the CompletedProcess regardless of exit status (the gate reads a
         non-zero code as a red verdict, not a host failure). Still raises HostError when the process
-        can't run at all."""
+        can't run at all. `extra_env` is added to this process's environment for the child."""
         try:
-            return _run_bounded(args, cwd)
+            return _run_bounded(args, cwd, extra_env)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise HostError(f"{label} failed: {exc}") from None
 
@@ -2217,12 +2235,15 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
 HOST_COMMAND_TIMEOUT_SECONDS = 900
 
 
-def _run_bounded(args: list[str], cwd: Path | None) -> subprocess.CompletedProcess[str]:
+def _run_bounded(
+    args: list[str], cwd: Path | None, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run one host child to completion, and on a timeout take its descendants down with it.
 
     On timeout terminate the process group, not just its leader.
     """
-    return _proc.run_isolated(args, cwd=cwd, timeout=HOST_COMMAND_TIMEOUT_SECONDS)
+    env = {**os.environ, **extra_env} if extra_env else None
+    return _proc.run_isolated(args, cwd=cwd, env=env, timeout=HOST_COMMAND_TIMEOUT_SECONDS)
 
 
 def _continuation_note(generation: int = 0, decision: str = "") -> str:

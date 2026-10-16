@@ -147,6 +147,18 @@ block is not retried. A preflight with no answer leaves the card in Ready. A cre
 at the gate, blocks with `git_access_refusal`. To recover: read the `project-git:<project>` rows of
 `ummanu doctor --instance INSTANCE`, rotate or unlock the token, return the card to Ready.
 
+### Host pre-push hook
+
+The product ships `src/ummanu/runtime/git-hooks/pre-push`. Install, upgrade and recovery point the
+runtime user's global `core.hooksPath` at that directory of the product checkout, and every launched
+role's managed git config names it too. The hook refuses a remote ref deletion and a non-fast-forward
+update (what `--force` and `--force-with-lease` produce) and names the ref. Set
+`UMMANU_ALLOW_REMOTE_REWRITE=1` on the one push that must rewrite or delete; launched roles never
+inherit it. The dispatcher sets it only on its leased branch publication. The global path shadows a
+checkout's own `.git/hooks`; a repository-local `core.hooksPath` still wins. `ummanu doctor` reports
+`git_hooks_path` when the hook is missing or the global path names anything else; `ummanu upgrade`
+repairs it.
+
 ## Codex provider-internal fan-out policy
 
 The policy and the telemetry it records are in
@@ -3152,6 +3164,7 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `board-store-roles` | verify owner/app/read credentials, attributes and privilege boundaries |
 | `memory-clients` | reconcile the `po_memory` MCP entries (Claude, `~/.codex`, the legacy Codex home and an existing `DATA_DIR/codex-home`, seeding what it lacks) without touching provider login state |
 | `codex-home` | seed `AGENTS.md` and `config.toml` copy-once into `DATA_DIR/codex-home`; never `auth.json`, never the legacy Orca home ([Codex home](#codex-home-codex_home)) |
+| `git-hooks` | point the runtime user's global `core.hooksPath` at the product's shipped hooks ([Host pre-push hook](#host-pre-push-hook)) |
 | `po-workspace` | materialize the PO head's working directory; its notes file is never rewritten |
 | `interactive-workspace` | compose `DATA_DIR/interactive/AGENTS.md` from the product's shared part and the live root's `persona/AGENTS.md`, write `CLAUDE.md`, hand the tree to the runtime user ([The interactive head](#the-interactive-head-and-its-workspace)) |
 | `head-registry` | generate `<data>/heads/heads.yaml` and `<data>/heads/source.yaml` from the canon; no Git call |

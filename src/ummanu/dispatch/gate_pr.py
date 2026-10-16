@@ -18,6 +18,7 @@ from ummanu.dispatch.gate_types import PR_BODY_SECTION_CHARS, GateResult, _finge
 from ummanu.dispatch.helpers import _last_marker_body, _tail, safe_one_line, scrub_host_output
 from ummanu.dispatch.state import GatePrAuthorship, GatePublishedRef
 from ummanu.dispatch.types import GateTransportError, HostError
+from ummanu.runtime import git_hooks
 
 # Board references and host paths mean nothing outside this installation and can name its users.
 _INTERNAL_REF_RE = re.compile(r"\b(?:issue|sprint|task|research):[A-Za-z0-9][\w.-]*")
@@ -95,7 +96,10 @@ def _contained_in_candidate(host, workspace: str, sha: str, head: str) -> bool:
 
 
 def _push_leased(host, workspace: str, branch: str, expected: str, project: str):
-    """Push the candidate under a lease on `expected` — the empty string meaning "must not exist"."""
+    """Push the candidate under a lease on `expected` — the empty string meaning "must not exist".
+
+    Only this push opts out of the host pre-push hook; the lease is its fence against foreign writes.
+    """
     return github_ci._backend_call(
         host,
         [
@@ -109,6 +113,7 @@ def _push_leased(host, workspace: str, branch: str, expected: str, project: str)
         ],
         "gate publish branch",
         project=project,
+        extra_env={git_hooks.REWRITE_OPT_OUT_ENV: "1"},
     )
 
 

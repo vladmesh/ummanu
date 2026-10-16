@@ -1060,7 +1060,9 @@ routinely not a fast-forward of the remote.
 The push carries a lease on the object id this dispatcher last published to that branch, recorded on
 the card's dispatcher record when a publication succeeds (not a read taken just before the push). A
 branch never published seeds the lease from a read of the remote, and the push still fences that
-read: a remote that moves in between is refused.
+read: a remote that moves in between is refused. This push alone sets the host pre-push hook's opt-out
+(`UMMANU_ALLOW_REMOTE_REWRITE`, see [Operations](OPERATIONS.md#host-pre-push-hook)); the lease is its
+fence.
 
 A lease refusal is its own red gate class, `publication`, on the gate result and the record. Nothing
 was published, no check ran, and the card carries both object ids (expected and observed). It is not
