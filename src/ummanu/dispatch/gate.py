@@ -274,19 +274,20 @@ def _github_gate(
         summary = f"CI red: {where} failed on `{branch}` @ `{short}`"
         if fragment.failure_class == "infrastructure":
             summary += f"; infrastructure failure: {fragment.failure_reason}"
-        log = fragment.text if fragment.available else f"log unavailable: {fragment.reason}"
+        suite_log = github_ci._suite_log(host, repo, failed or {}, fragment, sha)
         cause = fragment.text if fragment.available else f"unavailable:{fragment.reason}"
         fingerprint = _fingerprint("github", job, fragment.step, cause)
         failed_run_id = github_ci._actions_run_id(failed or {})
         return GateResult(
             "red",
             summary,
-            log,
+            suite_log.text,
             fingerprint=fingerprint,
             failure_class=fragment.failure_class,
             failure_reason=fragment.failure_reason,
             failed_run_id=failed_run_id,
             failed_run_repo=repo,
+            suite_evidence=suite_log.evidence,
             attestation=receipt,
         )
     if not checked:

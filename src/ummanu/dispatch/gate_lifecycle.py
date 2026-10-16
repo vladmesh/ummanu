@@ -347,8 +347,13 @@ def gate_red_to_worker(
             f"In progress for rework."
         )
     if log:
-        body += f"\nTail:\n```\n{log}\n```"
+        label = "Failed suite evidence" if result.suite_evidence else "Tail"
+        body += f"\n{label}:\n```\n{log}\n```"
     body += f"\n<!-- gate-fingerprint: {fingerprint} -->"
+    if result.suite_evidence:
+        # Where the rendered evidence came from, so a later reader can fetch the same artifacts.
+        reference = json.dumps(result.suite_evidence, separators=(",", ":"))
+        body += f"\n<!-- gate-suite-evidence: {reference} -->"
     # The reviewer must be gone before a retained worker resumes, but the worker stays
     # suspended until the continuation is delivered or falls back to a replacement.
     unconfirmed = runtime._end_review_pane_confirmed(
@@ -471,8 +476,13 @@ def _retry_infrastructure_gate(
         "new terminal result; no worker rework round or red_ci budget event was opened."
     )
     if log:
-        body += f"\nTail:\n```\n{log}\n```"
+        label = "Failed suite evidence" if result.suite_evidence else "Tail"
+        body += f"\n{label}:\n```\n{log}\n```"
     body += f"\n<!-- gate-fingerprint: {fingerprint} -->"
+    if result.suite_evidence:
+        # Where the rendered evidence came from, so a later reader can fetch the same artifacts.
+        reference = json.dumps(result.suite_evidence, separators=(",", ":"))
+        body += f"\n<!-- gate-suite-evidence: {reference} -->"
     runtime.writer.comment(
         role="dispatcher",
         actor=runtime.owner,

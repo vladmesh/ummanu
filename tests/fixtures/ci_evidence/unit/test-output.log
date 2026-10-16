@@ -1,0 +1,90 @@
+test_missing_check_is_red (tests.test_rollup.RollupTests.test_missing_check_is_red) ... FAIL
+test_reopen (tests.test_store.StoreTests.test_reopen) ... ERROR
+test_slow_tick (tests.test_clock.ClockTests.test_slow_tick) ... ok
+
+======================================================================
+ERROR: test_reopen (tests.test_store.StoreTests.test_reopen)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/runner/work/ummanu/ummanu/tests/test_store.py", line 52, in test_reopen
+    store.reopen()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 100, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 101, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 102, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 103, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 104, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 105, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 106, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 107, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 108, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 109, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 110, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 111, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 112, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 113, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 114, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 115, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 116, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 117, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 118, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 119, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 120, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 121, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 122, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 123, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 124, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 125, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 126, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 127, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 128, in run
+    method()
+  File "/opt/hostedtoolcache/Python/3.12.3/x64/lib/python3.12/unittest/case.py", line 129, in run
+    method()
+  File "/home/runner/work/ummanu/ummanu/src/ummanu/store.py", line 140, in reopen
+    raise StoreClosed(self.path)
+ummanu.store.StoreClosed: /tmp/store
+
+======================================================================
+FAIL: test_missing_check_is_red (tests.test_rollup.RollupTests.test_missing_check_is_red)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/runner/work/ummanu/ummanu/tests/test_rollup.py", line 88, in test_missing_check_is_red
+    self.assertEqual(rollup, "FAILURE")
+AssertionError: 'PENDING' != 'FAILURE'
+- PENDING
++ FAILURE
+
+
+----------------------------------------------------------------------
+Ran 41 tests in 12.500s
+
+FAILED (failures=1, errors=1, skipped=1)
+timing budget test tests.test_clock.ClockTests.test_slow_tick: 6.250000s > 5s
