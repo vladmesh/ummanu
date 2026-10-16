@@ -24,6 +24,15 @@ interpreter and source from the product checkout holding the shim and resolves n
 PATH, and loses only the heavy-operation exceptions. PO and dispatcher Docker paths retain their
 behavior.
 
+Every role the launcher builds an environment for runs gh and git without the owner's GitHub
+login. `GH_CONFIG_DIR` names an empty directory and `GIT_CONFIG_GLOBAL` a gitconfig holding only
+the owner's `user.name` and `user.email`, both under `~/.local/state/ummanu/head-config` and
+rewritten on each launch. System git config, inherited command-scope git config (`GIT_CONFIG_PARAMETERS`
+and the `GIT_CONFIG_COUNT` bundle) and `SSH_ASKPASS` are dropped, `GIT_ASKPASS` is empty and git
+never prompts for credentials.
+A head push or `gh` call therefore fails authentication. Dispatcher Git operations use the managed
+credential in `infra/github_credential.py`; the PO keeps the owner's environment.
+
 The dispatcher validates the sprint's entire creation-only `local_run_exceptions` field, then
 selects the card's project entries. Each durable launch intent retains one snapshot per head round;
 packet and launch use that value, including an empty or unavailable result. The renderer carries

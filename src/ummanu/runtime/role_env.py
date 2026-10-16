@@ -12,10 +12,13 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
+from ummanu import _proc
 from ummanu.board.local_run import parse_local_run_policy
 from ummanu.runtime import docker_guard, test_guard
 from ummanu.runtime.paths import PRODUCT_ENV, default_instance_path, env_value, legacy_name
@@ -200,8 +203,9 @@ SENSITIVE_ENV_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Git reads COUNT, KEY_n and VALUE_n as one unit and refuses to run on a partial one.
-GIT_CONFIG_BUNDLE_RE = re.compile(r"GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)")
+# Command-scope git configuration (`-c` parameters and the COUNT/KEY_n/VALUE_n bundle) outranks the
+# managed global config, so it could name a credential helper; a launched role never inherits it.
+GIT_COMMAND_CONFIG_RE = re.compile(r"GIT_CONFIG(_PARAMETERS|_COUNT|_KEY_\d+|_VALUE_\d+)?")
 
 
 def is_sensitive_env_name(name: str) -> bool:
@@ -215,6 +219,84 @@ def is_sensitive_env_name(name: str) -> bool:
 
 class RoleEnvError(RuntimeError):
     """The role runtime env cannot be built without leaking or missing required names."""
+
+
+# Every launched role's gh and git read this managed configuration instead of the owner's login.
+GH_CONFIG_DIR_ENV = "GH_CONFIG_DIR"
+GIT_CONFIG_GLOBAL_ENV = "GIT_CONFIG_GLOBAL"
+GIT_CONFIG_NOSYSTEM_ENV = "GIT_CONFIG_NOSYSTEM"
+# Without a helper git would ask the head's terminal for a username and wait there.
+GIT_TERMINAL_PROMPT_ENV = "GIT_TERMINAL_PROMPT"
+# An empty GIT_ASKPASS ends git's askpass lookup before core.askPass and SSH_ASKPASS, so an inherited
+# credential prompt program is never asked.
+GIT_ASKPASS_ENV = "GIT_ASKPASS"
+SSH_ASKPASS_ENV = "SSH_ASKPASS"
+# Relative to the launching user's HOME, the same HOME the owner's identity is read from.
+HEAD_CONFIG_DIR = Path(".local") / "state" / "ummanu" / "head-config"
+_IDENTITY_KEYS = ("user.name", "user.email")
+
+
+def _quote_git_value(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _git_lookup_path() -> str:
+    # A launcher may run with a PATH narrowed to the head's own tools; git is the launcher's.
+    return os.pathsep.join(filter(None, (os.environ.get("PATH"), os.defpath)))
+
+
+def _owner_identity(home: Path) -> dict[str, str]:
+    """The owner's global user.name and user.email under `home`, without system config."""
+    try:
+        completed = _proc.run(
+            ["git", "config", "--global", "--null", "--get-regexp", r"^user\.(name|email)$"],
+            env={"HOME": str(home), "PATH": _git_lookup_path(), GIT_CONFIG_NOSYSTEM_ENV: "1"},
+            timeout=30,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise RoleEnvError(f"cannot read the owner's git identity: {exc}") from None
+    if completed.returncode not in (0, 1):
+        raise RoleEnvError(f"cannot read the owner's git identity: git config exited {completed.returncode}")
+    identity: dict[str, str] = {}
+    for entry in str(completed.stdout).split("\0"):
+        key, _, value = entry.partition("\n")
+        if key in _IDENTITY_KEYS:
+            identity[key] = value
+    return identity
+
+
+def head_credential_env(home: Path | str) -> dict[str, str]:
+    """gh and git bindings under `home` that resolve no login, credential helper, prompt or askpass.
+
+    `GH_CONFIG_DIR` is an empty managed directory; `GIT_CONFIG_GLOBAL` holds only the owner's identity.
+    """
+    home = Path(home).expanduser()
+    root = home / HEAD_CONFIG_DIR
+    gh_dir = root / "gh"
+    gitconfig = root / "gitconfig"
+    identity = _owner_identity(home)
+    lines = ["[user]\n"] if identity else []
+    for key in _IDENTITY_KEYS:
+        if key in identity:
+            lines.append(f"\t{key.split('.')[1]} = {_quote_git_value(identity[key])}\n")
+    content = "".join(lines)
+    try:
+        gh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        current = gitconfig.read_text(encoding="utf-8") if gitconfig.is_file() else None
+        if current != content:
+            fd, temporary = tempfile.mkstemp(prefix=".gitconfig.", dir=root)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+            os.replace(temporary, gitconfig)
+    except (OSError, UnicodeError) as exc:
+        raise RoleEnvError(f"cannot provision the managed head git config under {root}: {exc}") from None
+    return {
+        GH_CONFIG_DIR_ENV: str(gh_dir),
+        GIT_CONFIG_GLOBAL_ENV: str(gitconfig),
+        GIT_CONFIG_NOSYSTEM_ENV: "1",
+        GIT_TERMINAL_PROMPT_ENV: "0",
+        GIT_ASKPASS_ENV: "",
+    }
 
 
 def docker_guard_dir() -> Path:
@@ -295,10 +377,8 @@ def runtime_env(
         if _is_sensitive_name(key) and key not in allowed:
             continue
         env[key] = value
-    git_config = [key for key in base if GIT_CONFIG_BUNDLE_RE.fullmatch(key)]
-    if any(key not in env for key in git_config):
-        for key in git_config:
-            env.pop(key, None)
+    for key in [key for key in env if GIT_COMMAND_CONFIG_RE.fullmatch(key)]:
+        env.pop(key)
 
     # Only trusted ambient bindings cross this seam; runtime.env grants neither spelling.
     for name in (RUNTIME_ENV_FILE_ENV, RUNTIME_PYTHONPATH_ENV):
@@ -316,6 +396,9 @@ def runtime_env(
             env[key] = source[key]
         elif key in base:
             env[key] = base[key]
+
+    env.pop(SSH_ASKPASS_ENV, None)
+    env.update(head_credential_env(base.get("HOME") or Path.home()))
 
     # Derived by the trusted launcher, never inherited or taken from runtime.env.
     for key in docker_guard.BINDINGS:
