@@ -86,6 +86,7 @@ def advance_review_verdict(
     record.rejected_sha = reviewed
     record.rejected_failure_class = "substantive"
     record.rejected_failure_reason = REVIEW_REJECTION_REASON
+    record.rejected_gate_evidence = []
     record.rejected_done_reports = 0
     # The only point where both the last review body and the SHA it judged are available.
     # Keep them for the next review packet instead of reconstructing the card from base.

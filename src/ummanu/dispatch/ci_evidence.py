@@ -16,7 +16,8 @@ TESTS_PER_SUITE = 5
 TRACEBACK_LINES = 20
 _LINE_CHARS = 300
 _SEPARATOR_RE = re.compile(r"^(?:={20,}|-{20,})$")
-_HEADER_RE = re.compile(r"^(?:FAIL|ERROR): \S+ \(.+\)")
+_HEADER_RE = re.compile(r"^(?:FAIL|ERROR): (\S+) \(([^()\s]+)\)(.*)$")
+_LOCATION_RE = re.compile(r"^(.+): \S+:\d+$")
 _FRAME_RE = re.compile(r'^\s*File "([^"]+)", line \d+')
 # Frames outside the checkout (stdlib, installed packages) are what the bound drops first.
 _FOREIGN_FRAME_RE = re.compile(r"(?:/site-packages/|/dist-packages/|/lib/python\d)")
@@ -38,45 +39,61 @@ def render_suite(suite: str, directory: Path) -> str:
     counts = ", ".join(f"{name} {value}" for name, value in report["counts"].items())
     lines = [f"Suite {suite}: outcome {report.get('outcome')}; {counts}"]
     violations = [diagnostic(item) for item in report.get("timing_violations") or []]
-    locations = [entry for entry in report.get("failure_locations") or [] if entry not in violations]
-    lines += _bounded("Failures:", [f"- {_clip(entry)}" for entry in locations], "failures")
-    lines += _bounded("Timing violations:", [f"- {_clip(entry)}" for entry in violations], "timing violations")
-    tracebacks = [_bounded_traceback(block) for block in _failure_blocks(log)]
-    lines += _bounded("Tracebacks:", [line for block in tracebacks for line in block], "tracebacks",
-                      groups=[len(block) for block in tracebacks])
+    blocks = _failure_blocks(log)
+    located = [_location(entry) for entry in report.get("failure_locations") or [] if entry not in violations]
+    known = {identifier for identifier, _entry in located}
+    failing = located + [(identifier, identifier) for identifier in blocks if identifier not in known]
+    shown = failing[:TESTS_PER_SUITE]
+    if shown:
+        lines.append("Failures:")
+        lines += [f"- {_clip(entry)}" for _identifier, entry in shown]
+        tracebacks = [blocks[identifier] for identifier, _entry in shown if identifier in blocks]
+        if tracebacks:
+            lines.append("Tracebacks:")
+            lines += [line for block in tracebacks for line in _bounded_traceback(block)]
+        if len(failing) > len(shown):
+            lines.append(f"({len(failing) - len(shown)} more failing tests omitted)")
+    if violations:
+        lines.append("Timing violations:")
+        lines += [f"- {_clip(entry)}" for entry in violations[:TESTS_PER_SUITE]]
+        if len(violations) > TESTS_PER_SUITE:
+            lines.append(f"({len(violations) - TESTS_PER_SUITE} more timing violations omitted)")
     return "\n".join(lines)
 
 
-def _bounded(title: str, entries: list[str], noun: str, *, groups: list[int] | None = None) -> list[str]:
-    """`title` and the first `TESTS_PER_SUITE` entries (or line groups), naming the omitted count."""
-    sizes = groups if groups is not None else [1] * len(entries)
-    if not sizes:
-        return []
-    kept = sum(sizes[:TESTS_PER_SUITE])
-    out = [title, *entries[:kept]]
-    if len(sizes) > TESTS_PER_SUITE:
-        out.append(f"({len(sizes) - TESTS_PER_SUITE} more {noun} omitted)")
-    return out
+def _location(entry: str) -> tuple[str, str]:
+    """(test identifier, entry) of a `failure_locations` entry, `<identifier>[: <path>:<line>]`."""
+    match = _LOCATION_RE.match(entry)
+    return (match.group(1) if match else entry), entry
 
 
-def _failure_blocks(log: str) -> list[list[str]]:
-    """Each unittest FAIL/ERROR header with the lines up to the next separator."""
-    blocks: list[list[str]] = []
+def _failure_blocks(log: str) -> dict[str, list[str]]:
+    """Each unittest FAIL/ERROR block, keyed by the failing test's `test.id()`."""
+    blocks: dict[str, list[str]] = {}
     current: list[str] | None = None
     for line in log.splitlines():
-        if _HEADER_RE.match(line):
+        header = _HEADER_RE.match(line)
+        if header:
             current = [line]
-            blocks.append(current)
+            blocks[_header_identifier(header)] = current
         elif current is not None and _SEPARATOR_RE.match(line.strip()):
             # The dash rule right under the header opens the traceback; any later rule closes it.
             if len(current) > 1:
                 current = None
         elif current is not None:
             current.append(line)
-    for block in blocks:
+    for block in blocks.values():
         while len(block) > 1 and not block[-1].strip():
             block.pop()
     return blocks
+
+
+def _header_identifier(header: re.Match[str]) -> str:
+    """unittest prints `name (id)` for a test and its subtests, and `name (class)` for a fixture error."""
+    name, owner, rest = header.group(1), header.group(2), header.group(3)
+    if owner.endswith(f".{name}"):
+        return owner + rest
+    return f"{name} ({owner}){rest}"
 
 
 def _bounded_traceback(block: list[str]) -> list[str]:

@@ -325,6 +325,7 @@ def gate_red_to_worker(
         "publication" if result.failure_class == "publication" else "substantive"
     )
     record.rejected_failure_reason = result.failure_reason
+    record.rejected_gate_evidence = [dict(entry) for entry in result.suite_evidence]
     record.rejected_done_reports = 0
     detail = scrub_host_output(result.summary)
     log = scrub_host_output(result.log).strip()
@@ -456,6 +457,7 @@ def _retry_infrastructure_gate(
     record.rejected_sha = sha
     record.rejected_failure_class = "infrastructure"
     record.rejected_failure_reason = result.failure_reason
+    record.rejected_gate_evidence = []
     # `_accept_stale_infrastructure_done` records one accepted stale report as a guard against
     # a later duplicate.  Do not erase that guard when the rerun itself returns red again.
     # Fresh worker reports and substantive reds reset it at their own state transitions.
