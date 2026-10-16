@@ -39,7 +39,7 @@ ummanu.dispatch.cleanup_journal ummanu.dispatch.ownership ummanu.dispatch.tick_t
 ummanu.dispatch.types ummanu.head_registry ummanu.infra ummanu.infra.export_allowlist
 ummanu.kernel ummanu.kernel.identifiers ummanu.kernel.sprint_policy ummanu.projects ummanu.projects.test_timing
 ummanu.runtime ummanu.runtime.agent_prompt_transport ummanu.runtime.codex_preflight
-ummanu.runtime.container_labels ummanu.runtime.docker_guard ummanu.runtime.head
+ummanu.runtime.container_labels ummanu.runtime.docker_guard ummanu.runtime.git_hooks ummanu.runtime.head
 ummanu.runtime.head.command ummanu.runtime.head.memory ummanu.runtime.head.operations
 ummanu.runtime.head.run ummanu.runtime.head.runtime ummanu.runtime.head.spec
 ummanu.runtime.head.task_ref ummanu.runtime.head_run_binding ummanu.runtime.head_runtimes
