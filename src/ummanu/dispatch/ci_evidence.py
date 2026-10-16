@@ -47,10 +47,14 @@ def render_suite(suite: str, directory: Path) -> str:
     if shown:
         lines.append("Failures:")
         lines += [f"- {_clip(entry)}" for _identifier, entry in shown]
-        tracebacks = [blocks[identifier] for identifier, _entry in shown if identifier in blocks]
-        if tracebacks:
+        shown_blocks = [(identifier, blocks[identifier]) for identifier, _entry in shown if identifier in blocks]
+        if shown_blocks:
             lines.append("Tracebacks:")
-            lines += [line for block in tracebacks for line in _bounded_traceback(block)]
+            for identifier, test_blocks in shown_blocks:
+                # The producer's location names the last failing subtest of a test.
+                lines += _bounded_traceback(test_blocks[-1])
+                if len(test_blocks) > 1:
+                    lines.append(f"({len(test_blocks) - 1} more failing subtests of {identifier} omitted)")
         if len(failing) > len(shown):
             lines.append(f"({len(failing) - len(shown)} more failing tests omitted)")
     if violations:
@@ -67,32 +71,32 @@ def _location(entry: str) -> tuple[str, str]:
     return (match.group(1) if match else entry), entry
 
 
-def _failure_blocks(log: str) -> dict[str, list[str]]:
-    """Each unittest FAIL/ERROR block, keyed by the failing test's `test.id()`."""
-    blocks: dict[str, list[str]] = {}
+def _failure_blocks(log: str) -> dict[str, list[list[str]]]:
+    """The unittest FAIL/ERROR blocks in log order, grouped by the id `failure_locations` uses."""
+    blocks: dict[str, list[list[str]]] = {}
     current: list[str] | None = None
     for line in log.splitlines():
         header = _HEADER_RE.match(line)
         if header:
             current = [line]
-            blocks[_header_identifier(header)] = current
+            blocks.setdefault(_header_identifier(header), []).append(current)
         elif current is not None and _SEPARATOR_RE.match(line.strip()):
             # The dash rule right under the header opens the traceback; any later rule closes it.
             if len(current) > 1:
                 current = None
         elif current is not None:
             current.append(line)
-    for block in blocks.values():
+    for block in (block for test_blocks in blocks.values() for block in test_blocks):
         while len(block) > 1 and not block[-1].strip():
             block.pop()
     return blocks
 
 
 def _header_identifier(header: re.Match[str]) -> str:
-    """unittest prints `name (id)` for a test and its subtests, and `name (class)` for a fixture error."""
+    """The test id for a test and each of its subtests, `name (class)` for a fixture error."""
     name, owner, rest = header.group(1), header.group(2), header.group(3)
     if owner.endswith(f".{name}"):
-        return owner + rest
+        return owner
     return f"{name} ({owner}){rest}"
 
 

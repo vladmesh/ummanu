@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest import mock
 
+from scripts.ci_test_shards import BoundedTee, _write_evidence, run_reported_suite
 from tests.support.fakes.gate import github_fixture
 from tests.support.persisted_mapping import record as dispatcher_record
 from ummanu.dispatch import ci_evidence, gate, gate_lifecycle, github_ci, state
@@ -63,7 +66,7 @@ class RenderSuiteTests(unittest.TestCase):
         sep, dash = "=" * 70, "-" * 70
         report = {"outcome": "product_failure", "counts": {"failed": 1, "error": 1}, "failure_locations": [
             "setUpClass (tests.test_a.ATests): /w/tests/test_a.py:9",
-            "tests.test_b.BTests.test_x (case='two'): /w/tests/test_b.py:20",
+            "tests.test_b.BTests.test_x: /w/tests/test_b.py:20",
         ]}
         lines = [
             sep, "FAIL: test_x (tests.test_b.BTests.test_x) (case='two')", dash,
@@ -83,6 +86,47 @@ class RenderSuiteTests(unittest.TestCase):
             "FAIL: test_x (tests.test_b.BTests.test_x) (case='two')", "Traceback (most recent call last):",
             "AssertionError: subtest two",
         ])
+
+    def test_producer_subtest_failures_render_under_their_test_within_the_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "subtest_evidence_sample.py").write_text(
+                "import unittest\n"
+                "class Sample(unittest.TestCase):\n"
+                "    def test_cases(self):\n"
+                "        for case in ('one', 'two'):\n"
+                "            with self.subTest(case=case):\n"
+                "                self.assertEqual(case, 'zero')\n"
+                "    def test_plain(self):\n"
+                "        self.fail('plain')\n",
+                encoding="utf-8",
+            )
+            directory = root / "evidence"
+            directory.mkdir()
+            sys.path.insert(0, str(root))
+            try:
+                with mock.patch("scripts.ci_test_shards.modules", return_value=["subtest_evidence_sample"]):
+                    log = BoundedTee(StringIO(), directory / "test-output.log")
+                    _write_evidence(directory, run_reported_suite("unit", ["ignored"], "a" * 40, log), log)
+            finally:
+                sys.path.remove(str(root))
+                sys.modules.pop("subtest_evidence_sample", None)
+            full = ci_evidence.render_suite("unit", directory)
+            with mock.patch.object(ci_evidence, "TESTS_PER_SUITE", 1):
+                capped = ci_evidence.render_suite("unit", directory)
+        located = [line for line in full.splitlines() if line.startswith("- subtest_evidence_sample.")]
+        self.assertEqual([line.split(": ", 1)[0] for line in located], [
+            "- subtest_evidence_sample.Sample.test_cases", "- subtest_evidence_sample.Sample.test_plain",
+        ])
+        tracebacks = capped.split("Tracebacks:\n", 1)[1].splitlines()
+        self.assertEqual(
+            tracebacks[0],
+            "FAIL: test_cases (subtest_evidence_sample.Sample.test_cases) (case='two')",
+        )
+        self.assertIn("AssertionError: 'two' != 'zero'", tracebacks)
+        self.assertIn("(1 more failing subtests of subtest_evidence_sample.Sample.test_cases omitted)", tracebacks)
+        self.assertNotIn("FAIL: test_plain (subtest_evidence_sample.Sample.test_plain)", capped)
+        self.assertIn("(1 more failing tests omitted)", capped)
 
 
 class EvidenceHost:
