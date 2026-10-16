@@ -10,6 +10,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from ummanu.infra.head_credential_findings import (
+    HEAD_CREDENTIAL_FINDING,
+    head_env_credential_findings,
+    role_head_credential_findings,
+)
 from ummanu.runtime import git_hooks, role_env
 from ummanu.runtime.paths import PRODUCT_ENV
 
@@ -19,7 +24,9 @@ OWNER_NAME = 'Owner "q" \\ name'
 OWNER_EMAIL = "owner@example.test"
 
 
-class RoleCredentialEnvTests(unittest.TestCase):
+class OwnerHomeCase(unittest.TestCase):
+    """An owner HOME whose own gh and git configuration hold a GitHub login."""
+
     def setUp(self) -> None:
         self.home = Path(tempfile.mkdtemp(prefix="role-credentials-home."))
         self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
@@ -58,6 +65,8 @@ class RoleCredentialEnvTests(unittest.TestCase):
     def _role_env(self, role: str) -> dict[str, str]:
         return role_env.runtime_env(role, base_env=self._owner_env(), env_file=self.home / "absent.env")
 
+
+class RoleCredentialEnvTests(OwnerHomeCase):
     def test_every_role_resolves_no_credential_helper_and_keeps_the_owner_identity(self) -> None:
         self.assertIn("gh auth", self._git(self._owner_env(), "config", "credential.helper").stdout)
         for role in role_env.ROLE_ALLOWLIST:
@@ -156,6 +165,36 @@ class RoleCredentialEnvTests(unittest.TestCase):
                 )
                 self.assertNotEqual(status.returncode, 0)
                 self.assertIn("not logged in", status.stdout + status.stderr)
+
+
+
+@unittest.skipUnless(shutil.which("gh"), "gh is not installed")
+class HeadCredentialDoctorTests(OwnerHomeCase):
+    def _findings(self) -> list[tuple[str, str]]:
+        return [
+            (str(finding["role"]), str(finding["path"]))
+            for finding in role_head_credential_findings(
+                base_env=self._owner_env(), env_file=self.home / "absent.env"
+            )
+            if finding["code"] == HEAD_CREDENTIAL_FINDING
+        ]
+
+    def test_the_launched_role_envs_reach_no_owner_login(self) -> None:
+        self.assertEqual(self._findings(), [])
+
+    def test_a_logged_in_hosts_file_in_the_managed_gh_directory_is_a_finding_per_role(self) -> None:
+        hosts = self.home / role_env.HEAD_CONFIG_DIR / "gh" / "hosts.yml"
+        hosts.parent.mkdir(parents=True)
+        shutil.copy(self.home / ".config" / "gh" / "hosts.yml", hosts)
+        self.assertEqual(self._findings(), [("worker", str(hosts)), ("reviewer", str(hosts))])
+
+    def test_a_credential_helper_in_the_git_configuration_the_head_reads_names_its_file(self) -> None:
+        env = {**self._role_env("worker"), "GIT_CONFIG_GLOBAL": str(self.home / ".gitconfig")}
+        findings = head_env_credential_findings("worker", env)
+        self.assertEqual(
+            [(finding["role"], finding["path"]) for finding in findings],
+            [("worker", str(self.home / ".gitconfig"))] * 2,
+        )
 
 
 if __name__ == "__main__":

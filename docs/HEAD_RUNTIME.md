@@ -32,6 +32,9 @@ and the `GIT_CONFIG_COUNT` bundle) and `SSH_ASKPASS` are dropped, `GIT_ASKPASS` 
 never prompts for credentials.
 A head push or `gh` call therefore fails authentication. Dispatcher Git operations use the managed
 credential in `infra/github_credential.py`; the PO keeps the owner's environment.
+`ummanu doctor` builds the worker and reviewer environments with the same builder and reports
+`head_env_github_login`, naming the role and file, when `gh auth token` resolves a login there or
+git reads a credential helper or URL rewrite.
 
 The dispatcher validates the sprint's entire creation-only `local_run_exceptions` field, then
 selects the card's project entries. Each durable launch intent retains one snapshot per head round;
