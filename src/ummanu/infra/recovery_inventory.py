@@ -497,6 +497,27 @@ def _ambient_credential_action(projects: list[dict[str, Any]], subject: str) -> 
     )
 
 
+# Git keys through which manual Git authenticates or reroutes outside the managed transport.
+GIT_BYPASS_KEY_PATTERN = r"^(url\..*\.insteadof|credential(\..*)?\.helper)$"
+
+
+def git_bypass_entries(show_origin_output: str) -> list[tuple[str, str, str]]:
+    """(origin, kind, value) per `git config --show-origin --get-regexp GIT_BYPASS_KEY_PATTERN` line.
+
+    kind is `insteadOf` for a URL rewrite and `credential-helper` for a credential helper.
+    """
+    entries: list[tuple[str, str, str]] = []
+    for line in show_origin_output.splitlines():
+        origin, separator, setting = line.partition("\t")
+        if not separator:
+            origin, setting = "unknown", line
+        key, _, value = setting.partition(" ")
+        lower = key.lower()
+        kind = "insteadOf" if lower.startswith("url.") and lower.endswith(".insteadof") else "credential-helper"
+        entries.append((origin, kind, value))
+    return entries
+
+
 def _git_bypasses(instance_dir: Path, projects: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     projects = projects or []
     rows: list[dict[str, Any]] = []
@@ -538,27 +559,22 @@ def _git_bypasses(instance_dir: Path, projects: list[dict[str, Any]] | None = No
                 "config",
                 "--show-origin",
                 "--get-regexp",
-                r"^(url\..*\.insteadof|credential(\..*)?\.helper)$",
+                GIT_BYPASS_KEY_PATTERN,
             ],
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
         result = None
-    for line in result.stdout.splitlines() if result is not None and result.returncode == 0 else []:
-        origin, separator, setting = line.partition("\t")
-        if not separator:
-            origin, setting = "unknown", line
-        key, _, value = setting.partition(" ")
-        lower = key.lower()
-        if lower.startswith("url.") and lower.endswith(".insteadof"):
+    for origin, kind, value in git_bypass_entries(
+        str(result.stdout) if result is not None and result.returncode == 0 else ""
+    ):
+        if kind == "insteadOf":
             if remote and value and not remote.startswith(value):
                 continue
-            kind = "insteadOf"
             reason = "an applicable Git URL rewrite can bypass the declared checkpoint transport"
         else:
             if not authenticated:
                 continue
-            kind = "credential-helper"
             reason = (
                 "ambient Git credential configuration exists; managed Ummanu GitHub operations disable it, "
                 "but manual Git may use it"
