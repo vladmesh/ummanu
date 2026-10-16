@@ -807,6 +807,8 @@ class DispatcherRecord:
     rejected_sha: str = ""
     rejected_failure_class: str = "substantive"
     rejected_failure_reason: str = ""
+    # The suite evidence artifacts a red gate comment was rendered from: run_id, suite, artifact.
+    rejected_gate_evidence: list[dict[str, str]] = field(default_factory=list)
     rejected_done_reports: int = 0
     # When the dispatcher last put a question to the worker head that the head has not answered:
     # the instant a done report was bounced back to rework (secretary-1543). It is a fact about
@@ -1057,6 +1059,7 @@ class DispatcherRecord:
             "worker_answer_owed_since": self.worker_answer_owed_since,
             "rejected_failure_class": self.rejected_failure_class,
             "rejected_failure_reason": self.rejected_failure_reason,
+            "rejected_gate_evidence": [dict(entry) for entry in self.rejected_gate_evidence],
             "rejected_sha": self.rejected_sha,
             "state": self.state,
             "worker": self.worker,
@@ -1191,6 +1194,10 @@ class DispatcherRecord:
             rejected_sha=str(payload.get("rejected_sha") or ""),
             rejected_failure_class=str(payload.get("rejected_failure_class") or "substantive"),
             rejected_failure_reason=str(payload.get("rejected_failure_reason") or ""),
+            rejected_gate_evidence=[
+                {str(key): str(value) for key, value in entry.items()}
+                for entry in payload.get("rejected_gate_evidence") or []
+            ],
             rejected_done_reports=int(payload.get("rejected_done_reports") or 0),
             worker_answer_owed_since=float(payload.get("worker_answer_owed_since") or 0.0),
             review_handle=str(payload.get("review_handle") or ""),

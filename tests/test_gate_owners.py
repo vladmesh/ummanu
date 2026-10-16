@@ -64,7 +64,7 @@ class GateOwnerTests(unittest.TestCase):
         self.assertIs(gate_pr.GateResult, gate.GateResult)
         self.assertEqual(list(dataclasses.asdict(gate.GateResult("green", "ok"))), [
             "status", "summary", "log", "fingerprint", "failure_class", "failure_reason",
-            "failed_run_id", "failed_run_repo", "attestation",
+            "failed_run_id", "failed_run_repo", "suite_evidence", "attestation",
         ])
         self.assertEqual(dataclasses.asdict(github_ci._LogFragment(False)), {
             "available": False, "step": "", "text": "", "failure_class": "substantive",

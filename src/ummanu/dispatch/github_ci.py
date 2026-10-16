@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from ummanu.dispatch import ci_evidence
 from ummanu.dispatch.gate_types import GATE_LOG_FRAGMENT_LINES, GateResult
 from ummanu.dispatch.helpers import _tail, safe_one_line
 from ummanu.dispatch.types import GateTransportError, HostError, ProjectGitAccessError
@@ -19,6 +21,10 @@ _FAIL_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "ST
 _PASS_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 #: The conclusion `_rollup` gives a required check that was never posted once every run has settled.
 MISSING_CONCLUSION = "MISSING"
+# The workflow's required aggregate job, its closing step, and the matrix jobs it summarises.
+_AGGREGATE_JOB = "test"
+_AGGREGATE_STEP = "Preserve required aggregate result"
+_SUITE_JOB_RE = re.compile(r"^test / ([\w.-]+)$")
 _RUN_URL_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/actions/runs/(\d+)")
 # `gh run view --log[-failed]` emits one line per log entry as `<job>\t<step>\t<content>`.
 _ERROR_MARK_RE = re.compile(r"##\[error\]")
@@ -152,6 +158,76 @@ class _LogFragment:
     failure_class: str = "substantive"
     failure_reason: str = ""
     reason: str = ""
+
+
+@dataclass
+class _SuiteLog:
+    """The red comment log for a failed job and the suite artifacts it was rendered from."""
+
+    text: str
+    evidence: list[dict[str, str]] = field(default_factory=list)
+
+
+def _suite_log(host, repo: str, item: dict, fragment: _LogFragment, sha: str) -> _SuiteLog:
+    """Replace an aggregate red's tail with the evidence of every failed suite job of its run.
+
+The aggregate tail stays only when no suite evidence could be rendered, with the reason
+for each missing artifact. Other reds and infrastructure reds keep their fragment.
+    """
+    tail = fragment.text if fragment.available else f"log unavailable: {fragment.reason}"
+    aggregate = _check_name(item) == _AGGREGATE_JOB or fragment.step == _AGGREGATE_STEP
+    run_id = _actions_run_id(item)
+    if fragment.failure_class == "infrastructure" or not aggregate or not run_id:
+        return _SuiteLog(tail)
+    try:
+        suites = _failed_suites(host, repo, run_id)
+    except (GateTransportError, HostError) as exc:
+        return _SuiteLog(f"{tail}\nsuite evidence unavailable: the jobs of run {run_id} could not be listed: {exc}")
+    sections: list[str] = []
+    missing: list[str] = []
+    evidence: list[dict[str, str]] = []
+    for suite in suites:
+        artifact = f"ci-evidence-{suite}-{sha}"
+        with tempfile.TemporaryDirectory(prefix="ummanu-gate-evidence-") as directory:
+            try:
+                _download_artifact(host, repo, run_id, artifact, directory)
+                sections.append(ci_evidence.render_suite(suite, Path(directory)))
+            except (GateTransportError, HostError, ci_evidence.EvidenceUnreadable) as exc:
+                missing.append(f"suite {suite}: evidence artifact {artifact} of run {run_id} unavailable: {exc}")
+                continue
+        evidence.append({"run_id": run_id, "suite": suite, "artifact": artifact})
+    if not sections:
+        return _SuiteLog("\n".join([tail, *missing]))
+    return _SuiteLog("\n\n".join([*sections, *missing]), evidence)
+
+
+def _failed_suites(host, repo: str, run_id: str) -> list[str]:
+    """Suite names of the run's failed `test / <suite>` matrix jobs."""
+    completed = _backend_call(
+        host, ["gh", "run", "view", run_id, "-R", repo, "--json", "jobs"], "gate run jobs"
+    )
+    if completed.returncode != 0:
+        raise HostError(_tail(_answer(completed)) or "(no output)")
+    try:
+        jobs = json.loads((completed.stdout or "").strip())["jobs"]
+    except (ValueError, KeyError, TypeError):
+        raise HostError("`gh run view --json jobs` answered without a jobs list") from None
+    suites = []
+    for job in jobs:
+        match = _SUITE_JOB_RE.match(str(job.get("name") or ""))
+        if match and str(job.get("conclusion") or "").upper() in _FAIL_CONCLUSIONS:
+            suites.append(match.group(1))
+    return suites
+
+
+def _download_artifact(host, repo: str, run_id: str, artifact: str, directory: str) -> None:
+    completed = _backend_call(
+        host,
+        ["gh", "run", "download", run_id, "-R", repo, "-n", artifact, "-D", directory],
+        "gate suite evidence",
+    )
+    if completed.returncode != 0:
+        raise HostError(_tail(_answer(completed), 3) or "(no output)")
 
 
 def _validation(host, task: dict) -> dict:

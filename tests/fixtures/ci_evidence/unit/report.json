@@ -1,0 +1,46 @@
+{
+  "schema_version": 2,
+  "suite": "unit",
+  "candidate_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "outcome": "product_failure",
+  "counts": {
+    "collected": 41,
+    "passed": 38,
+    "failed": 1,
+    "error": 1,
+    "skipped": 1
+  },
+  "duration_seconds": 12.5,
+  "slowest_tests": [
+    {
+      "identifier": "tests.test_clock.ClockTests.test_slow_tick",
+      "module": "tests.test_clock",
+      "outcome": "passed",
+      "duration_seconds": 6.25,
+      "detail": null
+    }
+  ],
+  "failure_locations": [
+    "tests.test_rollup.RollupTests.test_missing_check_is_red: /home/runner/work/ummanu/ummanu/tests/test_rollup.py:88",
+    "tests.test_store.StoreTests.test_reopen: /home/runner/work/ummanu/ummanu/src/ummanu/store.py:140",
+    "timing budget test tests.test_clock.ClockTests.test_slow_tick: 6.250000s > 5s"
+  ],
+  "timing": {
+    "status": "complete"
+  },
+  "timing_violations": [
+    {
+      "kind": "test",
+      "identifier": "tests.test_clock.ClockTests.test_slow_tick",
+      "duration_seconds": 6.25,
+      "limit_seconds": 5.0
+    }
+  ],
+  "log_truncated": false,
+  "detail": null,
+  "artifacts": {
+    "junit": "junit.xml",
+    "log": "test-output.log"
+  },
+  "checkout_status": null
+}

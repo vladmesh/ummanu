@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # Pending CI has a bounded watchdog so missing checks cannot strand a card.
 GATE_PENDING_STALL_SECONDS = int(os.environ.get("UMMANU_GATE_PENDING_STALL_SECONDS", str(6 * 3600)))
@@ -36,6 +36,8 @@ class GateResult:
     # can be rerun; an external status or a log without a run URL remains a red verdict.
     failed_run_id: str = ""
     failed_run_repo: str = ""
+    # The `ci-evidence-<suite>-<sha>` artifacts the red log was rendered from: run_id, suite, artifact.
+    suite_evidence: list[dict[str, str]] = field(default_factory=list)
     # Reusable green evidence names the exact tree and terminal checks.
     attestation: dict[str, object] | None = None
 
