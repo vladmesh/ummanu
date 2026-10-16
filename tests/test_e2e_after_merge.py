@@ -25,7 +25,7 @@ from ummanu._fsutil import file_lock
 from ummanu.board import po_execution, po_origin as origin_field
 from ummanu.board.e2e_disposition import completion_identity
 from ummanu.board.e2e_record import AfterMergeMark, e2e_state
-from ummanu.board.owner_events import OwnerEventStore
+from ummanu.board.owner_events import READ_ONLY_KINDS, OwnerEventStore
 from ummanu.dispatch import e2e_after_merge
 from ummanu.dispatch.e2e_after_merge import queues, reconcile_after_merge
 from ummanu.dispatch.post_merge import reconcile_post_merge_watches, watches
@@ -332,7 +332,7 @@ class AfterMergeFixture(E2eStageFixture):
         return self.reader.show(ref)["e2e"]
 
     def bells(self) -> list[Any]:
-        return OwnerEventStore(self.board.credentials).events()
+        return [e for e in OwnerEventStore(self.board.credentials).events() if e.kind in READ_ONLY_KINDS]
 
     def hotfixes(self) -> list[dict[str, Any]]:
         return [card for card in self.reader.list() if str(card.get("title") or "").startswith("Hotfix:")]

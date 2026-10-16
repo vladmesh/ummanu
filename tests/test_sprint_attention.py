@@ -140,6 +140,7 @@ class SprintAttentionTests(SprintProtocolFixture):
 
     def test_five_budget_dependents_share_one_actual_owner_question(self):
         import json
+
         from ummanu.board.e2e_record import BudgetWait, E2eState
         self.claim("decision")
         for number in range(90, 95):
