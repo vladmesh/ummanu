@@ -1373,9 +1373,13 @@ local/GitHub gate with a valid dispatcher-owned exact-SHA gate receipt is reusab
 downstream as a mechanical gate attestation. A none/noop gate or missing receipt attests no broad suite.
 Reviewers inspect changed code, commits, invariants and worker/CI evidence without running tests or
 any `ummanu check` form, including show and reuse. They name missing evidence in the verdict and
-request necessary validation from the worker or CI. Re-review
+request necessary validation from the worker or CI. Every review document opens, after the check
+header, with `## Submit your verdict`: the verdict body file and the green and red `task verdict`
+commands, before the card and all evidence; its last line points back there. Re-review
 packets carry the previous reviewed SHA, previous blocker text/IDs, current SHA and changed-path
-delta.
+delta. A review document over `REVIEW_PROMPT_LINE_BUDGET` (240 lines) writes the full prior-round
+material to `<prompt>.evidence.md` beside it and keeps a bounded excerpt of each prior finding,
+observer decision and worker report body with a pointer to that file.
 
 Worker and reviewer shells run with `workspace/.ummanu-task-env/venv/bin` first. When an adapter
 declares `broad_check` without `broad_check.interpreter`, its candidate `.[dev,typecheck]` install supplies the

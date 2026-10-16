@@ -16,6 +16,7 @@ from ummanu.dispatch.helpers import (
     _task_doc_protocol_prerequisites,
 )
 from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.host_runtime.packets import REVIEW_PROMPT_LINE_BUDGET
 from ummanu.dispatch.review_packet import (
     data_block,
     dispositions,
@@ -754,6 +755,33 @@ class PacketHeaderTests(unittest.TestCase):
         self.assertIn("source_event: observer-decision-1", reviewer)
         self.assertIn("BLOCKER-later: deferred; issue: issue:abc123", reviewer)
         self.assertIn("перенести в интеграционный шард", reviewer)
+
+    def test_a_long_re_review_opens_with_the_verdict_commands_and_references_the_full_evidence(self):
+        fixture = PacketFixture()
+        for index, comment, tag in ((1, 0, "finding"), (3, 1, "decision"), (-1, -1, "report")):
+            body = fixture.events[index]["data"]["body"] + "".join(f"\n{tag} line {n}" for n in range(300))
+            fixture.events[index]["data"]["body"] = body
+            marker = fixture.task["comments"][comment]["marker"]
+            fixture.task["comments"][comment]["body"] = f"[{marker}]\n{body}"
+        fixture.decision = fixture.events[3]["data"]["body"]
+        record = self.record()
+        record.report_decision = fixture.decision
+        record.previous_blockers = fixture.events[1]["data"]["body"]
+
+        lines = self.host(fixture)._review_prompt(fixture.task, "attempt-1", 4, record=record).splitlines()
+
+        self.assertLessEqual(len(lines), REVIEW_PROMPT_LINE_BUDGET)
+        commands = [n for n, line in enumerate(lines) if " task verdict --ref ummanu-1 " in line]
+        self.assertEqual(len(commands), 2)
+        self.assertLess(max(commands), lines.index(fixture.task["description"]))
+        self.assertLess(max(commands), lines.index("## Re-review packet"))
+        self.assertIn("`## Submit your verdict`", [line for line in lines if line][-1])
+        pointers = [line for line in lines if line.startswith("`### ") and line.endswith(".evidence.md.")]
+        self.assertEqual(len(pointers), 3)
+        full_text = Path(pointers[0].split("` in ", 1)[1][:-1]).read_text()
+        for tag in ("finding", "decision", "report"):
+            self.assertIn(f"{tag} line 299", full_text)
+            self.assertNotIn(f"{tag} line 299", lines)
 
     def test_every_worker_gets_the_style_rules_and_a_code_reviewer_the_style_checklist(self):
         fixture = PacketFixture()

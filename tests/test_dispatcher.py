@@ -2661,6 +2661,50 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         # reviewer went.
         self.assertEqual(self.host.review_stop_initiators, [STOPPED_BY_WATCHDOG, STOPPED_BY_WATCHDOG])
 
+    def _remind_quiet_reviewer(self) -> dict:
+        """A conversational reviewer whose turn ended with no verdict, aged past the stall."""
+        self.host.review_takes_prompts = True
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self.assertEqual(self.tick()["action"], "waiting-review-verdict")
+        self._rewind_wait("review", seconds=stall_seconds("review") + 60)
+        return self.tick()
+
+    def test_quiet_reviewer_gets_one_verdict_reminder_and_its_verdict_clears_the_wait(self) -> None:
+        prompted = self._remind_quiet_reviewer()
+
+        self.assertEqual(prompted["action"], "review-verdict-prompted")
+        self.assertEqual(len(self.host.verdict_prompts), 1)
+        for kind in ("green", "red"):
+            self.assertIn(self._review_verdict_request_id(kind), self.host.verdict_prompts[0])
+        self.assertIn("was asked once", self.reader.show("ummanu-510")["comments"][-1]["body"])
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="ummanu-510",
+            kind="green",
+            body="green after the reminder",
+            request_id=self._review_verdict_request_id("green"),
+        )
+
+        parked = self.tick()
+
+        self.assertEqual(parked["to"], "assessment")
+        self.assertEqual(self.host.reviews, ["ummanu-510"], "a verdict after the reminder needs no respawn")
+        self.assertEqual(len(self.host.verdict_prompts), 1)
+
+    def test_reviewer_still_quiet_after_its_reminder_takes_the_respawn_path(self) -> None:
+        self.assertEqual(self._remind_quiet_reviewer()["action"], "review-verdict-prompted")
+        self._rewind_wait("review", seconds=stall_seconds("review") + 60)
+
+        respawned = self.tick()
+
+        self.assertEqual(respawned["action"], "review-respawned")
+        self.assertEqual(self.host.reviews, ["ummanu-510", "ummanu-510"])
+        self.assertEqual(len(self.host.verdict_prompts), 1)
+        self.assertIn("respawned the review head", self.reader.show("ummanu-510")["comments"][-1]["body"])
+
     def test_second_reviewer_stall_retries_an_unconfirmed_stop_before_blocking(self) -> None:
         self.start_dispatcher()
         self._run_worker_to_validate()

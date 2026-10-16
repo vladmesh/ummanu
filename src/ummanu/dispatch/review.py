@@ -17,6 +17,7 @@ from ummanu.dispatch.handoff_liveness import (
     observe_pending_handoff,
     provider_evidence,
 )
+from ummanu.dispatch.head_vitality_episode import VitalityVerdict
 from ummanu.dispatch.helpers import _last_marker, scrub_host_output
 from ummanu.dispatch.launch import (
     LAUNCH_DELIVERY_MAX_ATTEMPTS,
@@ -65,6 +66,7 @@ from ummanu.dispatch.watchdog import (
     heartbeat_is_mismatch as _heartbeat_is_mismatch,
     initial_output_stall_seconds as _initial_output_stall_seconds,
     pid_file_path as _pid_file_path,
+    reset_idle as _reset_idle,
     review_infra_retry_attempts as _review_infra_retry_attempts,
     review_launch_abort_stuck_ticks as _review_launch_abort_stuck_ticks,
     wait_cycle_token as _wait_cycle_token,
@@ -74,6 +76,82 @@ from ummanu.runtime.head import HeadRun, HeadRunError
 from ummanu.runtime.head.handoff import handoff_pending_stage
 from ummanu.runtime.head_runtime_backends import head_runtime_name
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+
+
+def prompt_review_verdict(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+    *,
+    trigger: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Spend this review head's one verdict reminder on a quiet reviewer, or decline to.
+
+    A `None` outcome means the watchdog carries on with the trigger it is handed back. The run is
+    marked spent before the send, so a tick that dies mid-send never types the reminder twice.
+    """
+    ref = task["ref"]
+    run_id = str(record.review_head_run.get("run_id") or "")
+    if not run_id or record.review_verdict_prompted_run == run_id:
+        return None, trigger
+    if not runtime.host.review_addressable(record):
+        return None, trigger
+    record.review_verdict_prompted_run = run_id
+    records[ref] = record
+    runtime.save_records(payload, records)
+    try:
+        runtime.bind_codex_provider_ingress(record, records, payload, role=REVIEW_ROLE, reference=ref)
+        runtime.host.prompt_review_verdict(task, record)
+    except HostError as exc:
+        records[ref] = record
+        runtime.save_records(payload, records)
+        return None, f"{trigger}, and the verdict prompt was refused: {scrub_host_output(str(exc))}"
+    # The reminded head owns a fresh quiet clock, as a reminded worker does: the episode that
+    # produced the reminder must not confirm a stall before the head could have answered it.
+    _reset_idle(record, "review")
+    now = time.time()
+    episode = record.review_vitality_episode
+    if episode is not None:
+        record.review_vitality_episode = replace(
+            episode,
+            verdict=VitalityVerdict.HEALTHY_QUIET,
+            suspected_since=0.0,
+            confirmed_since=0.0,
+            started_at=now,
+            quiet_since=now,
+            updated_at=now,
+            reason="verdict prompt delivered; the quiet clock restarts here",
+        )
+    records[ref] = record
+    runtime.save_records(payload, records)
+    runtime.writer.comment(
+        role="dispatcher",
+        actor=runtime.owner,
+        reference=ref,
+        body=(
+            f"Dispatcher wait watchdog: {trigger}. The review head was asked once to write its "
+            "verdict body and run the green or red verdict command. Another quiet turn with no "
+            "verdict respawns the head."
+        ),
+        request_id=_attempt_request_id(
+            record.attempt_id or attempt_id,
+            "review-verdict-prompt",
+            ref,
+            f"{record.review_baseline}-{record.review_respawns}",
+        ),
+    )
+    return {
+        # Degraded, not ok: a review whose head had to be reminded is not moving on its own.
+        "status": "degraded",
+        "step": "review",
+        "pilot_ref": ref,
+        "attempt_id": attempt_id,
+        "action": "review-verdict-prompted",
+        "reason": trigger,
+    }, trigger
 
 
 def candidate_sha(record: DispatcherRecord) -> str:

@@ -1746,6 +1746,49 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
             subject="worker-report",
         )
 
+    def prompt_review_verdict(self, task: dict[str, Any], record: DispatcherRecord) -> None:
+        """Remind a live reviewer of its round's body file and verdict commands. Nothing else."""
+        self._refuse_legacy_record(record, "deliver to the reviewer of")
+        status = self._head_status(
+            record.review_pid_file,
+            run=record.review_head_run,
+            role="review",
+            leaf=record.review_leaf,
+        )
+        if not _heartbeat_is_live_match(status):
+            raise HostError("reviewer session exited")
+        if status.get("stopped"):
+            raise HostError("reviewer session is suspended and cannot take a verdict prompt")
+        if not self.review_addressable(record):
+            raise HostError("reviewer session cannot accept a verdict prompt")
+        body_file, commands = self._review_verdict_protocol(task["ref"], record.attempt_id, record.review_baseline)
+        run = self.review_lifecycle_run(record)
+        ingress = self._codex_provider_ingress(run)
+        try:
+            receipt = self.head_runtime_for(run).deliver(
+                run,
+                head_ops.NudgePointer.line(_verdict_nudge_prompt(task["ref"], body_file, commands)),
+                transport=self._head_transport(
+                    record.workspace,
+                    "",
+                    self._prompt_adapter(record.review_run, record.review_head),
+                    "reviewer",
+                    before_send=ingress.bind_before_delivery if ingress is not None else None,
+                ),
+                subject="reviewer-verdict",
+            )
+        except LegacyDispatcherRecord:
+            raise
+        except (TuiDeliveryError, HostError) as exc:
+            failure = HostError(f"reviewer verdict prompt was not delivered: {exc}")
+            failure.evidence = getattr(exc, "evidence", None)
+            raise failure from None
+        if not receipt.ok or receipt.handoff_stage:
+            failure = HostError(f"reviewer verdict prompt was not delivered: {receipt.reason}")
+            failure.evidence = _delivery_evidence_json(receipt, "reviewer-verdict")
+            raise failure from None
+        record.review_head_run = receipt.run.to_json()
+
     def worker_takes_comments(self, record: DispatcherRecord) -> bool:
         """Whether this card's worker is live, running and addressable, so a comment pointer can reach it now."""
         if self.mode == "noop" or not self._continuation_addressable(record):
@@ -2283,6 +2326,19 @@ def _report_nudge_prompt(generation: int, reference: str) -> str:
         f"--request-id and body file end in {generation}. Commits, pushes, a green test run or an "
         "earlier round's report command do not count: the card moves only when this round's report "
         "command runs."
+    )
+
+
+def _verdict_nudge_prompt(reference: str, body_file: str, commands: dict[str, str]) -> str:
+    """What a reviewer whose turn ended without a verdict is told, once per head.
+
+    It names actions only: a reply typed into the pane reaches nobody, so the nudge must not invite one.
+    """
+    return (
+        f"Dispatcher watchdog: this head is idle at its prompt and the review of {reference} has no "
+        "verdict. Do not reply to this message: text typed here is read by nobody and moves nothing. "
+        f"Finish the review, write the verdict body to {body_file} with your file-writing tool, then "
+        f"run exactly one of these commands. Green: {commands['green']} Red: {commands['red']}"
     )
 
 

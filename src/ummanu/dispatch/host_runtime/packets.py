@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import subprocess
+from functools import partial
 from pathlib import Path
 from stat import S_IMODE, S_ISDIR
 from typing import Any
@@ -72,6 +73,9 @@ from ummanu.runtime.prompt_document import (
 from ummanu.runtime.role_env import WORKSPACE_ENV_DIR
 
 _PYTHONPATH_PREFIX = pythonpath_prefix()
+# A head reads a long document in pages; a review prompt longer than this loses its tail.
+REVIEW_PROMPT_LINE_BUDGET = 240
+MIN_EVIDENCE_EXCERPT_LINES = 5
 
 def _interrupted_command_section(record: DispatcherRecord | None) -> list[str]:
     """The one factual line a respawned head gets about the command its predecessor was running.
@@ -992,6 +996,33 @@ class PromptPacketMixin:
             decision_id=decision_id, review_id=review_id,
         )
 
+    def _review_verdict_protocol(
+        self, reference: str, attempt_id: str, review_round: int
+    ) -> tuple[str, dict[str, str]]:
+        """This review round's verdict body file and its green and red `task verdict` commands."""
+        body_file = _body_file_path(self.data_dir, "verdict", reference, review_round)
+        _private_body_dir(Path(body_file).parent)
+        # The round belongs in the key like it does in the worker report id: a card that goes red
+        # twice in one attempt reuses attempt_id, and a round-less id replays the first verdict.
+        commands = {
+            kind: self._control_plane_command(
+                "task",
+                "verdict",
+                "--ref",
+                reference,
+                "--role",
+                "reviewer",
+                "--kind",
+                kind,
+                "--request-id",
+                _attempt_request_id(attempt_id, f"review-{kind}", reference, str(review_round)),
+                "--body-file",
+                body_file,
+            )
+            for kind in ("green", "red")
+        }
+        return body_file, commands
+
     def _review_prompt(
         self,
         task: dict[str, Any],
@@ -1001,33 +1032,80 @@ class PromptPacketMixin:
         record: DispatcherRecord | None = None,
         local_run_policy: tuple[dict[str, Any] | None, bool] | None = None,
     ) -> str:
-        # The round belongs in the key like it does in the worker report id: a card that goes red
-        # twice in one attempt reuses attempt_id, and a round-less id replays the first verdict.
-        green_request = _attempt_request_id(attempt_id, "review-green", task["ref"], str(review_round))
-        red_request = _attempt_request_id(attempt_id, "review-red", task["ref"], str(review_round))
-        body_file = _body_file_path(self.data_dir, "verdict", task["ref"], review_round)
-        _private_body_dir(Path(body_file).parent)
-        verdict_commands = {
-            kind: self._control_plane_command(
-                "task",
-                "verdict",
-                "--ref",
-                task["ref"],
-                "--role",
-                "reviewer",
-                "--kind",
-                kind,
-                "--request-id",
-                request,
-                "--body-file",
-                body_file,
-            )
-            for kind, request in (("green", green_request), ("red", red_request))
-        }
+        body_file, verdict_commands = self._review_verdict_protocol(task["ref"], attempt_id, review_round)
         current_sha = self.head_commit(record) if record else ""
         attestation = _gate_attestation_for_prompt(record, current_sha)
-        sections = [
+        evidence: ReviewEvidence | None = None
+        delta = ""
+        if record is not None and (
+            record.previous_blockers
+            or record.report_decision
+            or (has_candidate(task) and record.previous_reviewed_sha)
+        ):
+            evidence = self._prior_review_evidence(task, record)
+            if has_candidate(task):
+                delta = self._review_delta(record, record.previous_reviewed_sha, current_sha)
+        assemble = partial(
+            self._review_prompt_text, task, record,
+            verdict_commands=verdict_commands, body_file=body_file, current_sha=current_sha,
+            delta=delta, attestation=attestation, local_run_policy=local_run_policy,
+        )
+        if evidence is None:
+            return assemble([])
+        prompt = assemble(render_review_evidence(evidence))
+        if len(prompt.splitlines()) <= REVIEW_PROMPT_LINE_BUDGET:
+            return prompt
+        # Over budget: the full prior-round material goes to a file beside the prompt document and
+        # the prompt keeps an excerpt of each body sized to what the budget leaves.
+        full_text = self._prompt_document_path(REVIEW_ROLE, task["ref"], review_round).with_suffix(".evidence.md")
+        try:
+            _write_prompt_document(
+                full_text,
+                "\n".join(render_review_evidence(evidence)),
+                outside=Path(record.workspace) if record and record.workspace else None,
+            )
+        except PromptDocumentError as exc:
+            raise HostError(f"the prior review evidence could not be written: {exc}") from None
+        bare = assemble(render_review_evidence(evidence, excerpt_lines=0, full_text=str(full_text)))
+        bodies = sum(
+            1 for body in (evidence.findings, evidence.decision, evidence.report, evidence.historical) if body
+        )
+        # Each excerpt also costs its data block's opening fence, closing fence and blank line.
+        room = (REVIEW_PROMPT_LINE_BUDGET - len(bare.splitlines())) // max(1, bodies) - 3
+        return assemble(render_review_evidence(
+            evidence, excerpt_lines=max(MIN_EVIDENCE_EXCERPT_LINES, room), full_text=str(full_text)
+        ))
+
+    def _review_prompt_text(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord | None,
+        prior: list[str],
+        *,
+        verdict_commands: dict[str, str],
+        body_file: str,
+        current_sha: str,
+        delta: str,
+        attestation: dict[str, object],
+        local_run_policy: tuple[dict[str, Any] | None, bool] | None,
+    ) -> str:
+        """One review document: the submission protocol first, the card and the evidence after it."""
+        protocol = [
             f"# Review {task['ref']}",
+            "",
+            "## Submit your verdict",
+            "",
+            "When the review is done, post exactly one review verdict through the ummanu task protocol.",
+            "A verdict typed into the chat reaches nobody: the card moves only when one of these commands runs.",
+            *_body_file_instructions(body_file),
+            "Green verdict:",
+            verdict_commands["green"],
+            "Red verdict:",
+            verdict_commands["red"],
+            "",
+        ]
+        sections = [
+            "## Card",
             "",
             task.get("description") or "(empty task description)",
             "",
@@ -1090,23 +1168,21 @@ class PromptPacketMixin:
             "hashes and CI links. Name each pending evidence item. A fixture or offline projection",
             "does not prove delivery of this candidate's packet to a head that started before it.",
             "",
-            "Post exactly one review verdict through the ummanu task protocol:",
-            *_body_file_instructions(body_file),
-            verdict_commands["green"],
-            verdict_commands["red"],
+            "Submit with the green or red verdict command under `## Submit your verdict` at the top of this file.",
             "",
         ]
+        header = [*self._review_check_header(str(task.get("project") or "")), *protocol]
         if not has_candidate(task):
             # No candidate: no branch, diff or gate to point at. A re-review keeps only the blockers.
-            if record and (record.previous_blockers or record.report_decision):
+            if prior:
                 sections[4:4] = [
                     "## Re-review packet",
                     "",
                     "Previous blockers (close or explicitly retain these stable IDs):",
-                    *self._prior_review_evidence(task, record),
+                    *prior,
                     "",
                 ]
-            return "\n".join([*self._review_check_header(str(task.get("project") or "")), *sections])
+            return "\n".join([*header, *sections])
         if attestation:
             sections[4:4] = [
                 "## Mechanical gate attestation",
@@ -1144,32 +1220,31 @@ class PromptPacketMixin:
                 "entitled to have, not an invitation to grade the head.",
                 "",
             ]
-        if record and (record.previous_reviewed_sha or record.report_decision or record.previous_blockers):
+        if record and prior:
             sections[4:4] = [
                 "## Re-review packet",
                 "",
                 f"previous_reviewed_sha: {_safe_one_line(record.previous_reviewed_sha) or 'unknown/unresolved'}",
                 f"current_sha: {_safe_one_line(current_sha) or '(unavailable)'}",
                 "Changed paths / delta from the prior review:",
-                self._review_delta(record, record.previous_reviewed_sha, current_sha),
+                delta,
                 "Previous blockers (close or explicitly retain these stable IDs):",
-                *self._prior_review_evidence(task, record),
+                *prior,
                 "Review this delta, the closure of prior blockers and collateral impact; do not restart",
                 "from the original base unless a concrete suspicion requires the historical diff.",
                 "",
             ]
         sections[4:4] = self._worker_check_packet(task, record, current_sha)
-        return "\n".join([*self._review_check_header(str(task.get("project") or "")), *sections])
+        return "\n".join([*header, *sections])
 
-    def _prior_review_evidence(self, task: dict[str, Any], record: DispatcherRecord) -> list[str]:
-        evidence = self._select_revision_bound_worker_feedback(
+    def _prior_review_evidence(self, task: dict[str, Any], record: DispatcherRecord) -> ReviewEvidence:
+        return self._select_revision_bound_worker_feedback(
             task, record.report_decision, attempt=record.attempt_id,
             generation=record.report_generation,
             previous=record.previous_blockers,
             decision_id=record.report_decision_id,
             review_id=record.previous_review_id or ("" if record.report_decision_id else None),
         )
-        return render_review_evidence(evidence)
 
     def _review_delta(self, record: DispatcherRecord, previous: str, current: str) -> str:
         """A small re-review packet; failure to read it is evidence, never a broad test fallback."""

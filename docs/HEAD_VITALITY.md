@@ -420,8 +420,8 @@ details are in [PROTOCOLS.md](PROTOCOLS.md#provider-failure-of-a-heads-turn), wi
 | `HealthyActive`, `HealthyQuiet`, `Unverifiable` | `wait`. Fresh evidence renews the outer `worker_waiting_since` window. A recovered suspension lands here with the ladder cleared. |
 | `Retained` | `wait` only; the role's wait clock is renewed. |
 | `Suspended` | Recovery policy: one identity-fenced SIGCONT per suspension span, a response window, then operator escalation. Never a stop. |
-| `SuspectedStall` | At most one idempotent report nudge per round generation, then visible degradation (`{kind}-stall-suspected`). Never destructive. |
-| `ConfirmedStall` | One report prompt if the round has not spent it, else `dispatch.wait_vitality._trigger_wait_watchdog` → respawn once → escalate to Blocked. |
+| `SuspectedStall` | At most one idempotent nudge: per round generation for a worker (report), per review head run for a reviewer (verdict). Then visible degradation (`{kind}-stall-suspected`). Never destructive. |
+| `ConfirmedStall` | The same one nudge if not yet spent, else `dispatch.wait_vitality._trigger_wait_watchdog` → respawn once → escalate to Blocked. |
 | `Dead` | Reclaim via `dispatch.wait_vitality._trigger_wait_watchdog`. |
 | No episode / `Unverifiable`, ceiling elapsed | Operator escalation, head untouched (`_escalate_unobservable_wait`): one idempotent durable comment naming the evidence gap and a degraded `{kind}-unobserved-wait-escalated` outcome. Before that, an authoritative deterministic refusal seen `deterministic_refusal_limit` times escalates without waiting for the ceiling. |
 
