@@ -3,8 +3,8 @@
 One table, `origin_returns` (revision `0022_origin_returns`), one row per transition into Done or
 Blocked of a card that carries a PO origin (`board/po_origin.py`) and is not a wait card: the card
 ref, the transition's event id (unique) and request id, the column it entered, when, and the delivery
-outcome (`delivered_at`, `status` delivered|skipped, the notice result, the session that took it, the
-input's request id).
+outcome (`delivered_at`, `status` delivered|skipped, the session that took it, the input's request
+id). `notice` is read only; a delivery leaves it as it is.
 
 **Written in the transition's own transaction.** :func:`enqueue` is called by
 `SqlTaskAudit.append`, the one place a committed audit record is written (`requests`), in the same
@@ -139,14 +139,14 @@ class OriginOutboxStore:
         )
         return [OutboxRow(*row) for row in rows]
 
-    def mark(self, row_id: int, *, status: str, notice: str, session: str, po_request_id: str) -> bool:
+    def mark(self, row_id: int, *, status: str, session: str, po_request_id: str) -> bool:
         """Record one row's delivery, once: a row already delivered is left as it is. True when written."""
         if status not in STATUSES:
             raise ValueError(f"an origin return is {' or '.join(STATUSES)}, not {status!r}")
         changed = self.client._execute(
-            f"UPDATE {TABLE} SET delivered_at = now(), status = %s, notice = %s, session = %s, "
+            f"UPDATE {TABLE} SET delivered_at = now(), status = %s, session = %s, "
             "po_request_id = %s WHERE id = %s AND delivered_at IS NULL",
-            (status, notice or None, session or None, po_request_id or None, row_id),
+            (status, session or None, po_request_id or None, row_id),
         )
         self.client._commit_unless_nested()
         return bool(changed)

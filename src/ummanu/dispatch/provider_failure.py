@@ -543,7 +543,6 @@ def _empty_chain(
     provider and no head of its chain can be launched. The candidate, gate receipt and workspace stay
     as they are for whoever moves the card back once a provider resets.
     """
-    from ummanu.board import owner_events
     from ummanu.dispatch import attempt_accounting
 
     ref = task["ref"]
@@ -568,13 +567,6 @@ def _empty_chain(
         terminal_state="blocked",
         disposition="blocked",
         blocked_reason="operator",
-    )
-    owner_events.record(
-        owner_events.HEAD_DEAD,
-        ref,
-        f"The {role} head of {ref} cannot run on any provider: {reason}; the card is Blocked for the operator",
-        f"{owner_events.HEAD_DEAD}:{request_id}",
-        to=getattr(getattr(runtime, "reader", None), "client", None),
     )
     records.pop(ref, None)
     runtime.save_records(payload, records)

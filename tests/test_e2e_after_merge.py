@@ -332,7 +332,7 @@ class AfterMergeFixture(E2eStageFixture):
         return self.reader.show(ref)["e2e"]
 
     def bells(self) -> list[Any]:
-        return [e for e in OwnerEventStore(self.board.credentials).events() if e.kind == "e2e_after_merge"]
+        return OwnerEventStore(self.board.credentials).events()
 
     def hotfixes(self) -> list[dict[str, Any]]:
         return [card for card in self.reader.list() if str(card.get("title") or "").startswith("Hotfix:")]
@@ -573,7 +573,7 @@ class ExactShaTests(AfterMergeFixture, unittest.TestCase):
         self.assertEqual(len(self.host.dispatches), 1)
         self.assertEqual(self.writer.audit.committed_event("released-result-" + cards[0]), original)
         self.assertEqual(self.mark(cards[0])["waiting_on"], operation["ref"])
-        self.assertEqual(len(self.bells()), 1)
+        self.assertEqual(self.bells(), [])
         self.am_tick()
         self.assertEqual(len([c for c in self.reader.list() if c.get("type") == "operation"]), 1)
 
@@ -666,7 +666,7 @@ class ExactShaTests(AfterMergeFixture, unittest.TestCase):
         self.assertEqual(run.wait_ref, "", "no wait card is created for it")
         self.assertEqual(self.comments_on(cards[0], "E2E after merge — green"), [])
         self.assertEqual(self.hotfixes(), [])
-        self.assertEqual(len(self.bells()), 1)
+        self.assertEqual(self.bells(), [])
         self.assertEqual(self.pending(), [])
         self.assertEqual(self.mark(cards[0])["state"], "blocked")
         operation = self.reader.show(run.disposition)
@@ -703,7 +703,7 @@ class ExactShaTests(AfterMergeFixture, unittest.TestCase):
         # Unconfirmed dispatch evidence is owned by the PO before another paid attempt.
         self.assertNotIn(run.git_ref, self.host.refs)
         self.assertEqual(crashed.git_ref_state, "deleted")
-        self.assertEqual(len(self.bells()), 1)
+        self.assertEqual(self.bells(), [])
         self.assertEqual(self.pending(), [])
         self.assertEqual(self.host.dispatches, [])
         operation = self.reader.show(crashed.disposition)
@@ -1157,7 +1157,7 @@ class OutcomeTests(AfterMergeFixture, unittest.TestCase):
         self.assertEqual(self.run_of(cards[-1]).hotfix, hotfix["ref"])
         self.assertEqual(len(self.comments_on(cards[0], "## E2E after merge — red")), 1)
 
-    def test_cancelled_or_timed_out_cuts_no_hotfix_rings_once_and_requeues(self) -> None:
+    def test_cancelled_or_timed_out_cuts_no_hotfix_writes_no_owner_event_and_requeues(self) -> None:
         for conclusion in ("cancelled", "timed_out"):
             with self.subTest(conclusion=conclusion):
                 self.tearDown()
@@ -1166,9 +1166,7 @@ class OutcomeTests(AfterMergeFixture, unittest.TestCase):
 
                 self.assertEqual(run.resolution, "requeued")
                 self.assertEqual(self.hotfixes(), [])
-                [bell] = self.bells()
-                self.assertEqual((bell.event_class, bell.subject_ref), ("notice", cards[-1]))
-                self.assertIn(conclusion, bell.text)
+                self.assertEqual(self.bells(), [])
                 for card in cards:
                     [comment] = self.comments_on(card, "## E2E after merge — requeued")
                     self.assertIn(f"concluded {conclusion}", comment)
@@ -1202,7 +1200,7 @@ class OutcomeTests(AfterMergeFixture, unittest.TestCase):
             (acted.resolution, (acted.result or {}).get("outcome")), ("requeued", "deadline_passed")
         )
         self.assertEqual(self.hotfixes(), [])
-        self.assertEqual(len(self.bells()), 1)
+        self.assertEqual(self.bells(), [])
         self.assertIn("deadline_passed", self.comments_on(cards[0], "## E2E after merge — requeued")[0])
 
 

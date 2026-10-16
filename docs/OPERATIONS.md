@@ -491,9 +491,7 @@ on the next hand-over and creates nothing. An input that can never become a turn
 request id taken by something else) moves to `DATA_DIR/po-queue/refused/` with its `reason`. A session
 with queued messages refuses a close (409). Queued messages survive any restart of either service. A
 `backup create` archive, core and full, carries `po-queue/` with `refused/` (the in-flight temporary dot
-files stay out), and `restore` puts them back. When the runner starts a dispatcher input's turn it keeps
-that input's card facts beside the turn (`DATA_DIR/po-runs/<session>/turn-NNNN.card.json`), so a turn that
-ends `failed` names its card in the `po_turn_failed` owner event.
+files stay out), and `restore` puts them back.
 
 **Request ids.** One check, `PoService._reserve`, decides every request id, for `submit` and
 `create_session` alike (and any later operation that takes one), under the lock that serializes them. An
@@ -811,8 +809,8 @@ reported. No unit outside the installation's own is expected or probed; before A
 host-owned Orca unit was ([Head runtime](HEAD_RUNTIME.md)).
 
 Doctor is also the writer of the owner's `provider_red` events ([Owner events](#owner-events)): a
-resource whose probe verdict is `unauthenticated`, `exhausted`, `unavailable` or `probe_broken` puts one
-notice on the bell per resource, verdict and UTC day. `--dry-run` writes none; nothing else of doctor
+resource whose probe verdict is `unauthenticated` puts one notice on the bell per resource and UTC day;
+the other non-ready verdicts write nothing. `--dry-run` writes none; nothing else of doctor
 writes anything.
 
 ## Owner events
@@ -836,19 +834,17 @@ What each kind means:
 | kind | class | means | what to do |
 | --- | --- | --- | --- |
 | `card_handed_to_owner` | needs the owner | the PO handed a `decision`/`operation` card to you with a reason | answer on the card page (the comment form posts as the owner) or in the sprint's PO session; it clears when the PO completes the card |
-| `card_waits_for_person` | needs the owner | an unresolved sprint card is Blocked awaiting a decision, or a decision/operation card is with the PO | decide or complete the card; the event stays unread while that wait holds and settles when the card leaves it |
+| `po_card_escalated` | needs the owner | the dispatcher escalated a PO episode on a card that timed out or failed unresolved; the text is the reason | read the card and its PO session; it clears when the episode is replaced or ended |
 | `steward_needs_human` | needs the owner | the steward's report card went Blocked with a "Needs a human" section | read the report card; mark the event read once handled |
-| `e2e_budget_spent` | needs the owner | a code card outside every sprint, cut by nobody's PO session, spent its 3 e2e runs and was Blocked (or, for an after-merge project, was left out of the after-merge run) | re-cut the work in a sprint with an e2e budget, or through the PO; mark the event read once handled |
-| `e2e_after_merge` | needs the owner | an after-merge e2e run on `main` ended with no verdict (cancelled, timed out, deadline passed, unreadable, refused, not identified, ran on another SHA), and its cards are pending again; or a red one's hotfix card had no open sprint and no PO session to go to and is Blocked | read the run and the comment on the cards; for a Blocked hotfix, decide who fixes it (unblock it into a sprint, or hand it to the PO); mark the event read once handled |
 | `sprint_closed` | notice | a sprint was closed | read its closeout on the sprint page |
 | `sprint_stopped` | notice | a sprint's budget reached the hard limit and it was stopped | decide whether to reopen it |
-| `budget_signal` | notice | a sprint's budget reached its signal threshold | look at why its cards keep going round |
-| `observer_dead` | notice | a sprint's observer head is dead and the tick did not relaunch it (backoff, drain, a failed bring-up) | `ummanu status`; the dispatcher retries after the backoff |
-| `head_dead` | notice | a worker or reviewer head died or stalled again after its one respawn, or its respawn failed; the card is Blocked | read the card's Blocked reason |
-| `po_turn_failed` | notice | a PO turn ended `failed` (its subject is the card a dispatcher input was about, else `po-session:<id>`) | read the turn on `/po`; for a handed-over card, a new owner comment sends the answer again |
 | `po_session_moved_account` | needs the owner | a PO session's provider refused its account (auth, plan or quota) and the session moved to the other CLI; the text names the picked and running heads and the turn | fix the login or the subscription; the session stays on the other CLI |
 | `po_session_moved` | notice | a PO session moved to the other CLI after any other provider refusal | read the session on `/po` |
-| `provider_red` | notice | doctor found a provider's key expired or login missing, its quota spent, its provider down, or its probe broken | fix the login or wait for the quota |
+| `provider_red` | notice | doctor found a provider's key expired or its login missing | renew the login or the plan |
+
+Rows of kinds earlier releases wrote (`card_waits_for_person`, `e2e_budget_spent`, `e2e_after_merge`,
+`budget_signal`, `observer_dead`, `head_dead`, `po_turn_failed`, `delegated_card_settled`) stay listed
+by `owner-events list` and under `?all=1`; nothing writes them.
 
 A notice is marked read by its button or by "Mark all notices read"; an event that needs the owner is
 read by a click only when its card does not wait for the owner, and otherwise stays unread until the
@@ -864,19 +860,11 @@ reading, so a settlement during rendering cannot split the chip from the bell. G
 Routine observer, CI and wait-card waits are neutral. An unavailable event/card source and an
 unknown sprint state do not mean attention.
 
-`TaskWriter._transition_card` publishes `card_waits_for_person` in the card transition transaction,
-with a dedup key containing the transition request ID. The same path settles this kind on leaving
-the wait. PO handover inserts the established `card_handed_to_owner` event, settles the PO wait,
+PO handover inserts the established `card_handed_to_owner` event, settles the PO escalation,
 and writes the mark/comment in one transaction with its handover occurrence;
 completion clears the handover mark and settles its events in the transition transaction. Other
 open needs_owner events retain their existing click/settlement behavior. Bell count includes genuine
-unread notices as before, but notices cannot cause a sprint chip.
-
-Revision `0025_card_waits_for_person` adds only this constrained kind and backfills existing unresolved
-open sprint waits without an open needs_owner event. It preserves old events and skips archived,
-superseded and machine-wait cards. It declares `release_safety = "additive"`; the previous 0024 runtime
-can still read the newer schema, load the added kind as an OwnerEvent, and write its existing kinds
-and card records. Applying/releasing it and restarting production services are PO/dispatcher work.
+unread notices, but notices cannot cause a sprint chip.
 
 ## How long things take
 
@@ -1404,7 +1392,7 @@ A card outside every sprint has its own cap of 3 runs; every dispatch attempt co
 refused included. If a PO session cut it, the same decision card goes to that session, answered the
 same way, and the raise is `ummanu task e2e-budget --ref <card> --role po --authorized-by <event
 id>`. If nobody's PO session cut it, the card is Blocked with `e2e run cap
-reached (3)` and the bell shows `e2e_budget_spent`.
+reached (3)`.
 
 ### E2E after the merge
 
@@ -1439,12 +1427,12 @@ When the run ends:
 - **red**: one `code` card titled `Hotfix: after-merge e2e red on main @ <sha> (<workflow>)`, with the
   run, the failed jobs and steps, the log fragment, the SHA and every covered card with its merge SHA.
   It goes to the carrier's sprint while that is open (its observer wakes on it), else to the carrier's
-  PO session, else it is Blocked at once (`after-merge e2e red, no sprint or origin owns it`) and the
-  bell shows `e2e_after_merge`. Each covered card gets `## E2E after merge — red` and says `state: red ->
+  PO session, else it is Blocked at once (`after-merge e2e red, no sprint or origin owns it`). Each
+  covered card gets `## E2E after merge — red` and says `state: red ->
   <hotfix card>`;
 - **anything else** (cancelled, timed out, deadline passed, the run unreadable, refused, not identified,
   or run on another SHA): no hotfix. Each covered card gets `## E2E after merge — requeued` (or `—
-  blocked` when the run was never attached), the bell shows `e2e_after_merge`, and the cards are pending
+  blocked` when the run was never attached), and the cards are pending
   again: the next run, charged as usual, starts on the next tick. To stop that, pause the pipeline or
   let the budget decision stop it.
 

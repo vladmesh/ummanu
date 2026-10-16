@@ -23,7 +23,7 @@ from unittest import mock
 
 from tests.owner_event_fakes import CheckViolation, FakeOwnerEvents
 from tests.po_card_fakes import DECISION_BODY, REF
-from tests.po_handover_fakes import REASON, HandedOverFixture, MemoryAudit, OneCardClient, decision_card
+from tests.po_handover_fakes import REASON, MemoryAudit, OneCardClient, decision_card
 from tests.web_fakes import Recording
 from ummanu.board import owner_events, schema, schema_gate
 from ummanu.board.owner_events import (
@@ -148,37 +148,14 @@ class EntityTests(unittest.TestCase):
             self.assertFalse(record("sprint_closed", SPRINT, "x", "k5", to=Path(tmp)))
             self.assertFalse(record("sprint_closed", SPRINT, "x", "k6", to=SimpleNamespace(call=None)))
 
-    def test_the_strict_writer_answers_written_present_failed_or_not_applicable(self) -> None:
-        """secretary-1792: the one caller whose work is complete only with its event hears how it went."""
+    def test_the_writer_refuses_a_read_only_kind_and_the_store_still_lists_its_rows(self) -> None:
         store = FakeOwnerEvents()
-        self.assertEqual(owner_events.record_strict("delegated_card_settled", REF, "x", "d1", to=store), "written")
-        self.assertEqual(
-            owner_events.record_strict("delegated_card_settled", REF, "again", "d1", to=store), "already_present"
-        )
-        self.assertEqual(len(store.rows), 1)
-        missing = FakeOwnerEvents()
-        missing.missing_table = True
-        broken = FakeOwnerEvents()
-        broken.failing = RuntimeError("connection reset")
+        self.assertTrue(store.insert("head_dead", REF, "a historical row", "old"))
         with self.assertLogs("ummanu.board.owner_events", level="WARNING"):
-            for to, kind, key in (
-                (missing, "delegated_card_settled", "d2"),
-                (broken, "delegated_card_settled", "d3"),
-                (FakeOwnerEvents(), "not_a_kind", "d4"),
-                (FakeOwnerEvents(), "delegated_card_settled", ""),
-            ):
-                with self.subTest(kind=kind, key=key):
-                    self.assertEqual(owner_events.record_strict(kind, REF, "x", key, to=to), "failed")
-        # No board store configured at all: nothing to wait for, logged, never raised.
-        with self.assertLogs("ummanu.board.owner_events", level="INFO"):
-            self.assertEqual(
-                owner_events.record_strict("delegated_card_settled", REF, "x", "d5", to=None), "not_applicable"
-            )
-        with tempfile.TemporaryDirectory() as tmp, self.assertLogs("ummanu.board.owner_events", level="INFO"):
-            self.assertEqual(
-                owner_events.record_strict("delegated_card_settled", REF, "x", "d6", to=Path(tmp)),
-                "not_applicable",
-            )
+            for kind in owner_events.READ_ONLY_KINDS:
+                with self.subTest(kind=kind):
+                    self.assertFalse(record(kind, REF, "x", f"new-{kind}", to=store))
+        self.assertEqual([(event.kind, event.dedup_key) for event in store.events()], [("head_dead", "old")])
 
     def test_a_postgres_store_without_the_table_is_unavailable_not_an_error_of_the_caller(self) -> None:
         import psycopg
@@ -208,7 +185,7 @@ class EntityTests(unittest.TestCase):
 
     def test_a_long_text_is_cut_not_refused(self) -> None:
         store = FakeOwnerEvents()
-        record("head_dead", REF, "x" * 5000, "k", to=store)
+        record("sprint_closed", SPRINT, "x" * 5000, "k", to=store)
         [event] = store.rows.values()
         self.assertEqual(len(event.text), owner_events.TEXT_LIMIT)
 
@@ -230,7 +207,7 @@ class StayUnreadStoreTests(unittest.TestCase):
         self.store = fake_for(self.card)
         record("card_handed_to_owner", REF, "handed", "h", to=self.store)
         record("sprint_closed", SPRINT, "closed", "c", to=self.store)
-        record("budget_signal", SPRINT, "signal", "b", to=self.store)
+        self.store.insert("budget_signal", SPRINT, "signal", "b")
         self.needs, self.closed, self.signal = sorted(self.store.rows.values(), key=lambda row: row.id)
 
     def test_a_click_refuses_a_needs_owner_event_whose_card_still_waits(self) -> None:
@@ -402,7 +379,7 @@ class StewardProducerTests(unittest.TestCase):
 
 
 class SprintProducerTests(unittest.TestCase):
-    """`SprintWriter` writes the close, the budget signal and the hard stop, each once."""
+    """`SprintWriter` writes the close and the hard stop, each once."""
 
     def writer(self) -> Any:
         from ummanu.sprints import SprintWriter
@@ -427,20 +404,6 @@ class SprintProducerTests(unittest.TestCase):
         [event] = self.events.rows.values()
         self.assertEqual((event.kind, event.subject_ref, event.dedup_key), ("sprint_closed", SPRINT, "sprint_closed:sprint:1:evt-close"))
         self.assertIn("all done", event.text)
-
-    def test_the_budget_signal_is_written_once_per_sprint(self) -> None:
-        writer = self.writer()
-
-        def charged(signal: bool) -> dict[str, Any]:
-            budget = {"total": 12, "signal_reached": signal, "thresholds": {"signal": 12, "hard": 30}}
-            return {"action": "budget_recorded", "sprint": {"ref": SPRINT, "status": "open", "budget": budget}}
-
-        with mock.patch.object(type(writer), "_record_budget", side_effect=[charged(False), charged(True), charged(True)]):
-            for number in range(3):
-                writer.record_budget(role="dispatcher", actor="d", reference=SPRINT, event_type="red_ci",
-                                     request_id=f"b-{number}")
-        [event] = self.events.rows.values()
-        self.assertEqual((event.kind, event.dedup_key), ("budget_signal", "budget_signal:sprint:1"))
 
     def test_the_charge_that_stops_the_sprint_writes_one_sprint_stopped(self) -> None:
         writer = self.writer()
@@ -475,66 +438,7 @@ class DispatcherProducerTests(unittest.TestCase):
         self.events = FakeOwnerEvents()
         self.runtime = SimpleNamespace(reader=SimpleNamespace(client=SimpleNamespace(owner_events=self.events)))
 
-    def test_a_dead_observer_the_tick_did_not_relaunch_writes_one_notice_per_dead_head(self) -> None:
-        from ummanu.dispatch import observer
-
-        runtime = SimpleNamespace(
-            **vars(self.runtime), sprints=SimpleNamespace(list=lambda statuses: [{"ref": SPRINT}])
-        )
-        outcomes = iter(
-            [
-                {"action": "observer-launch-deferred", "reason": "waiting out its backoff"},
-                {"action": "observer-launch-deferred", "reason": "waiting out its backoff"},
-                {"action": "observer-relaunched"},
-            ]
-        )
-        with (
-            mock.patch.object(observer, "load_observers", return_value={SPRINT: SimpleNamespace()}),
-            mock.patch.object(observer, "put_observers"),
-            mock.patch.object(observer, "_dead_launch", return_value=3),
-            mock.patch.object(observer, "_reconcile_open_sprint", side_effect=lambda *a, **k: next(outcomes)),
-        ):
-            for _ in range(3):
-                observer.reconcile_observers(runtime, {})
-        [event] = self.events.rows.values()
-        self.assertEqual((event.kind, event.subject_ref, event.dedup_key), ("observer_dead", SPRINT, "observer_dead:sprint:1:3"))
-        self.assertIn("waiting out its backoff", event.text)
-
-    def test_a_live_or_relaunched_observer_writes_nothing(self) -> None:
-        from ummanu.dispatch import observer
-
-        runtime = SimpleNamespace(
-            **vars(self.runtime), sprints=SimpleNamespace(list=lambda statuses: [{"ref": SPRINT}])
-        )
-        with (
-            mock.patch.object(observer, "load_observers", return_value={}),
-            mock.patch.object(observer, "put_observers"),
-            mock.patch.object(observer, "_reconcile_open_sprint", return_value={"action": "observer-launch-deferred"}),
-        ):
-            observer.reconcile_observers(runtime, {})
-        self.assertIsNone(observer._dead_launch(runtime, None))
-        self.assertEqual(self.events.rows, {})
-
-    def test_a_head_given_up_after_its_respawn_writes_one_head_dead(self) -> None:
-        from ummanu.dispatch import wait_vitality
-
-        record_ = SimpleNamespace(attempt_id="att-1", comment_baseline=4, worker_respawns=1, review_respawns=0)
-        runtime = SimpleNamespace(
-            **vars(self.runtime), _stop_worker_confirmed=lambda *a, **k: None, save_records=lambda *a: None
-        )
-        with mock.patch.object(wait_vitality.attempt_accounting, "terminal_effect") as effect:
-            for _ in range(2):
-                outcome = wait_vitality._escalate_wait(
-                    runtime, {"ref": REF}, record_, {REF: record_}, {}, "att-1", kind="worker", stall=900,
-                    trigger="the pid heartbeat names a gone or unreaped process",
-                )
-        self.assertEqual(outcome["to"], "blocked")
-        [event] = self.events.rows.values()
-        request_id = effect.call_args.kwargs["request_id"]
-        self.assertEqual((event.kind, event.subject_ref, event.dedup_key), ("head_dead", REF, f"head_dead:{request_id}"))
-        self.assertIn("worker head", event.text)
-
-    def test_doctor_writes_one_provider_red_per_provider_condition_and_day(self) -> None:
+    def test_doctor_writes_one_provider_red_per_unauthenticated_provider_and_day(self) -> None:
         from ummanu import cli
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -545,16 +449,15 @@ class DispatcherProducerTests(unittest.TestCase):
                 {"resource": "claude-sub", "state": "unauthenticated", "reason": "resource authentication failed"},
                 {"resource": "openai-sub", "state": "ready", "reason": "probe succeeded"},
                 {"resource": "openrouter", "state": "exhausted", "reason": "resource quota is spent"},
+                {"resource": "codex-sub", "state": "unavailable", "reason": "provider does not answer"},
+                {"resource": "gemini", "state": "timed_out", "reason": "probe timed out"},
+                {"resource": "local", "state": "probe_broken", "reason": "probe cannot run"},
             ]
             with mock.patch.object(owner_events.OwnerEventStore, "for_instance", return_value=self.events):
-                self.assertEqual(cli.record_provider_owner_events(report, rows), 2)
+                self.assertEqual(cli.record_provider_owner_events(report, rows), 1)
                 self.assertEqual(cli.record_provider_owner_events(report, rows), 0)
         kinds = sorted((event.kind, event.subject_ref, event.dedup_key.rsplit(":", 1)[0]) for event in self.events.rows.values())
-        self.assertEqual(
-            kinds,
-            [("provider_red", None, "provider_red:claude-sub:unauthenticated"),
-             ("provider_red", None, "provider_red:openrouter:exhausted")],
-        )
+        self.assertEqual(kinds, [("provider_red", None, "provider_red:claude-sub:unauthenticated")])
         self.assertIn("expired", self.events.of_kind("provider_red")[0].text)
 
     def test_a_doctor_dry_run_records_nothing(self) -> None:
@@ -579,49 +482,6 @@ class DispatcherProducerTests(unittest.TestCase):
                 self.assertEqual(recorded.call_count, calls)
 
 
-class PoTurnFailedTests(HandedOverFixture):
-    """The PO service writes `po_turn_failed` when its runner settles a turn failed; the subject is the card."""
-
-    def test_a_failed_follow_up_writes_one_event_on_the_card_and_the_wait_says_so(self) -> None:
-        runtime, session = self.submitted_card()
-        events = FakeOwnerEvents()
-        self.services[-1].owner_events = events
-        self.hand_over()
-        self.owner_says("FAIL: use the company card.", "evt-owner-1")
-
-        self.assertEqual(self.tick(runtime)["action"], "po-owner-answer-submitted")
-        self.assertEqual(self.settled(session, 3).state, "failed")
-        # The durable row precedes on_failed; join the existing waiter before reading its notice.
-        self.services[-1].runner.wait(session, 3, timeout=2)
-
-        outcome = self.tick(runtime)
-        self.assertEqual(outcome["action"], "po-card-owner-answer-turn-ended")
-        self.assertIn("PO execution failed; unresolved episode escalated", outcome["reason"])
-        self.assertNotIn("is with the PO", outcome["reason"])
-        [event] = events.rows.values()
-        self.assertEqual((event.kind, event.subject_ref, event.dedup_key), ("po_turn_failed", REF, f"po_turn_failed:{session}:3"))
-        self.assertIn("the owner's answer", event.text)
-        # The service settles a turn once, so a later tick writes nothing more.
-        self.tick(runtime)
-        self.assertEqual(len(events.rows), 1)
-
-    def test_a_failed_web_turn_names_its_session_and_a_stop_writes_nothing(self) -> None:
-        service = self.start()
-        events = FakeOwnerEvents()
-        service.owner_events = events
-        created = service.create_session(request_id="c-1", cli="claude", model="opus", effort="high")
-        session = created["session_id"]
-        service.submit(session_id=session, text="FAIL at once", request_id="s-1")
-        self.assertEqual(self.settled(session, 1).state, "failed")
-        service.runner.wait(session, 1, timeout=2)
-        service.submit(session_id=session, text="GATE hold", request_id="s-2")
-        self.reached_gate(session, 2)
-        service.stop_turn(session_id=session, seq=2)
-        self.assertEqual(self.settled(session, 2).state, "interrupted")
-        [event] = events.rows.values()
-        self.assertEqual((event.kind, event.subject_ref), ("po_turn_failed", f"po-session:{session}"))
-
-
 # --- the web ----------------------------------------------------------------------------------
 
 
@@ -631,8 +491,8 @@ class WebTests(unittest.TestCase):
         self.store = fake_for(self.card)
         record("card_handed_to_owner", REF, "handed to the owner", "h", to=self.store)
         record("sprint_closed", SPRINT, "sprint closed", "c", to=self.store)
-        record("po_turn_failed", "po-session:s-9", "turn failed", "p", to=self.store)
-        record("head_dead", REF, "head dead", "d", to=self.store)
+        self.store.insert("po_turn_failed", "po-session:s-9", "turn failed", "p")
+        self.store.insert("head_dead", REF, "head dead", "d")
         self.layer = OwnerEventLayer("/nonexistent", store=self.store)
         layers = [Recording() for _ in range(8)]
         self.app = WebApp(*layers, owner_events=self.layer)

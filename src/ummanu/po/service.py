@@ -150,7 +150,6 @@ class PoService:
         self.queue = queue or PoQueue(self.data_dir)
         self.marker = restart_marker_path(self.data_dir)
         runner.on_settled = self._settled
-        runner.on_failed = self._turn_failed
         runner.on_fallback = self._turn_moved
         if runner.fallback_choice is None:
             runner.fallback_choice = self.fallback_choice
@@ -274,23 +273,6 @@ class PoService:
                 continue
             return cli, listed[0], effort
         return None
-
-    def _turn_failed(self, session_id: str, seq: int, reason: str) -> None:
-        """A turn settled `failed`: one `po_turn_failed` notice (a stop by the owner is `interrupted`).
-
-        Its subject is the card when a dispatcher input started the turn (the facts the runner kept
-        beside it), else the session.
-        """
-        card = self.runner.turn_card(session_id, seq) or {}
-        card_ref = str(card.get("card_ref") or "")
-        on = f" on {card_ref}" + (" (the owner's answer)" if card.get("input") == OWNER_ANSWER_INPUT else "")
-        owner_events.record(
-            owner_events.PO_TURN_FAILED,
-            card_ref or owner_events.po_session_subject(session_id),
-            f"PO turn {session_id}/{seq} failed{on if card_ref else ''}: {reason}",
-            f"{owner_events.PO_TURN_FAILED}:{session_id}:{seq}",
-            to=self.owner_events,
-        )
 
     def _turn_moved(self, picked: Session, running: Session, seq: int, failure: ProviderError) -> None:
         """A turn moved to the other CLI family: one event per session and turn on `po-session:<id>`.

@@ -1,7 +1,7 @@
 """Delegated cards: a card returns its result to the PO session that cut it (secretary-1792).
 
 A card created inside a PO turn carries its origin (`board/po_origin.py`). Each of its transitions into
-Done or Blocked owes that session one input, and the owner's bell one notice, through the path every
+Done or Blocked owes that session one input, through the path every
 dispatcher result takes to a PO session (`dispatch/po_delivery.py`): a closed or missing origin session
 gets a successor, a service that does not answer postpones the delivery to the next tick, and nothing is
 given up.
@@ -16,20 +16,17 @@ cards or infers from a card's present column what it owes.
 undelivered outbox rows, oldest first, one indexed query per tick. Each row is made on its own: its
 event is fetched from the card's audit by its event id (an archived card's audit included) and rendered
 from that event (the column it entered, when, its result), never from the card's present state; then
-the submit (idempotent by request id), the notice through the bell's strict writer
-(`owner_events.record_strict`) and, only when both were accepted, the row is marked delivered. The row
-is the only delivery record. The first row of a card that does not complete stops that card for the
-tick, and its later rows wait; other cards go on. A notice that failed marks nothing, and the next tick
-repeats both under the same keys: the submit is the earlier input to the service, the notice a no-op on
-its key. A crash anywhere in between is repaired the same way. An installation with no board store at
-all has no bell to wait for, and the delivery completes without it. A marked row is never selected
-again.
+the submit (idempotent by request id) and, only when the session took it, the row is marked delivered.
+The row is the only delivery record. The first row of a card that does not complete stops that card
+for the tick, and its later rows wait; other cards go on. A crash between the submit and the mark
+repeats the submit next tick under the same request id, a no-op for the service. A marked row is never
+selected again.
 
 Two exceptions. A wait card owes no row (the store does not write one): it delivers through its own
 return addresses. A Done whose completion transition records the PO session that ran `task complete`
 (`po_session`, from that turn's `UMMANU_PO_SESSION`), where that session is the origin or one of its
 recorded successors, was completed in a turn of the origin's line, which already has the result: its row
-is marked `skipped`, with no input and no notice. Anything else is delivered: a completion by another
+is marked `skipped`, with no input. Anything else is delivered: a completion by another
 session, one that ran outside a PO turn, any other Done, and every Blocked. The session the dispatcher
 handed the card to (`po_return.executor`) proves nothing and is not asked.
 """
@@ -39,7 +36,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ummanu.board import owner_events, po_origin as origin_field
+from ummanu.board import po_origin as origin_field
 from ummanu.board.origin_outbox import DELIVERED, SKIPPED, OutboxRow, outbox_for
 from ummanu.board.production_rights import DELEGATED_RESULT_INPUT, card_facts
 from ummanu.dispatch.po_delivery import deliver, open_successor
@@ -66,10 +63,6 @@ def return_request_id(reference: str, event_id: str) -> str:
 def successor_request_id(reference: str, closed: str) -> str:
     """The request id that opens the successor of `closed` in this card's origin line."""
     return "-".join(request_token(part) for part in ("dispatcher", SUCCESSOR_ACTION, reference, closed))
-
-
-def notice_key(reference: str, event_id: str) -> str:
-    return f"{owner_events.DELEGATED_CARD_SETTLED}:{reference}:{event_id}"
 
 
 def record_return_state(runtime: Any, reference: str, state: origin_field.ReturnState) -> None:
@@ -147,7 +140,7 @@ def _return_row(
     row: OutboxRow,
     cards: dict[str, tuple[dict[str, Any], origin_field.ReturnState, list[dict[str, Any]]]],
 ) -> dict[str, Any]:
-    """One owed return: the skip, or the submit, the strict notice and the mark, in that order."""
+    """One owed return: the skip, or the submit and the mark, in that order."""
     ref, key, column = row.task_ref, row.event_id, row.target_state
     if ref not in cards:
         # Read once a tick per card: `show` finds an archived card, `events` its whole audit.
@@ -171,7 +164,7 @@ def _return_row(
     # Evaluated on this event: the PO session whose turn ran `task complete`, as the event records it.
     completer = str(_data(terminal).get(PO_SESSION_KEY) or "") if column == "done" else ""
     if completer and origin_field.in_line(completer, origin["session"], state):
-        outbox.mark(row.id, status=SKIPPED, notice="", session=completer, po_request_id="")
+        outbox.mark(row.id, status=SKIPPED, session=completer, po_request_id="")
         return _outcome(ref, "origin-return-skipped", state=column, event_id=key, session=completer)
     request_id = return_request_id(ref, key)
     status, detail, received = deliver(
@@ -198,29 +191,9 @@ def _return_row(
             reason="the origin PO session did not take the card's result; it is repeated next tick under "
             f"the same request id: {detail}",
         )
-    notice = owner_events.record_strict(
-        owner_events.DELEGATED_CARD_SETTLED,
-        ref,
-        render_notice(task, origin, received, column),
-        notice_key(ref, key),
-        to=getattr(getattr(runtime, "reader", None), "client", None),
-    )
-    if notice == owner_events.FAILED:
-        # Half a delivery is none: nothing is marked, and the next tick repeats the submit (the
-        # service's no-op on its request id) and the notice (a no-op on its dedup key).
-        return _outcome(
-            ref,
-            "origin-return-notice-failed",
-            status="degraded",
-            state=column,
-            event_id=key,
-            session=received,
-            reason="the origin session took the card's result but the owner's notice was not written; both "
-            "are repeated next tick under the same keys",
-        )
-    # Marked only after the session took it and the bell has it: a crash before this line repeats
-    # both under the same keys, and each receiving side makes the repeat a no-op.
-    outbox.mark(row.id, status=DELIVERED, notice=notice, session=received, po_request_id=request_id)
+    # Marked only after the session took it: a crash before this line repeats the submit under the
+    # same request id, which the service makes a no-op.
+    outbox.mark(row.id, status=DELIVERED, session=received, po_request_id=request_id)
     return _outcome(
         ref, "origin-returned", state=column, event_id=key, session=received, po_request_id=request_id
     )
@@ -348,21 +321,6 @@ def render_origin_input(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_notice(task: dict[str, Any], origin: dict[str, str], received: str, column: str) -> str:
-    """The owner's notice: the card, the terminal state it entered and the session that took its result."""
-    ref = str(task.get("ref") or "")
-    settled = "Done" if column == "done" else "Blocked"
-    taken = (
-        f"PO session {origin['session']}"
-        if received == origin["session"]
-        else f"PO session {received}, the successor of its origin session {origin['session']}"
-    )
-    return (
-        f"Delegated card {ref} ({task.get('type') or 'card'}) settled {settled}: {task.get('title') or ''}. "
-        f"Its result went to {taken}."
-    )
-
-
 def _outcome(ref: str, action: str, *, status: str = "ok", **fields: Any) -> dict[str, Any]:
     return {"status": status, "step": STEP, "pilot_ref": ref, "action": action, **fields}
 
@@ -373,11 +331,9 @@ __all__ = [
     "SUCCESSOR_ACTION",
     "event_column",
     "event_key",
-    "notice_key",
     "pending_returns",
     "reconcile_origin_returns",
     "record_return_state",
-    "render_notice",
     "render_origin_input",
     "return_request_id",
     "succeed_origin",

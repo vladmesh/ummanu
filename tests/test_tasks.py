@@ -3039,7 +3039,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             [("ummanu-656", "evt_typed_656", "blocked"), ("ummanu-656", "evt_legacy_656", "done")],
         )
 
-    def test_a_card_archived_before_any_pass_returns_its_done_once_with_one_notice(self) -> None:
+    def test_a_card_archived_before_any_pass_returns_its_done_once_with_no_owner_event(self) -> None:
         """BLOCKER-ARCHIVED-ORIGIN-RETURN-LOSS, over PostgreSQL."""
         from ummanu.dispatch.origin_returns import reconcile_origin_returns, return_request_id
 
@@ -3068,11 +3068,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertEqual(list(po.inputs), [return_request_id("ummanu-658", event_id)])
         self.assertEqual(po.inputs[return_request_id("ummanu-658", event_id)]["session_id"], "po-s-1")
         self.assertIn("settled Done", po.inputs[return_request_id("ummanu-658", event_id)]["text"])
-        notices = self.client._query(
-            "SELECT subject_ref, dedup_key FROM owner_events WHERE kind = 'delegated_card_settled'"
-        )
-        self.assertEqual([tuple(row) for row in notices],
-                         [("ummanu-658", f"delegated_card_settled:ummanu-658:{event_id}")])
+        self.assertEqual([tuple(row) for row in self.client._query("SELECT kind FROM owner_events")], [])
         self.assertEqual(self.outbox("ummanu-658"), [("ummanu-658", event_id, "done", "delivered", "po-s-1")])
         # A delivered row is never selected again.
         self.assertEqual(reconcile_origin_returns(runtime), [])

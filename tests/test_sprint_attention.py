@@ -92,21 +92,19 @@ class SprintAttentionTests(SprintProtocolFixture):
         self.assertEqual(shown["state"], "blocked")
         self.assertEqual(attention_record(shown, OWNER_ANSWER), answer)
         self.assertIsNone(waiting_owner(shown))
-        added = [e for e in self.store.events() if e.id not in {e.id for e in before}]
-        self.assertEqual([(e.kind, e.event_class) for e in added], [("card_waits_for_person", "notice")])
-        self.assertIn("observer", added[0].text.lower())
+        self.assertEqual(self.store.events(), before)
         self.assert_wait(False)
         self.assertEqual(self.writer.audit.events("ummanu-12")[:len(audit)], audit)
         for _ in range(3):
             result = advance_po_card(runtime, self.writer.reader.show("ummanu-12"), records, {}, "restart")
             self.assertEqual(result["action"], "po-card-closed")
-        self.assertEqual(len(self.store.events()), len(before) + 1)
+        self.assertEqual(self.store.events(), before)
         po.submit.assert_not_called()
 
-    def test_native_answer_completed_followup_returns_neutral_blocked_notice(self):
+    def test_native_answer_completed_followup_returns_blocked_without_an_owner_event(self):
         self.completed_answer_returns_to_observer("native")
 
-    def test_owner_comment_completed_followup_returns_neutral_blocked_notice(self):
+    def test_owner_comment_completed_followup_returns_blocked_without_an_owner_event(self):
         self.completed_answer_returns_to_observer("comment")
 
     def test_answer_and_escalation_failures_after_the_mark_roll_back_the_whole_sql_mutation(self):
@@ -278,7 +276,7 @@ class SprintAttentionTests(SprintProtocolFixture):
     def test_handover_abort_and_post_commit_interruption_keep_a_durable_wait(self):
         self.claim("decision")
         before = self.committed_state()
-        [po] = self.store.events(unread_only=True)
+        self.assertEqual(self.store.events(), [])
         # A separate client and event connection see committed data while the writer's
         # transaction has already inserted the replacement, settled PO and set the mark.
         observer = SqlCardClient(self.board.credentials, self.instance)
@@ -296,12 +294,11 @@ class SprintAttentionTests(SprintProtocolFixture):
             if method == "createComment":
                 self.assertIsNotNone(waiting_owner(self.writer.reader.show("ummanu-12")))
                 self.assertIsNone(waiting_owner(TaskReader(observer).show("ummanu-12")))
-                [event] = events.owner_event_list(unread_only=True)["events"]
-                self.assertEqual((event["id"], event["kind"]), (po.id, "card_waits_for_person"))
+                self.assertEqual(events.owner_event_list(unread_only=True)["events"], [])
                 page = app.handle("GET", "/").body.decode()
                 self.assertNotIn("attention required", page)
-                self.assertIn('<span class="bell-count">1</span>', page)
-                observed.append(event["id"])
+                self.assertIn('<span class="bell-count">0</span>', page)
+                observed.append(method)
                 if abort_before_commit:
                     raise KeyboardInterrupt("stop before the real transaction commits")
             return call(method, **params)
@@ -309,7 +306,7 @@ class SprintAttentionTests(SprintProtocolFixture):
         with (mock.patch.object(self.board, "call", side_effect=at_uncommitted_mark),
               self.assertRaises(KeyboardInterrupt)):
             self.handover("interrupted-handover")
-        self.assertEqual(observed, [po.id])
+        self.assertEqual(observed, ["createComment"])
         self.assertEqual(self.committed_state(), before)
         self.assertIsNone(self.writer.audit.pending_event("interrupted-handover"))
         self.assert_wait(False)
@@ -326,73 +323,25 @@ class SprintAttentionTests(SprintProtocolFixture):
             self.assertEqual(event["dedup_key"], f"card_handed_to_owner:ummanu-12:{result['event_id']}")
             page = app.handle("GET", "/").body.decode()
             self.assertIn("attention required", page)
-            self.assertIn('<span class="bell-count">2</span>', page)
+            self.assertIn('<span class="bell-count">1</span>', page)
             raise KeyboardInterrupt("stop after the real transaction commits")
 
         with (mock.patch.object(self.board, "call", side_effect=at_uncommitted_mark),
               mock.patch.object(self.writer, "_write", side_effect=interrupt_after_commit),
               self.assertRaises(KeyboardInterrupt)):
             self.handover("interrupted-handover")
-        self.assertEqual(observed, [po.id, po.id])
+        self.assertEqual(observed, ["createComment", "createComment"])
         self.assertEqual(self.writer.reconcile(), (0, 0))
         self.assert_committed_replay(lambda: self.handover("interrupted-handover"))
         self.assert_wait(True)
         [owner] = [e for e in self.store.events(unread_only=True) if e.event_class == "needs_owner"]
         self.assertEqual(owner.kind, "card_handed_to_owner")
-        self.assertIsNone(next(event for event in self.store.events() if event.id == po.id).read_at)
         with self.assertRaises(ReadRefused):
             self.store.mark_read(owner.id)
-        self.assertEqual(self.store.mark_all_read(), 1)
+        self.assertEqual(self.store.mark_all_read(), 0)
         self.complete()
         self.assert_committed_replay(self.complete)
         self.assert_wait(False)
-        self.assertEqual(self.events.unread_count()["count"], 0)
-
-    def test_native_po_wait_insert_timeout_rolls_back_claim_and_retries_once(self):
-        self.board.save_metadata(12, task_type="decision")
-
-        def claim():
-            return self.writer.claim(role="dispatcher", actor="dispatcher", reference="ummanu-12",
-                                     worker="fixture", request_id="timeout-claim")
-
-        self.assert_event_timeout_rolls_back(claim, "timeout-claim")
-        self.assertEqual(self.writer.reader.show("ummanu-12")["state"], "ready")
-        self.assert_wait(False)
-        self.assertFalse(claim()["replayed"])
-        self.assert_committed_replay(claim)
-        [event] = self.store.events()
-        self.assertEqual(event.dedup_key, "card_waits_for_person:ummanu-12:timeout-claim")
-        self.assertEqual(self.sprints.sprint_state("sprint:1")["work"]["waiting_on"][0]["kind"], "po")
-        self.assert_wait(False)
-        self.assertEqual(self.events.unread_count()["count"], 1)
-
-
-    def test_native_blocked_notice_survives_unblock_until_read(self):
-        self.claim()
-        block = lambda: self.move("blocked", "timeout-block")
-        self.assert_event_timeout_rolls_back(block, "timeout-block")
-        self.assertEqual(self.writer.reader.show("ummanu-12")["state"], "in_progress")
-        self.assert_wait(False)
-        self.assertFalse(block()["replayed"])
-        self.assert_committed_replay(block)
-        [event] = self.store.events()
-        self.assertEqual(event.dedup_key, "card_waits_for_person:ummanu-12:timeout-block")
-        self.assert_wait(False)
-
-        def unblock():
-            return self.writer.move(role="po", actor="po", reference="ummanu-12", target="ready",
-                                    reason="decision taken", sprint_override=True,
-                                    sprint_override_reason="fixture decision", request_id="timeout-unblock")
-
-        self.assertEqual(self.writer.reader.show("ummanu-12")["state"], "blocked")
-        self.assert_wait(False)
-        self.assertFalse(unblock()["replayed"])
-        self.assert_committed_replay(unblock)
-        self.assert_wait(False)
-        [settled] = self.store.events()
-        self.assertEqual(settled.id, event.id)
-        self.assertIsNone(settled.read_at)
-        self.assertEqual(self.store.mark_read(settled.id).id, event.id)
         self.assertEqual(self.events.unread_count()["count"], 0)
 
     def test_native_handover_replacement_and_completion_settlement_failures_roll_back(self):
@@ -419,7 +368,7 @@ class SprintAttentionTests(SprintProtocolFixture):
         self.complete()
         self.assert_committed_replay(self.complete)
         self.assert_wait(False)
-        self.assertEqual(self.store.mark_all_read(), 1)
+        self.assertEqual(self.store.mark_all_read(), 0)
         self.assertEqual(self.events.unread_count()["count"], 0)
 
     def test_between_cards_empty_waiting_on_and_an_unrelated_notice_are_neutral(self):
@@ -445,18 +394,14 @@ class SprintAttentionTests(SprintProtocolFixture):
     def test_po_submission_handover_and_completion_use_real_held_events_and_settle(self):
         self.claim("decision")
         self.assert_wait(False)
-        [po] = self.store.events(unread_only=True)
-        self.assertEqual(po.kind, "card_waits_for_person")
-        self.assertFalse(po.held)
+        self.assertEqual(self.store.events(unread_only=True), [])
         self.assertEqual(self.sprints.sprint_state("sprint:1")["work"]["waiting_on"][0]["kind"], "po")
-        self.assertEqual(self.store.mark_read(po.id).id, po.id)
         self.writer.handover(role="po", actor="po", reference="ummanu-12", to="owner",
                              reason="Choose the fixture option", request_id="handover-12")
         self.assert_wait(True)
         [owner] = self.store.events(unread_only=True)
         self.assertEqual(owner.kind, "card_handed_to_owner")
         self.assertTrue(owner.held)
-        self.assertIsNotNone(next(event for event in self.store.events() if event.id == po.id).read_at)
         with self.assertRaises(ReadRefused):
             self.store.mark_read(owner.id)
         self.assertEqual(self.store.mark_all_read(), 0)
@@ -466,19 +411,16 @@ class SprintAttentionTests(SprintProtocolFixture):
         self.assert_wait(False)
         self.assertEqual(self.events.unread_count()["count"], 0)
 
-    def test_a_blocked_decision_uses_the_transition_producer_and_clears_on_unblock(self):
+    def test_a_card_blocked_inside_a_sprint_writes_no_owner_event(self):
         self.claim()
         self.move("blocked")
+        self.assertEqual(self.writer.reader.show("ummanu-12")["state"], "blocked")
         self.assert_wait(False)
-        [event] = self.store.events(unread_only=True)
-        self.assertEqual((event.kind, event.subject_ref), ("card_waits_for_person", "ummanu-12"))
-        self.assertEqual(event.event_class, "notice")
+        self.assertEqual(self.store.events(), [])
         self.writer.move(role="po", actor="po", reference="ummanu-12", target="ready",
                          reason="decision taken", sprint_override=True, sprint_override_reason="fixture decision",
                          request_id="unblock-12")
         self.assert_wait(False)
-        self.assertIsNone(self.store.events()[0].read_at)
-        self.store.mark_read(event.id)
         self.assertEqual(self.events.unread_count()["count"], 0)
 
     def test_superseded_blocked_card_unavailable_and_unknown_sources_do_not_warn(self):
@@ -579,7 +521,6 @@ class SprintAttentionTests(SprintProtocolFixture):
 
     def test_render_pins_one_statement_for_the_chip_and_bell_and_gets_do_not_write(self):
         self.claim("decision")
-        self.assertEqual(self.store.mark_all_read(), 1)
         self.handover()
         snapshot = self.store.snapshot
         calls = []
@@ -597,8 +538,7 @@ class SprintAttentionTests(SprintProtocolFixture):
         self.assertIn("attention required", page)
         self.assertIn('<span class="bell-count">1</span>', page)
         self.assert_wait(False)
-        self.assertEqual({event.kind for event in self.store.events()},
-                         {"card_waits_for_person", "card_handed_to_owner"})
+        self.assertEqual({event.kind for event in self.store.events()}, {"card_handed_to_owner"})
         self.assertTrue(all(event.read_at is not None for event in self.store.events()))
 
 

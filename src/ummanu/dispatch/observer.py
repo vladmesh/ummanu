@@ -17,7 +17,6 @@ import time
 import uuid
 from typing import Any
 
-from ummanu.board import owner_events
 from ummanu.board.tick_snapshot import select_sprints
 from ummanu.codex_provider_events import CodexProviderSourceError
 from ummanu.dispatch.heartbeat import sprint_task
@@ -341,62 +340,22 @@ their observer has been adopted. No tracked heads and no open sprints is a no-op
                 _stop_observer(runtime, payload, observers, ref, reason="sprint is no longer open")
             )
         for ref in sorted(open_sprints):
-            dead = _dead_launch(runtime, observers.get(ref))
-            outcome = _reconcile_open_sprint(
-                runtime,
-                payload,
-                observers,
-                ref,
-                pause_mode=pause_mode,
-                sprint=open_sprints[ref],
+            outcomes.append(
+                _reconcile_open_sprint(
+                    runtime,
+                    payload,
+                    observers,
+                    ref,
+                    pause_mode=pause_mode,
+                    sprint=open_sprints[ref],
+                )
             )
-            if dead is not None and outcome.get("action") not in _BROUGHT_UP:
-                _record_observer_dead(runtime, ref, dead, outcome)
-            outcomes.append(outcome)
     finally:
         # Whatever went wrong above, the heads that were started or stopped before it are already
         # real. The records go back into the payload so the caller saves them: a lost record means
         # an unattended terminal and a second head on the same sprint next tick.
         put_observers(payload, observers)
     return outcomes
-
-
-#: The outcomes of a tick that brought an observer head up.
-_BROUGHT_UP = frozenset({"observer-launched", "observer-relaunched"})
-
-
-def _dead_launch(runtime: Any, record: ObserverRecord | None) -> int | None:
-    """Return the launch count if this observer is confirmed dead at tick start.
-
-Use the same liveness classifier as reconciliation, before it mutates records.
-Deliberate stops and pending stops are not deaths.
-    """
-    if (
-        record is None
-        or record.launches <= 0
-        or record.state in PENDING_STOP_STATES
-        or record.state == STATE_STOPPED_BY_PAUSE
-        or not _head_may_be_running(record)
-    ):
-        return None
-    try:
-        status = observer_head_status(record)
-        dead = observer_head_is_dead(status, observer_head_end(runtime, record, status))
-        return record.launches if dead else None
-    except Exception:  # noqa: BLE001 - the bell's reading never decides a tick
-        return None
-
-
-def _record_observer_dead(runtime: Any, ref: str, launches: int, outcome: dict[str, Any]) -> None:
-    """One `observer_dead` notice per dead head generation: repeated deferrals of it write nothing new."""
-    why = str(outcome.get("reason") or outcome.get("action") or "no reason recorded")
-    owner_events.record(
-        owner_events.OBSERVER_DEAD,
-        ref,
-        f"The observer head of {ref} is dead and was not relaunched this tick: {why}",
-        f"{owner_events.OBSERVER_DEAD}:{ref}:{launches}",
-        to=getattr(getattr(runtime, "reader", None), "client", None),
-    )
 
 
 def _reconcile_open_sprint(
@@ -1190,7 +1149,7 @@ def observer_unreachable(record: ObserverRecord) -> bool:
 def _hold_unreachable_observer(
     runtime: Any, ref: str, record: ObserverRecord, outcome: dict[str, Any]
 ) -> dict[str, Any]:
-    """Keep the head and the fence, and tell the owner once per batch, instead of another replacement.
+    """Keep the head and the fence instead of another replacement.
 
     The wakes keep retrying on their capped backoff, so a head that takes the batch after all is
     acknowledged and released the ordinary way.
@@ -1200,14 +1159,6 @@ def _hold_unreachable_observer(
         f"{delivery.replacements} replaced heads refused the wakes of batch {delivery.delivery_id} "
         f"(through {delivery.through_event}); {delivery.wake_failures} wakes failed in total, "
         f"the last at {delivery.last_failure_method}: {delivery.last_failure_reason}"
-    )
-    owner_events.record(
-        owner_events.OBSERVER_DEAD,
-        ref,
-        f"The observer of {ref} cannot be reached: {evidence}. The dispatcher stopped replacing it and "
-        "keeps the sprint fenced until a head acknowledges the batch.",
-        f"{owner_events.OBSERVER_DEAD}:{ref}:unreachable:{delivery.through_event}",
-        to=getattr(getattr(runtime, "reader", None), "client", None),
     )
     _set_observer_state(record, "unreachable", reason=evidence)
     return {

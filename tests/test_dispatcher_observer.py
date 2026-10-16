@@ -39,7 +39,7 @@ from tests.sql_backend_fixtures import card_store
 from ummanu.board.sprint_read import BUDGET_UNCHARGED_INFRASTRUCTURE
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import BOARD_ID
-from ummanu.dispatch import observer as observer_module, observer_fence as dispatcher_observer_fence
+from ummanu.dispatch import observer_fence as dispatcher_observer_fence
 from ummanu.dispatch.cleanup import RETRY_COOLDOWN, CleanupOwner
 from ummanu.dispatch.heartbeat import heartbeat_identity
 from ummanu.dispatch.host import CommandHostRuntime, InstanceCatalog
@@ -732,10 +732,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         refusal = HostError("observer wake was not delivered: pane-stayed-ready")
         actions: list[str] = []
 
-        with (
-            mock.patch.object(self.host, "nudge_observer", side_effect=refusal),
-            mock.patch.object(observer_module.owner_events, "record") as bell,
-        ):
+        with mock.patch.object(self.host, "nudge_observer", side_effect=refusal):
             for _ in range(20):
                 result = self.runtime.production_tick()
                 actions.extend(row["action"] for row in self.actions(result))
@@ -749,8 +746,6 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(actions[-1], "observer-unreachable")
         [fence] = self.actions(fenced, "observer-fence")
         self.assertEqual(fence["observer_reason"], "observer_unreachable")
-        notices = {call.args[3] for call in bell.call_args_list if call.args[0] == "observer_dead"}
-        self.assertEqual(len(notices), 1, "one owner notice for the batch, however often it is refused")
 
         entry = {
             "selected_step": "read board",

@@ -2261,40 +2261,8 @@ class SprintWriter(SprintLifecycleMixin):
             mutation,
         )
 
-    def record_budget(
-        self,
-        *,
-        role: str,
-        actor: str,
-        reference: str,
-        event_type: str,
-        request_id: str | None = None,
-        source_event_id: str = "",
-    ) -> dict[str, Any]:
-        result = self._record_budget(
-            role=role,
-            actor=actor,
-            reference=reference,
-            event_type=event_type,
-            request_id=request_id,
-            source_event_id=source_event_id,
-        )
-        sprint = result.get("sprint") if isinstance(result.get("sprint"), dict) else {}
-        budget = sprint.get("budget") if isinstance(sprint.get("budget"), dict) else {}
-        if budget.get("signal_reached"):
-            # Once per sprint: the charges only grow, so the signal once reached stays reached.
-            owner_events.record(
-                owner_events.BUDGET_SIGNAL,
-                reference,
-                f"{reference} reached its budget signal: {budget.get('total')} restart events of "
-                f"{(budget.get('thresholds') or {}).get('hard')} before the hard stop",
-                f"{owner_events.BUDGET_SIGNAL}:{reference}",
-                to=self.client,
-            )
-        return result
-
     @_sql_atomic
-    def _record_budget(
+    def record_budget(
         self,
         *,
         role: str,

@@ -416,8 +416,8 @@ class PoTerminalOwnershipTests(unittest.TestCase):
         self.enterContext(mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", self.root / "cgroups"))
         self.store = FakePoStore(FakeBoard())
         self.session, _ = self.store.claim_session(session_id="session", cli="claude", model="opus", cwd=str(self.root), cli_session_id=None, effort="high")
-        self.failed, self.settled = [], []
-        self.runner = PoRunner(self.store, self.root, on_failed=lambda *args: self.failed.append(args), on_settled=lambda *args: self.settled.append(args))
+        self.settled = []
+        self.runner = PoRunner(self.store, self.root, on_settled=lambda *args: self.settled.append(args))
         self.files = self.runner.files("session", 1)
         self.files.directory.mkdir(parents=True)
         self.store.claim_turn("session", "prompt", lambda _seq: self.files.stdout)
@@ -445,7 +445,6 @@ class PoTerminalOwnershipTests(unittest.TestCase):
         self.runner._wait(self.session, 1, SimpleNamespace(wait=lambda: 0), [], self.files)
         self.assertEqual(self.state(), po_store.INTERRUPTED)
         self.assertEqual(self.answers(), [])
-        self.assertEqual(self.failed, [])
         self.assertEqual(self.settled, [("session", 1)])
         self.assertEqual(self.runner.recover(rerun=True), [])
         self.assertEqual(self.runner._pending_outcome("session", 1)["state"], po_store.INTERRUPTED)
@@ -456,7 +455,6 @@ class PoTerminalOwnershipTests(unittest.TestCase):
         self.assertTrue(self.runner._finish("session", 1, po_store.FAILED, "late failure"))
         self.assertFalse(self.runner._finish("session", 1, po_store.FAILED, "repeated failure"))
         self.assertEqual(self.state(), po_store.INTERRUPTED)
-        self.assertEqual(self.failed, [])
         self.assertEqual(self.answers(), [])
 
     def test_late_waiter_with_cleanup_still_unavailable_leaves_interruption_for_recovery(self) -> None:
@@ -469,7 +467,6 @@ class PoTerminalOwnershipTests(unittest.TestCase):
         self.assertEqual(self.answers(), [])
         self.assertEqual(len(self.runner.recover(rerun=True)), 1)
         self.assertEqual(self.state(), po_store.INTERRUPTED)
-        self.assertEqual(self.failed, [])
         self.assertEqual(self.answers(), [])
 
     def test_owner_stop_overrides_uncommitted_completion_and_recovery_publishes_no_answer(self) -> None:
@@ -483,7 +480,6 @@ class PoTerminalOwnershipTests(unittest.TestCase):
         self.assertEqual(len(self.runner.recover(rerun=True)), 1)
         self.assertEqual(self.state(), po_store.INTERRUPTED)
         self.assertEqual(self.answers(), [])
-        self.assertEqual(self.failed, [])
 
     def test_committed_completion_makes_a_later_stop_a_noop_and_late_failure_cannot_publish(self) -> None:
         self.runner._settle(self.session, 1, 0, self.files)
@@ -491,16 +487,15 @@ class PoTerminalOwnershipTests(unittest.TestCase):
         self.assertFalse(self.runner._finish("session", 1, po_store.FAILED, "late failure"))
         self.assertEqual(self.state(), po_store.COMPLETED)
         self.assertEqual(self.answers(), ["late answer"])
-        self.assertEqual(self.failed, [])
         self.assertEqual(self.runner._pending_outcome("session", 1)["state"], po_store.COMPLETED)
 
-    def test_retained_failure_beats_late_completion_and_failure_callback_names_selected_intent_once(self) -> None:
+    def test_retained_failure_beats_late_completion_and_keeps_its_reason(self) -> None:
         with self.refuse(), self.assertRaises(MemoryScopeError):
             self.runner._finish("session", 1, po_store.FAILED, "original failure")
         self.runner._settle(self.session, 1, 0, self.files)
         self.runner._settle(self.session, 1, 0, self.files)
         self.assertEqual(self.state(), po_store.FAILED)
-        self.assertEqual(self.failed, [("session", 1, "original failure")])
+        self.assertEqual(self.store.turn("session", 1).reason, "original failure")
         self.assertEqual(self.answers(), [])
 
     def test_database_failure_keeps_intent_and_running_row_until_stop_or_recovery_commits(self) -> None:

@@ -14,7 +14,6 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from ummanu.board import owner_events
 from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch.head_vitality import (
     snapshots_from_status as _snapshots_from_status,
@@ -1363,17 +1362,6 @@ def _respawn_wait_bring_up(
         )
         if launched is None:
             assert failed is not None
-            if failed.get("status") == "blocked":
-                # The respawn itself failed and the card went Blocked: the dead head stays dead.
-                owner_events.record(
-                    owner_events.HEAD_DEAD,
-                    ref,
-                    f"The worker head of {ref} was not relaunched: its respawn failed ({trigger}); "
-                    f"the card is Blocked: {failed.get('reason') or 'worker respawn failed'}",
-                    f"{owner_events.HEAD_DEAD}:{ref}:{record.attempt_id or attempt_id}:respawn:"
-                    f"{_wait_cycle_token(record)}",
-                    to=getattr(getattr(runtime, "reader", None), "client", None),
-                )
             return failed
         record.state = "claimed"
         # The replacement head never saw the bounced report, so it owes no answer for it.
@@ -1476,16 +1464,6 @@ def _escalate_wait(
         terminal_state="blocked",
         disposition="blocked",
         blocked_reason="operator",
-    )
-    # The one place a worker or reviewer head is given up on: it already had its one respawn, so
-    # nothing relaunches it and the card waits in Blocked for the operator.
-    owner_events.record(
-        owner_events.HEAD_DEAD,
-        ref,
-        f"The {'reviewer' if kind == 'review' else 'worker'} head of {ref} was not relaunched after its "
-        f"respawn ({trigger}); the card is Blocked for the operator",
-        f"{owner_events.HEAD_DEAD}:{request_id}",
-        to=getattr(getattr(runtime, "reader", None), "client", None),
     )
     records.pop(ref, None)
     runtime.save_records(payload, records)

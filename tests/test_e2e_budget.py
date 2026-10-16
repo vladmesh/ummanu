@@ -257,7 +257,7 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
             sprint_override=True, sprint_override_reason="fixture unrelated block", request_id="unrelated-block",
         )
         self.assertIsNone(e2e_state(self.reader.show(OTHER)).budget_decline)
-        self.assertTrue([event for event in OwnerEventStore(self.board.credentials).events() if event.subject_ref == OTHER and event.event_class == "notice"])
+        self.assertEqual([event for event in OwnerEventStore(self.board.credentials).events() if event.subject_ref == OTHER], [])
 
     def test_the_fourth_run_of_a_sprint_is_not_dispatched_and_cuts_exactly_one_decision(self) -> None:
         decision = self.spent_with_a_pending_decision()

@@ -2746,7 +2746,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                 reference_lock(self.data_dir, "capacity", lane="admission")
                 if target.value in ACTIVE_STATES else contextlib.nullcontext()
             ), self._mutation():
-                def finish_with_wait(entity: Any) -> None:
+                def finish_with_decline(entity: Any) -> None:
                     if finish is not None:
                         finish(entity)
                     card = self.reader.show(reference)
@@ -2754,8 +2754,6 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                     if state.budget_decline and (target != "blocked" or state.budget_decline.get("request_id") != request_id):
                         state.budget_decline = None
                         self.client.call("saveTaskMetadata", task_id=_task_number(card), values={e2e_record.E2E_FIELD: state.text()})
-                        card = self.reader.show(reference)
-                    owner_events.record_person_wait(card, request_id, to=self.client)
 
                 return self.board_host.transition(
                     TransitionRequest(
@@ -2784,7 +2782,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                             **({PO_SESSION_KEY: po_session} if po_session else {}),
                         },
                     ),
-                    finish=finish_with_wait,
+                    finish=finish_with_decline,
                 )
         except BoardEventPending:
             raise self._post_effect_refusal("the card transition") from None

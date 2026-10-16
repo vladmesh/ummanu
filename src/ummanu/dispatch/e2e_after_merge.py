@@ -55,7 +55,7 @@ Outcomes:
   neither, created and Blocked at once, with a per-run PO operation owning return-route assignment;
 - anything else (another conclusion, a wait outcome other than `target_reached`, a refused dispatch, a
   run never identified, several candidates, a run on another SHA): no hotfix, a comment on every
-  covered card and a routine notice. Planned cancellation/time-limit outcomes requeue through budget
+  covered card. Planned cancellation/time-limit outcomes requeue through budget
   admission; unconfirmed dispatch/SHA/source evidence gets one PO operation before any further paid run.
 """
 
@@ -74,7 +74,6 @@ from ummanu.board import (
     e2e_disposition,
     e2e_record,
     owner_decisions,
-    owner_events,
     po_execution,
     po_origin as origin_field,
     wait_card,
@@ -1229,16 +1228,6 @@ def _create_disposition(runtime: Any, project: str, carrier_ref: str, run: E2eRu
     return str(created["task"]["ref"])
 
 
-def _bell(runtime: Any, subject: str, text: str, key: str) -> None:
-    owner_events.record(
-        owner_events.E2E_AFTER_MERGE,
-        subject,
-        text,
-        key,
-        to=getattr(getattr(runtime, "reader", None), "client", None),
-    )
-
-
 def _requeue(
     runtime: Any,
     carrier_ref: str,
@@ -1293,12 +1282,6 @@ def _requeue(
             runtime, item["ref"], carrier_ref, state, run=run, state=AM_PENDING if retry else AM_BLOCKED,
             decision=run.disposition, holder=run.disposition or None, note=note, run_url=""
         )
-    _bell(
-        runtime,
-        carrier_ref,
-        f"After-merge e2e run of {', '.join(item['ref'] for item in run.covered)} ended without an actionable verdict: {what}",
-        f"{owner_events.E2E_AFTER_MERGE}:{run.dispatch_id}",
-    )
     if not retry:
         covered = {(item["ref"], item["merge_sha"]) for item in run.covered}
         queue["pending"] = [entry for entry in queue["pending"] if (entry["ref"], entry["merge_sha"]) not in covered]

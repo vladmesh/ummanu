@@ -28,12 +28,6 @@ from tests.owner_event_fakes import FakeOwnerEvents
 from tests.po_card_fakes import DECISION_BODY, DispatcherFixture, Forbidden, card
 from tests.po_fake_store import FakePoStore
 from ummanu.board import po_origin as origin_field
-from ummanu.board.owner_events import (
-    DELEGATED_CARD_SETTLED,
-    NOTICE,
-    OwnerEventsUnavailable,
-    class_of,
-)
 from ummanu.board.po_origin import origin_text, origin_view, return_state
 from ummanu.board.production_rights import (
     DELEGATED_RESULT_INPUT,
@@ -45,7 +39,6 @@ from ummanu.board.production_rights import (
 from ummanu.board.task_routing import TaskReview
 from ummanu.cli import main
 from ummanu.dispatch.origin_returns import (
-    notice_key,
     pending_returns,
     reconcile_origin_returns,
     return_request_id,
@@ -288,7 +281,7 @@ class ReturnCase(unittest.TestCase):
 
 
 class DeliveryTests(ReturnCase):
-    def test_a_done_card_returns_its_report_once_with_one_notice(self) -> None:
+    def test_a_done_card_returns_its_report_once_and_writes_no_owner_event(self) -> None:
         self.arrange(delegated())
         event_id = self.done_code_card()
 
@@ -324,20 +317,14 @@ class DeliveryTests(ReturnCase):
             f"- merged {'a' * 40} onto main",
         ):
             self.assertIn(fragment, text)
-        [notice] = self.board.notices()
-        self.assertEqual(
-            (notice.kind, notice.event_class, notice.subject_ref, notice.dedup_key),
-            (DELEGATED_CARD_SETTLED, NOTICE, REF, notice_key(REF, event_id)),
-        )
-        self.assertIn("settled Done", notice.text)
-        self.assertIn(f"PO session {SESSION}", notice.text)
+        self.assertEqual(self.board.notices(), [])
+        self.assertEqual(pending_returns(self.board.outbox), [])
         delivered = self.board.delivered()[event_id]
         self.assertEqual(
-            {name: delivered[name] for name in ("state", "status", "notice", "session", "request_id")},
+            {name: delivered[name] for name in ("state", "status", "session", "request_id")},
             {
                 "state": "done",
                 "status": "delivered",
-                "notice": "written",
                 "session": SESSION,
                 "request_id": request_id,
             },
@@ -346,7 +333,7 @@ class DeliveryTests(ReturnCase):
 
         # The next ticks send nothing: that transition is delivered.
         self.assertEqual(self.tick(), [])
-        self.assertEqual((len(self.po.submits), len(self.board.notices())), (1, 1))
+        self.assertEqual(len(self.po.submits), 1)
 
     def test_a_card_reopened_and_done_again_returns_its_new_result_once_more(self) -> None:
         """Every entry into Done is its own delivery, keyed by its event (BLOCKER-DONE-REDISPATCH)."""
@@ -362,49 +349,9 @@ class DeliveryTests(ReturnCase):
         self.assertEqual(
             list(self.po.inputs), [return_request_id(REF, first), return_request_id(REF, second)]
         )
-        self.assertEqual(
-            sorted(notice.dedup_key for notice in self.board.notices()),
-            sorted([notice_key(REF, first), notice_key(REF, second)]),
-        )
         self.assertEqual(set(self.board.delivered()), {first, second})
         self.assertEqual(self.tick(), [])
-        self.assertEqual((len(self.po.submits), len(self.board.notices())), (2, 2))
-
-    def test_a_bell_that_fails_once_records_nothing_and_the_next_tick_completes_the_delivery(self) -> None:
-        """BLOCKER-NOTICE-DURABILITY: a delivery is complete only with both its input and its notice."""
-        self.arrange(delegated())
-        event_id = self.done_code_card()
-        self.board.client.owner_events.failing = OwnerEventsUnavailable("the board store did not answer")
-
-        with self.assertLogs("ummanu.board.owner_events", level="WARNING"):
-            [failed] = self.tick()
-
-        self.assertEqual((failed["status"], failed["action"]), ("degraded", "origin-return-notice-failed"))
-        self.board.client.owner_events.failing = None
-        self.assertEqual((len(self.po.inputs), self.board.notices(), self.board.delivered()), (1, [], {}))
-
-        [outcome] = self.tick()
-
-        self.assertEqual(outcome["action"], "origin-returned")
-        # The submit was repeated under the same id, and the service took it as the earlier input.
-        self.assertEqual(self.po.submits, [return_request_id(REF, event_id)] * 2)
-        self.assertEqual(len(self.po.inputs), 1)
-        [notice] = self.board.notices()
-        self.assertEqual(notice.dedup_key, notice_key(REF, event_id))
-        self.assertEqual(list(self.board.delivered()), [event_id])
-        self.assertEqual(self.tick(), [])
-
-    def test_with_no_board_store_at_all_there_is_no_bell_to_wait_for(self) -> None:
-        self.arrange(delegated())
-        event_id = self.done_code_card()
-        self.board.client = SimpleNamespace(origin_outbox=self.board.outbox)
-
-        with self.assertLogs("ummanu.board.owner_events", level="INFO"):
-            [outcome] = self.tick()
-
-        self.assertEqual(outcome["action"], "origin-returned")
-        self.assertEqual(self.board.delivered()[event_id]["notice"], "not_applicable")
-        self.assertEqual(self.tick(), [])
+        self.assertEqual(len(self.po.submits), 2)
 
     def test_a_blocked_card_carries_its_reason_and_classification(self) -> None:
         self.arrange(delegated(kind="research"))
@@ -420,8 +367,6 @@ class DeliveryTests(ReturnCase):
         self.assertIn("Classification: external_fact", text)
         self.assertIn("## The worker's blocked report", text)
         self.assertEqual(self.board.delivered()[event_id]["state"], "blocked")
-        [notice] = self.board.notices()
-        self.assertIn("settled Blocked", notice.text)
         # A Blocked card is read each tick (it may be Blocked again), and sends nothing new.
         self.assertEqual(self.tick(), [])
         self.assertEqual(len(self.po.submits), 1)
@@ -442,7 +387,7 @@ class DeliveryTests(ReturnCase):
         self.assertIn("Classification: board: operator", sent["text"])
         self.assertNotIn("## Links", sent["text"])
 
-    def test_a_crash_between_the_submit_and_the_record_sends_no_second_input_or_notice(self) -> None:
+    def test_a_crash_between_the_submit_and_the_record_sends_no_second_input(self) -> None:
         for column in ("done", "blocked"):
             with self.subTest(column=column):
                 self.arrange(delegated(kind="code" if column == "done" else "research"))
@@ -451,7 +396,7 @@ class DeliveryTests(ReturnCase):
 
                 with self.assertRaises(SimulatedCrash):
                     self.tick()
-                self.assertEqual((len(self.po.inputs), len(self.board.notices())), (1, 1))
+                self.assertEqual(len(self.po.inputs), 1)
                 self.assertEqual(self.board.delivered(), {})
 
                 [outcome] = self.tick()
@@ -459,7 +404,7 @@ class DeliveryTests(ReturnCase):
                 self.assertEqual(outcome["action"], "origin-returned")
                 # The submit was repeated under the same id and the service took it as the earlier one.
                 self.assertEqual(self.po.submits, [return_request_id(REF, event_id)] * 2)
-                self.assertEqual((len(self.po.inputs), len(self.board.notices())), (1, 1))
+                self.assertEqual(len(self.po.inputs), 1)
                 self.assertEqual(self.board.delivered()[event_id]["status"], "delivered")
                 self.assertEqual(self.tick(), [])
 
@@ -489,8 +434,6 @@ class DeliveryTests(ReturnCase):
             {SESSION: {"replaces": SESSION, "via": "create_session", "session": "successor-1"}},
         )
         self.assertEqual(self.board.delivered()[first]["session"], "successor-1")
-        [notice] = self.board.notices()
-        self.assertIn(f"PO session successor-1, the successor of its origin session {SESSION}", notice.text)
         self.assertEqual(origin_view(self.board.cards[REF])["current_session"], "successor-1")
 
         # The card is Blocked again later: that result goes straight to the successor.
@@ -504,7 +447,6 @@ class DeliveryTests(ReturnCase):
             [(entry["session_id"], request) for request, entry in self.po.inputs.items()],
             [("successor-1", return_request_id(REF, first)), ("successor-1", return_request_id(REF, second))],
         )
-        self.assertEqual(len(self.board.notices()), 2)
 
     def test_a_missing_origin_session_gets_a_successor_too(self) -> None:
         self.arrange(delegated(), po=FakePo(missing=(SESSION,)))
@@ -526,7 +468,6 @@ class DeliveryTests(ReturnCase):
 
         self.assertEqual(outcome["action"], "origin-returned")
         self.assertEqual(list(self.po.inputs), [return_request_id(REF, event_id)])
-        self.assertEqual(len(self.board.notices()), 1)
 
     def test_a_card_with_no_origin_is_not_returned(self) -> None:
         self.arrange(delegated(origin=None))
@@ -567,15 +508,11 @@ class BacklogTests(ReturnCase):
             list(self.po.inputs), [return_request_id(REF, first), return_request_id(REF, second)]
         )
         self.assertEqual(
-            [notice.dedup_key for notice in sorted(self.board.notices(), key=lambda n: n.id)],
-            [notice_key(REF, first), notice_key(REF, second)],
-        )
-        self.assertEqual(
             {key: record["state"] for key, record in self.board.delivered().items()},
             {first: "done", second: "done"},
         )
         self.assertEqual(self.tick(), [])
-        self.assertEqual((len(self.po.submits), len(self.board.notices())), (2, 2))
+        self.assertEqual(len(self.po.submits), 2)
 
     def test_a_blocked_card_moved_to_ready_before_any_tick_returns_its_blocked(self) -> None:
         self.arrange(delegated(kind="research"))
@@ -596,8 +533,6 @@ class BacklogTests(ReturnCase):
             "## Why it is Blocked\n\nworker report:blocked: the vendor API needs a key", sent["text"]
         )
         self.assertIn("Classification: external_fact", sent["text"])
-        [notice] = self.board.notices()
-        self.assertIn("settled Blocked", notice.text)
 
     def arrange_backlog(self) -> tuple[str, str]:
         """Done at A, reopened, Blocked at B: two returns owed before any tick."""
@@ -608,45 +543,13 @@ class BacklogTests(ReturnCase):
         second = self.board.move(REF, "blocked", "the second round stalled")
         return first, second
 
-    def test_a_notice_failure_on_the_first_holds_the_second_and_the_next_tick_makes_both_once(self) -> None:
-        first, second = self.arrange_backlog()
-        self.board.client.owner_events.failing = OwnerEventsUnavailable("the board store did not answer")
-
-        with self.assertLogs("ummanu.board.owner_events", level="WARNING"):
-            [failed] = self.tick()
-
-        self.assertEqual((failed["action"], failed["event_id"]), ("origin-return-notice-failed", first))
-        # The second waits: nothing of it was attempted.
-        self.assertEqual(self.po.submits, [return_request_id(REF, first)])
-        self.board.client.owner_events.failing = None
-        self.assertEqual(self.board.delivered(), {})
-
-        outcomes = self.tick()
-
-        self.assertEqual(
-            [(o["action"], o["event_id"]) for o in outcomes],
-            [("origin-returned", first), ("origin-returned", second)],
-        )
-        self.assertEqual(
-            self.po.submits,
-            [return_request_id(REF, first), return_request_id(REF, first), return_request_id(REF, second)],
-        )
-        self.assertEqual(
-            list(self.po.inputs), [return_request_id(REF, first), return_request_id(REF, second)]
-        )
-        self.assertEqual(len(self.board.notices()), 2)
-        self.assertEqual(set(self.board.delivered()), {first, second})
-        self.assertEqual(self.tick(), [])
-
     def test_a_crash_on_the_first_leaves_both_for_the_next_tick_with_no_duplicate(self) -> None:
         first, second = self.arrange_backlog()
         self.board.outbox.crash_before = lambda row: True
 
         with self.assertRaises(SimulatedCrash):
             self.tick()
-        self.assertEqual(
-            (list(self.po.inputs), len(self.board.notices())), ([return_request_id(REF, first)], 1)
-        )
+        self.assertEqual(list(self.po.inputs), [return_request_id(REF, first)])
 
         outcomes = self.tick()
 
@@ -654,7 +557,6 @@ class BacklogTests(ReturnCase):
         self.assertEqual(
             list(self.po.inputs), [return_request_id(REF, first), return_request_id(REF, second)]
         )
-        self.assertEqual(len(self.board.notices()), 2)
         self.assertEqual(self.tick(), [])
 
     def test_a_card_archived_before_any_pass_still_returns_its_done(self) -> None:
@@ -666,7 +568,7 @@ class BacklogTests(ReturnCase):
         [outcome] = self.tick()
 
         self.assertEqual((outcome["action"], outcome["event_id"]), ("origin-returned", event_id))
-        self.assertEqual((len(self.po.inputs), len(self.board.notices())), (1, 1))
+        self.assertEqual(len(self.po.inputs), 1)
         self.assertEqual(self.tick(), [])
 
     def test_a_delivered_row_is_never_selected_again_and_the_pass_reads_no_card_list(self) -> None:
@@ -744,7 +646,6 @@ class ExceptionTests(ReturnCase):
 
                 self.assertEqual((outcome["action"], outcome["session"]), ("origin-returned", SESSION))
                 self.assertEqual(list(self.po.inputs), [return_request_id(REF, event_id)])
-                self.assertEqual(len(self.board.notices()), 1)
                 self.assertEqual(self.board.delivered()[event_id]["status"], "delivered")
 
     def test_its_blocked_is_sent_back_and_a_done_in_another_session_is_too(self) -> None:
@@ -1025,9 +926,6 @@ class FactsTests(unittest.TestCase):
         self.assertNotIn("sprint allow-production", note)
         self.assertIn("nothing to allow", rights_note("none", "", None, request_id="r"))
         self.assertIn("the sprint allows it", rights_note("none", SPRINT, None, request_id="r"))
-
-    def test_the_bell_kind_is_a_notice(self) -> None:
-        self.assertEqual(class_of(DELEGATED_CARD_SETTLED), NOTICE)
 
 
 if __name__ == "__main__":

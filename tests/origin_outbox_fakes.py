@@ -48,7 +48,7 @@ class FakeOriginOutbox:
         self.pending_reads += 1
         return [row for row in self.rows if row.delivered_at is None]
 
-    def mark(self, row_id: int, *, status: str, notice: str, session: str, po_request_id: str) -> bool:
+    def mark(self, row_id: int, *, status: str, session: str, po_request_id: str) -> bool:
         assert status in STATUSES, status
         index = next(position for position, row in enumerate(self.rows) if row.id == row_id)
         row = self.rows[index]
@@ -62,7 +62,6 @@ class FakeOriginOutbox:
             row,
             delivered_at=self._clock,
             status=status,
-            notice=notice or None,
             session=session or None,
             po_request_id=po_request_id or None,
         )
