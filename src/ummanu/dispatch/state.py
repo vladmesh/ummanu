@@ -895,6 +895,8 @@ class DispatcherRecord:
     review_progress_at: float = 0.0
     review_idle_since: float = 0.0
     review_idle_confirmations: int = 0
+    # The review head run that has spent its one verdict reminder; another quiet turn respawns it.
+    review_verdict_prompted_run: str = ""
     # Pause (secretary-731): when a freeze stopped this card's worker / reviewer head, 0.0 when it
     # did not. A head with an empty handle is otherwise indistinguishable from one that died, so
     # these are what let the tick log and pause-status say "stopped on purpose". Cleared on resume,
@@ -1055,6 +1057,7 @@ class DispatcherRecord:
             "review_respawns": self.review_respawns,
             "review_started_at": self.review_started_at,
             "review_waiting_since": self.review_waiting_since,
+            "review_verdict_prompted_run": self.review_verdict_prompted_run,
             "rejected_done_reports": self.rejected_done_reports,
             "worker_answer_owed_since": self.worker_answer_owed_since,
             "rejected_failure_class": self.rejected_failure_class,
@@ -1265,6 +1268,7 @@ class DispatcherRecord:
             review_progress_at=float(payload.get("review_progress_at") or 0.0),
             review_idle_since=float(payload.get("review_idle_since") or 0.0),
             review_idle_confirmations=int(payload.get("review_idle_confirmations") or 0),
+            review_verdict_prompted_run=str(payload.get("review_verdict_prompted_run") or ""),
             paused_worker_at=float(payload.get("paused_worker_at") or 0.0),
             paused_reviewer_at=float(payload.get("paused_reviewer_at") or 0.0),
             workspace_settled=bool(payload.get("workspace_settled", False)),

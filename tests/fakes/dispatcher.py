@@ -22,6 +22,7 @@ from ummanu.dispatch.host import (
     LaunchedHead,
     _continuation_note,
     _report_nudge_prompt,
+    _verdict_nudge_prompt,
 )
 from ummanu.dispatch.launch import CAUSE_BASE_BRANCH_CONTRACT
 from ummanu.dispatch.launcher import claude_launch_model, role_launch_env
@@ -733,6 +734,11 @@ class FakeHost:
         # send. Every prompt actually delivered is recorded, so a test can prove there was one.
         self.fail_report_prompt_reason = ""
         self.report_prompts: list[str] = []
+        # The reviewer's verdict reminder. Fixture reviewers run the exec profile, which has no
+        # conversation to type into; tests that model a TUI reviewer set `review_takes_prompts`.
+        self.review_takes_prompts = False
+        self.fail_verdict_prompt_reason = ""
+        self.verdict_prompts: list[str] = []
         # Mid-round comment pointers (secretary-1768): which live workers take one, and every
         # pointer actually delivered, built the way the real host builds it.
         self.fail_worker_comments_reason = ""
@@ -766,6 +772,7 @@ class FakeHost:
     _render_check_header = CommandHostRuntime._render_check_header
     _broad_check_commands = CommandHostRuntime._broad_check_commands
     _prior_review_evidence = CommandHostRuntime._prior_review_evidence
+    _review_verdict_protocol = CommandHostRuntime._review_verdict_protocol
     _local_run_policy = CommandHostRuntime._local_run_policy
     _local_run_section = CommandHostRuntime._local_run_section
     # The document's comment selector, borrowed like the rest of the builder (secretary-1768).
@@ -1621,6 +1628,18 @@ class FakeHost:
         # Unlike a continuation, this writes no document and clears no body file: the round the
         # head is being pointed back at is the one it already has.
         self.report_prompts.append(_report_nudge_prompt(record.report_generation, task["ref"]))
+
+    def review_addressable(self, record) -> bool:
+        return self.review_takes_prompts and bool(record.review_handle)
+
+    def prompt_review_verdict(self, task: dict, record) -> None:
+        self.calls.append("prompt_review_verdict")
+        if self.fail_verdict_prompt_reason:
+            raise HostError(self.fail_verdict_prompt_reason)
+        if not self.review_addressable(record):
+            raise HostError("reviewer session cannot accept a verdict prompt")
+        body_file, commands = self._review_verdict_protocol(task["ref"], record.attempt_id, record.review_baseline)
+        self.verdict_prompts.append(_verdict_nudge_prompt(task["ref"], body_file, commands))
 
     def worker_takes_comments(self, record) -> bool:
         return self.worker_addressable(record) and bool(record.worker_pid_file or record.handle)

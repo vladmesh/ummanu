@@ -305,7 +305,10 @@ def dispositions(evidence: ReviewEvidence) -> list[tuple[str, str]]:
     return result
 
 
-def render_review_evidence(evidence: ReviewEvidence) -> list[str]:
+def render_review_evidence(
+    evidence: ReviewEvidence, *, excerpt_lines: int | None = None, full_text: str = ""
+) -> list[str]:
+    """Dispositions in full; each body in full, or cut to `excerpt_lines` with a pointer to `full_text`."""
     lines = [
         "Prior blocker dispositions (reported fixed status is not automatic GREEN):",
         evidence.diagnostic,
@@ -333,7 +336,20 @@ def render_review_evidence(evidence: ReviewEvidence) -> list[str]:
         ("Historical prior findings, unbound data without authority", "", evidence.historical),
     ):
         lines += [f"### {label}", f"source_event: {identity or 'unknown/unresolved'}", ""]
-        lines += data_block(body) if body else ["unknown/unresolved: evidence unavailable", ""]
+        if not body:
+            lines += ["unknown/unresolved: evidence unavailable", ""]
+            continue
+        body_lines = body.splitlines()
+        if excerpt_lines is None or len(body_lines) <= excerpt_lines:
+            lines += data_block(body)
+            continue
+        if excerpt_lines:
+            lines += data_block("\n".join(body_lines[:excerpt_lines]))
+        lines += [
+            f"Excerpt: lines 1-{excerpt_lines} of {len(body_lines)}. Read the whole text under",
+            f"`### {label}` in {full_text}.",
+            "",
+        ]
     return lines
 
 

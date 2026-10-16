@@ -46,7 +46,10 @@ from ummanu.dispatch.launch import (
     launch_intent_unwritable as _launch_intent_unwritable,
 )
 from ummanu.dispatch.provider_failure import provider_failure_outcome as _provider_failure_outcome
-from ummanu.dispatch.review import start_review as _start_review
+from ummanu.dispatch.review import (
+    prompt_review_verdict as _prompt_review_verdict,
+    start_review as _start_review,
+)
 from ummanu.dispatch.stale_round import record_stale_round as _record_stale_round
 from ummanu.dispatch.state import (
     DispatcherRecord,
@@ -311,6 +314,12 @@ def _decide_wait_by_verdict(
             )
             if prompted is not None:
                 return prompted
+        else:
+            prompted, reason = _prompt_review_verdict(
+                runtime, task, record, records, payload, attempt_id, trigger=reason
+            )
+            if prompted is not None:
+                return prompted
         # Degraded, not ok: an `ok` bounce would write healthy telemetry over the
         # one signal that says this card needs looking at before it reaches Blocked.
         return _trigger_wait_watchdog(runtime,
@@ -352,16 +361,27 @@ def _decide_wait_by_verdict(
                 action=f"{kind}-stall-suspected",
                 reason=trigger,
             )
+        prompted, trigger = _prompt_review_verdict(
+            runtime,
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            trigger=(
+                f"the review head's vitality episode suspects a stall "
+                f"({suspicion_basis}) with no {expectation}"
+            ),
+        )
+        if prompted is not None:
+            return prompted
         return _wait_outcome(
             status="degraded",
             kind=kind,
             pilot_ref=ref,
             attempt_id=attempt_id,
             action=f"{kind}-stall-suspected",
-            reason=(
-                f"the review head's vitality episode suspects a stall "
-                f"({suspicion_basis}) with no {expectation}"
-            ),
+            reason=trigger,
         )
     if verdict is VitalityVerdict.RETAINED:
         # The dispatcher's own retention is holding this head still, and it is the only

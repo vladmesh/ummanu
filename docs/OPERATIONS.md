@@ -2273,6 +2273,13 @@ takes respawn then Blocked. A head nobody could observe is never replaced on the
 ceiling the tick escalates to the operator. The respawned worker gets the same `TASK.md`, commands and
 generation.
 
+A reviewer whose episode suspects or confirms a stall with no verdict gets the same treatment, once
+per review head run (`review_verdict_prompted_run`): a reminder with the verdict body file and the
+green and red `task verdict` commands (`review-verdict-prompted`, degraded), recorded as a
+dispatcher comment on the card. A verdict on the next turn ends the wait. Under a confirmed stall, a
+spent reminder, a reviewer that cannot take input (exec profile, suspended) or a refused send takes
+respawn, then Blocked; the respawned head has its own reminder.
+
 This idle bounce is a degraded tick and turns `ummanu automations health` red until a healthy tick follows.
 The Blocked move after it is not degraded; the steward reports it as `new_blocked`. Every respawn writes a
 board comment.

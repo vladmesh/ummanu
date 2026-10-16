@@ -31,6 +31,15 @@ HEAD_STOP_GRACE_SECONDS = 5.0
 HEAD_STOP_POLL_SECONDS = 0.1
 
 
+def _conversation_addressable(handle: str, run: Any) -> bool:
+    """Whether a head in a pane runs an adapter with a conversation a prompt can be typed into."""
+    adapter = run.get("adapter")
+    return bool(handle) and (
+        adapter == "claude"
+        or (adapter == "codex" and str(run.get("codex_mode") or CODEX_TUI_MODE) == CODEX_TUI_MODE)
+    )
+
+
 class HeadLifecycleMixin:
 
     def stop(self, record: DispatcherRecord) -> None:
@@ -481,12 +490,7 @@ class HeadLifecycleMixin:
 
     def _continuation_addressable(self, record: DispatcherRecord) -> bool:
         """Whether this worker head is a live provider conversation a prompt can be sent into."""
-        run = record.worker_run
-        adapter = run.get("adapter")
-        return bool(record.handle) and (
-            adapter == "claude"
-            or (adapter == "codex" and str(run.get("codex_mode") or CODEX_TUI_MODE) == CODEX_TUI_MODE)
-        )
+        return _conversation_addressable(record.handle, record.worker_run)
 
     def worker_retained_alive(self, record: DispatcherRecord) -> bool:
         """Whether this card's worker session is confirmably alive and still suspended."""
@@ -514,3 +518,9 @@ class HeadLifecycleMixin:
         if self.mode == "noop":
             return False
         return self._continuation_addressable(record)
+
+    def review_addressable(self, record: DispatcherRecord) -> bool:
+        """Whether this card's reviewer is a live conversation a prompt could be typed into."""
+        if self.mode == "noop":
+            return False
+        return _conversation_addressable(record.review_handle, record.review_run)
