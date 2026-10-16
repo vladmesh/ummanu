@@ -1825,7 +1825,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.assertTrue(record("card_handed_to_owner", "ummanu-1", "handed", "h-1", to=store))
         self.assertFalse(record("card_handed_to_owner", "ummanu-1", "again", "h-1", to=store))
         self.assertTrue(record("sprint_closed", "sprint:5", "closed", "c-1", to=store))
-        self.assertTrue(record("budget_signal", "sprint:5", "signal", "b-1", to=store))
+        self.assertTrue(store.insert("budget_signal", "sprint:5", "signal", "b-1"))
         self.assertEqual(store.unread_count(), 4)
         events = store.events()
         self.assertEqual([event.kind for event in events],
@@ -1981,7 +1981,9 @@ class BoardStoreSchemaTests(unittest.TestCase):
         import sqlalchemy as sa
         from alembic import command
 
-        from ummanu.board.owner_events import DELEGATED_CARD_SETTLED, OwnerEventStore, record
+        from ummanu.board.owner_events import OwnerEventStore
+
+        DELEGATED_CARD_SETTLED = "delegated_card_settled"
 
         def insert(kind: str, event_class: str, key: str) -> None:
             connection.exec_driver_sql(
@@ -2005,8 +2007,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(connection.exec_driver_sql("SELECT * FROM owner_events ORDER BY id").fetchall(), before)
         store = OwnerEventStore(self.credentials("app"))
-        self.assertTrue(record(DELEGATED_CARD_SETTLED, "ummanu-1", "settled Done", "d-1", to=store))
-        self.assertFalse(record(DELEGATED_CARD_SETTLED, "ummanu-1", "settled Done", "d-1", to=store))
+        self.assertTrue(store.insert(DELEGATED_CARD_SETTLED, "ummanu-1", "settled Done", "d-1"))
+        self.assertFalse(store.insert(DELEGATED_CARD_SETTLED, "ummanu-1", "settled Done", "d-1"))
         [event] = [event for event in store.events() if event.kind == DELEGATED_CARD_SETTLED]
         self.assertEqual((event.event_class, event.subject_ref, event.dedup_key), ("notice", "ummanu-1", "d-1"))
         # The class still follows the kind, and an unknown kind is still refused.
@@ -2036,7 +2038,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         import sqlalchemy as sa
         from alembic import command
 
-        from ummanu.board.owner_events import OwnerEventStore, record
+        from ummanu.board.owner_events import OwnerEventStore
 
         connection = self.owner_connection()
         config = migrate.alembic_config(connection=connection, passwords=self.passwords)
@@ -2059,7 +2061,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.rollback()
         # The bell takes the new `needs_owner` kind, and only as `needs_owner`.
         store = OwnerEventStore(self.credentials("app"))
-        self.assertTrue(record("e2e_budget_spent", "ummanu-1", "cap spent", "e-1", to=store))
+        self.assertTrue(store.insert("e2e_budget_spent", "ummanu-1", "cap spent", "e-1"))
         with self.assertRaises(sa.exc.IntegrityError):
             connection.exec_driver_sql(
                 "INSERT INTO owner_events (kind, class, subject_ref, text, created_at, dedup_key) "
@@ -2091,7 +2093,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         import sqlalchemy as sa
         from alembic import command
 
-        from ummanu.board.owner_events import OwnerEventStore, record
+        from ummanu.board.owner_events import OwnerEventsSchemaOwed, OwnerEventStore
 
         connection = self.owner_connection()
         config = migrate.alembic_config(connection=connection, passwords=self.passwords)
@@ -2100,8 +2102,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
         store = OwnerEventStore(self.credentials("app"))
         # The operational store refuses a store at 0023 (`board.schema_gate`), so the earlier event
         # is seeded as that revision's own row.
-        with self.assertLogs("ummanu.board.owner_events", level="WARNING"):
-            self.assertFalse(record("e2e_budget_spent", "ummanu-1", "cap spent", "e-0", to=store))
+        with self.assertRaises(OwnerEventsSchemaOwed):
+            store.insert("e2e_budget_spent", "ummanu-1", "cap spent", "e-0")
         connection.exec_driver_sql(
             "INSERT INTO owner_events (kind, class, subject_ref, text, created_at, dedup_key) "
             "VALUES ('e2e_budget_spent', 'needs_owner', 'ummanu-1', 'cap spent', now(), 'e-0')"
@@ -2114,7 +2116,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             connection.exec_driver_sql("SELECT kind, class FROM owner_events").fetchall(),
             [("e2e_budget_spent", "notice")],
         )
-        self.assertTrue(record("e2e_after_merge", "ummanu-2", "after-merge run cancelled", "e-1", to=store))
+        self.assertTrue(store.insert("e2e_after_merge", "ummanu-2", "after-merge run cancelled", "e-1"))
         with self.assertRaises(sa.exc.IntegrityError):
             connection.exec_driver_sql(
                 "INSERT INTO owner_events (kind, class, subject_ref, text, created_at, dedup_key) "

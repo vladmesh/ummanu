@@ -59,7 +59,7 @@ GOLDENS = {
     "worker/respawn-refused": "8ad56cd77f9e4923e842616d66cbc95ecbd090f5577ac4a88f80d38c7f016d50",
     "worker/respawn-failed": "4ef044faaf5213f97dfad9aa6f5c5046f3c1ae2355e2520ab0218de76ff08fa7",
     "worker/intent-unwritable": "be87db25bc329708aa3c53d42b616c8ec69c4a098a7f5be2a958cbfd7e795d24",
-    "worker/terminal": "6fa19985e11eba356728cda78e758a8e8430a6628025c76486709e90022b8cb0",
+    "worker/terminal": "0a007a9b8d9637a25e957c8fbb5e19fa83b0014f29e9fb7b6e49ea8a6a3a0e77",
     "worker/terminal-refused": "8ad56cd77f9e4923e842616d66cbc95ecbd090f5577ac4a88f80d38c7f016d50",
     "review/paused": "7615fad559c15f0445749a573990474751ea82bf7b4d49fdf3a50262e70460f9",
     "review/identity": "7e1d8871b6494e119cc64846a4c0677d5c892d4844389f15749787ef0ccda19f",
@@ -87,7 +87,7 @@ GOLDENS = {
     "review/respawn-refused": "5183fcad69f6b68ac67f49d932ababfb454a99cf76bb1af2f3d0fe70516dae93",
     "review/respawn-failed": "b9fb372f2094b796023870efca6be42c20f8e433376019abfab5c09a1029cfd2",
     "review/intent-unwritable": "7dc93d1023fbedd0961370a881aa9fb7c9478c2a550fdcfdfbdb6dd7ad0dec67",
-    "review/terminal": "e13352d36da859f5de5ebb244543a8eb5be16e38bea77a8a12019956f5b81f94",
+    "review/terminal": "a9333f6982a3adbf985a53e97a468294bbb36de3a5809947b3dc17185ca44c3b",
     "review/terminal-refused": "5183fcad69f6b68ac67f49d932ababfb454a99cf76bb1af2f3d0fe70516dae93",
 }
 
@@ -196,7 +196,6 @@ class WaitOutcomeTests(unittest.TestCase):
                   else (SimpleNamespace(run={"run_id": "successor"}), None))
             patch(runtime, "record_worker_routing")
             patch(wait.attempt_accounting, "terminal_effect")
-            patch(wait.owner_events, "record")
             args = (runtime, task, record, records, payload, "tick-attempt")
             if case.startswith("guard-"):
                 proceed = mock.Mock(side_effect=capture("proceed", forwarded))

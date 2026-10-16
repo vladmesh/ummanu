@@ -1,12 +1,7 @@
 """Doctor's descriptions of canonical provider probe verdicts."""
 
-from ummanu.head_health import PROBE_BROKEN, PROBE_TIMED_OUT
-
-#: The probe verdicts that put a provider in front of the owner, and what each one means to them.
+#: The probe verdicts that put a provider in front of the owner, and what each one means to them. The
+#: other non-ready verdicts are transient or covered by the cross-family fallback.
 PROVIDER_RED_STATES = {
     "unauthenticated": "its key is expired or its login is missing",
-    "exhausted": "its quota is spent",
-    "unavailable": "its provider does not answer",
-    PROBE_TIMED_OUT: "its provider gave the probe no answer in time, so claims on it are held",
-    PROBE_BROKEN: "its probe cannot run, so claims on it are not gated by health",
 }

@@ -244,8 +244,6 @@ class TurnFiles:
     stdout: Path
     stderr: Path
     last_message: Path
-    # The card facts of a dispatcher input, kept beside the turn so a failure names the card.
-    card: Path | None = None
 
 
 @dataclass
@@ -306,7 +304,6 @@ class PoRunner:
         executables: Mapping[str, str] | None = None,
         env: Mapping[str, str] | None = None,
         on_settled: Callable[[str, int], None] | None = None,
-        on_failed: Callable[[str, int, str], None] | None = None,
         efforts: Mapping[str, tuple[str, ...]] | None = None,
         head_specs: Mapping[str, HeadSpec] | None = None,
         turn_launcher: Callable[..., Any] | None = None,
@@ -326,8 +323,6 @@ class PoRunner:
         )
         # Told (session id, seq) after a waiter settled a turn: the PO service starts the next input.
         self.on_settled = on_settled
-        # Told (session id, seq, reason) once when this runner settled a turn `failed` (`_finish`).
-        self.on_failed = on_failed
         self.data_dir = Path(data_dir)
         self.workspace = workspace_dir(self.data_dir)
         self.runs = runs_dir(self.data_dir)
@@ -471,13 +466,7 @@ class PoRunner:
         if state == COMPLETED:
             return self.store.complete_turn(session_id, seq, outcome["answer"], resolved_model=resolved)
         extra = {"resolved_model": resolved} if resolved is not None else {}
-        settled = self.store.finish_turn(session_id, seq, state, outcome["reason"], **extra)
-        if settled and state == FAILED and self.on_failed is not None:
-            try:
-                self.on_failed(session_id, seq, outcome["reason"])
-            except Exception as exc:  # noqa: BLE001 - a listener never unsettles a turn
-                print(f"ummanu po: after failed turn {session_id}/{seq}: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return settled
+        return self.store.finish_turn(session_id, seq, state, outcome["reason"], **extra)
 
     # --- sessions ---------------------------------------------------------------------------
 
@@ -564,7 +553,6 @@ class PoRunner:
             stdout=directory / f"{stem}.stdout",
             stderr=directory / f"{stem}.stderr",
             last_message=directory / f"{stem}.last-message",
-            card=directory / f"{stem}.card.json",
         )
 
     def argv(self, session: Session, files: TurnFiles, *, established: bool = False) -> list[str]:
@@ -655,8 +643,6 @@ class PoRunner:
             )
             if not created:
                 return turn, False
-            if card is not None:
-                self._keep_card(session_id, turn.seq, card)
             self._start(session_id, turn.seq, prompt)
         return self.store.turn(session_id, turn.seq), True
 
@@ -773,30 +759,8 @@ class PoRunner:
     def _finish(
         self, session_id: str, seq: int, state: str, reason: str, *, resolved_model: str | None = None
     ) -> bool:
-        """Settle failed/interrupted turns through PoStore.finish_turn.
-
-        Notify on_failed once for a turn settled failed, across every runner failure path.
-        """
+        """Settle failed/interrupted turns through PoStore.finish_turn."""
         return self._terminal(session_id, seq, {"state": state, "reason": reason, "resolved_model": resolved_model})
-
-    def _keep_card(self, session_id: str, seq: int, card: Mapping[str, Any]) -> None:
-        """The card facts of a claimed dispatcher input, beside its turn's files (best effort)."""
-        path = self.files(session_id, seq).card
-        try:
-            assert path is not None
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(dict(card), sort_keys=True), encoding="utf-8")
-        except (OSError, TypeError, ValueError) as exc:
-            print(f"ummanu po: turn {session_id}/{seq} card facts not kept: {exc}", file=sys.stderr)
-
-    def turn_card(self, session_id: str, seq: int) -> dict[str, Any] | None:
-        """The card facts the input of turn `seq` carried, or None for an input that carried none."""
-        path = self.files(session_id, seq).card
-        try:
-            document = json.loads(path.read_text(encoding="utf-8")) if path is not None else None
-        except (OSError, ValueError):
-            return None
-        return document if isinstance(document, dict) else None
 
     def _abandon(
         self, session_id: str, seq: int, process: Any | None, reason: str

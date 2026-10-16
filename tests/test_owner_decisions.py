@@ -183,9 +183,6 @@ class AdmissionTests(unittest.TestCase):
                 dispatch.assert_not_called()
                 card.assert_not_called()
                 self.assertIsNone(owner_events.person_wait({**self.task, "state": "blocked"}))
-                with mock.patch.object(owner_events, "_sink", return_value=None), mock.patch.object(owner_events, "record_required_wait") as bell:
-                    owner_events.record_person_wait({**self.task, "state": "blocked"}, "r", to=None)
-                bell.assert_not_called()
 
     def test_pending_premerge_wait_uses_refusal_before_reading_old_decision(self):
         runtime = self.runtime()

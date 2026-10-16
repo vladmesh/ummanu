@@ -12,25 +12,25 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from ummanu.po import store as po_store
+from tests.po_fake_store import FakeBoard, FakePoStore
 from ummanu.dispatch.host import CommandHostRuntime, HostError
 from ummanu.dispatch.launch import merge_launch_head_run
+from ummanu.po import store as po_store
 from ummanu.po.runner import PoRunner
+from ummanu.runtime.head.command import HeadCommand
 from ummanu.runtime.head.identity import head_process_status, publish_heartbeat
 from ummanu.runtime.head.local_pty import protocol
 from ummanu.runtime.head.local_pty.client import LocalPtySpawnError, spawn_head
-from ummanu.runtime.head.local_pty.journal import JournalWriter, RUN_STARTED, RUN_EXITED
+from ummanu.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, JournalWriter
 from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from ummanu.runtime.head.memory import MemoryScopeError, scope_unit
 from ummanu.runtime.head.run import HeadRun, StopInitiator
 from ummanu.runtime.head.spec import HeadSpec
 from ummanu.runtime.head.task_ref import TaskRef
 from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
-from ummanu.runtime.head.command import HeadCommand
 from ummanu.webproto.errors import RuntimeUnavailable
 from ummanu.webproto.lifecycle import RunLifecycle
-from ummanu.webproto.runs import ProductRun, RunStore, RAISING, RAISED, SETTLED, UNRESOLVED
-from tests.po_fake_store import FakeBoard, FakePoStore
+from ummanu.webproto.runs import RAISED, RAISING, SETTLED, UNRESOLVED, ProductRun, RunStore
 
 
 class ProductOwnershipTests(unittest.TestCase):
@@ -67,9 +67,8 @@ class ProductOwnershipTests(unittest.TestCase):
         self.assertFalse(saved_head.handle)
         with mock.patch("ummanu.runtime.head.local_pty.client.subprocess.Popen", return_value=SimpleNamespace(wait=lambda: 7)), mock.patch(
             "ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 1, stderr=b"transient refusal"),
-        ):
-            with self.assertRaises(RuntimeUnavailable):
-                self.raise_head()
+        ), self.assertRaises(RuntimeUnavailable):
+            self.raise_head()
         retained = self.store.get(self.ahead.run_id)
         self.assertEqual(retained.phase, UNRESOLVED)
         self.assertFalse(retained.ended)
@@ -103,9 +102,10 @@ class ProductOwnershipTests(unittest.TestCase):
             return real_save(run)
         with mock.patch.object(self.runtime, "_spawn", side_effect=spawn), mock.patch.object(
             self.lifecycle, "_point_at_the_task", side_effect=lambda live, *_: live,
-        ), mock.patch.object(self.store, "save", side_effect=save):
-            with self.assertRaisesRegex(OSError, "handle save interrupted"):
-                self.raise_head()
+        ), mock.patch.object(self.store, "save", side_effect=save), self.assertRaisesRegex(
+            OSError, "handle save interrupted",
+        ):
+            self.raise_head()
         settled = self.store.get(self.ahead.run_id)
         self.assertTrue(settled.ended)
         self.assertEqual(settled.phase, SETTLED)
@@ -121,11 +121,10 @@ class ProductOwnershipTests(unittest.TestCase):
                 before = ScopedHeadLifecycle.read_owner(directory)
                 with mock.patch("ummanu.runtime.head.local_pty.client.subprocess.Popen") as launch, mock.patch(
                     "ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
-                ) as stop:
-                    with self.assertRaisesRegex(LocalPtySpawnError, "cannot replace") as refused:
-                        spawn_head(root=self.root / "heads", run_id=self.ahead.run_id, role="worker", task="card:fixture",
-                                   command="true", memory_limit_mib=96,
-                                   scope_generation=HeadRun.from_json(self.ahead.head_run).scope_generation)
+                ) as stop, self.assertRaisesRegex(LocalPtySpawnError, "cannot replace") as refused:
+                    spawn_head(root=self.root / "heads", run_id=self.ahead.run_id, role="worker", task="card:fixture",
+                               command="true", memory_limit_mib=96,
+                               scope_generation=HeadRun.from_json(self.ahead.head_run).scope_generation)
                 self.assertEqual(refused.exception.scope_generation, HeadRun.from_json(self.ahead.head_run).scope_generation)
                 self.assertEqual(ScopedHeadLifecycle.read_owner(directory), before)
                 launch.assert_not_called()
@@ -141,11 +140,10 @@ class ProductOwnershipTests(unittest.TestCase):
         # The unlocked first read precedes another caller's registration and cleanup.
         with mock.patch("ummanu.runtime.head.local_pty.client.ScopedHeadLifecycle.from_run_dir", return_value=None), mock.patch(
             "ummanu.runtime.head.local_pty.client.subprocess.Popen",
-        ) as launch:
-            with self.assertRaisesRegex(LocalPtySpawnError, "cannot replace"):
-                spawn_head(root=self.root / "heads", run_id=self.ahead.run_id, role="worker", task="card:fixture",
-                           command="true", memory_limit_mib=96,
-                           scope_generation=HeadRun.from_json(self.ahead.head_run).scope_generation)
+        ) as launch, self.assertRaisesRegex(LocalPtySpawnError, "cannot replace"):
+            spawn_head(root=self.root / "heads", run_id=self.ahead.run_id, role="worker", task="card:fixture",
+                       command="true", memory_limit_mib=96,
+                       scope_generation=HeadRun.from_json(self.ahead.head_run).scope_generation)
         self.assertEqual(ScopedHeadLifecycle.read_owner(directory), before)
         launch.assert_not_called()
 
@@ -156,8 +154,8 @@ class ProductOwnershipTests(unittest.TestCase):
                 "ummanu.dispatch.host._prepare_claude_provider_progress_source", side_effect=lambda run: run,
             ):
                 host = CommandHostRuntime(catalog, self.root, production_runtime=SimpleNamespace())
-                identity = dict(role=role, workspace=str(self.root), task_ref=TaskRef.card("card:fixture"),
-                                pid_file=str(self.root / f"{role}.pid"), run_id=f"fresh-{role}")
+                identity = {"role": role, "workspace": str(self.root), "task_ref": TaskRef.card("card:fixture"),
+                            "pid_file": str(self.root / f"{role}.pid"), "run_id": f"fresh-{role}"}
                 with mock.patch.object(host, "_head_spec", return_value=self.spec):
                     ahead = host.preflight_codex_run("fixture", **identity)
                     again = host.preflight_codex_run("fixture", **identity)
@@ -240,7 +238,7 @@ class OwnershipTests(unittest.TestCase):
         def cleanup():
             try:
                 owner.stop_and_prove_empty()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - the worker thread hands every failure to the asserting thread
                 errors.append(exc)
         with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=backend) as stop:
             thread = threading.Thread(target=cleanup)
@@ -273,9 +271,9 @@ class OwnershipTests(unittest.TestCase):
     def test_interrupted_backend_retains_closed_admission_and_releases_lock_for_retry(self) -> None:
         owner = self.owner()
         membership = self.membership(owner)
-        with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=OSError("interrupted")):
-            with self.assertRaises(MemoryScopeError):
-                owner.stop_and_prove_empty()
+        with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=OSError("interrupted")), \
+                self.assertRaises(MemoryScopeError):
+            owner.stop_and_prove_empty()
         record = ScopedHeadLifecycle.read_owner(owner.directory)
         self.assertFalse(record["launch_allowed"])
         self.assertFalse(record["cleanup_complete"])
@@ -386,9 +384,9 @@ class OwnershipTests(unittest.TestCase):
         with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.launch_group_present", return_value=True), mock.patch(
             "ummanu.runtime.head.local_pty.scoped_lifecycle.os.killpg", side_effect=PermissionError("fixture"),
         ), mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
-                      return_value=subprocess.CompletedProcess([], 1, stderr=b"refused")):
-            with self.assertRaisesRegex(MemoryScopeError, "launch group"):
-                owner.stop_and_prove_empty()
+                      return_value=subprocess.CompletedProcess([], 1, stderr=b"refused")), \
+                self.assertRaisesRegex(MemoryScopeError, "launch group"):
+            owner.stop_and_prove_empty()
         self.assertFalse(ScopedHeadLifecycle.read_owner(owner.directory)["cleanup_complete"])
 
     def test_unreadable_membership_cannot_settle_exact_generation(self) -> None:
@@ -404,9 +402,8 @@ class OwnershipTests(unittest.TestCase):
         with mock.patch.object(Path, "read_text", unreadable), mock.patch(
             "ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
             return_value=subprocess.CompletedProcess([], 0, stderr=b""),
-        ):
-            with self.assertRaisesRegex(MemoryScopeError, "verify empty head scope"):
-                owner.stop_and_prove_empty()
+        ), self.assertRaisesRegex(MemoryScopeError, "verify empty head scope"):
+            owner.stop_and_prove_empty()
         self.assertFalse(ScopedHeadLifecycle.read_owner(owner.directory)["cleanup_complete"])
 
 
@@ -416,8 +413,8 @@ class PoTerminalOwnershipTests(unittest.TestCase):
         self.enterContext(mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", self.root / "cgroups"))
         self.store = FakePoStore(FakeBoard())
         self.session, _ = self.store.claim_session(session_id="session", cli="claude", model="opus", cwd=str(self.root), cli_session_id=None, effort="high")
-        self.failed, self.settled = [], []
-        self.runner = PoRunner(self.store, self.root, on_failed=lambda *args: self.failed.append(args), on_settled=lambda *args: self.settled.append(args))
+        self.settled = []
+        self.runner = PoRunner(self.store, self.root, on_settled=lambda *args: self.settled.append(args))
         self.files = self.runner.files("session", 1)
         self.files.directory.mkdir(parents=True)
         self.store.claim_turn("session", "prompt", lambda _seq: self.files.stdout)
@@ -445,7 +442,6 @@ class PoTerminalOwnershipTests(unittest.TestCase):
         self.runner._wait(self.session, 1, SimpleNamespace(wait=lambda: 0), [], self.files)
         self.assertEqual(self.state(), po_store.INTERRUPTED)
         self.assertEqual(self.answers(), [])
-        self.assertEqual(self.failed, [])
         self.assertEqual(self.settled, [("session", 1)])
         self.assertEqual(self.runner.recover(rerun=True), [])
         self.assertEqual(self.runner._pending_outcome("session", 1)["state"], po_store.INTERRUPTED)
@@ -456,7 +452,6 @@ class PoTerminalOwnershipTests(unittest.TestCase):
         self.assertTrue(self.runner._finish("session", 1, po_store.FAILED, "late failure"))
         self.assertFalse(self.runner._finish("session", 1, po_store.FAILED, "repeated failure"))
         self.assertEqual(self.state(), po_store.INTERRUPTED)
-        self.assertEqual(self.failed, [])
         self.assertEqual(self.answers(), [])
 
     def test_late_waiter_with_cleanup_still_unavailable_leaves_interruption_for_recovery(self) -> None:
@@ -469,7 +464,6 @@ class PoTerminalOwnershipTests(unittest.TestCase):
         self.assertEqual(self.answers(), [])
         self.assertEqual(len(self.runner.recover(rerun=True)), 1)
         self.assertEqual(self.state(), po_store.INTERRUPTED)
-        self.assertEqual(self.failed, [])
         self.assertEqual(self.answers(), [])
 
     def test_owner_stop_overrides_uncommitted_completion_and_recovery_publishes_no_answer(self) -> None:
@@ -483,7 +477,6 @@ class PoTerminalOwnershipTests(unittest.TestCase):
         self.assertEqual(len(self.runner.recover(rerun=True)), 1)
         self.assertEqual(self.state(), po_store.INTERRUPTED)
         self.assertEqual(self.answers(), [])
-        self.assertEqual(self.failed, [])
 
     def test_committed_completion_makes_a_later_stop_a_noop_and_late_failure_cannot_publish(self) -> None:
         self.runner._settle(self.session, 1, 0, self.files)
@@ -491,16 +484,15 @@ class PoTerminalOwnershipTests(unittest.TestCase):
         self.assertFalse(self.runner._finish("session", 1, po_store.FAILED, "late failure"))
         self.assertEqual(self.state(), po_store.COMPLETED)
         self.assertEqual(self.answers(), ["late answer"])
-        self.assertEqual(self.failed, [])
         self.assertEqual(self.runner._pending_outcome("session", 1)["state"], po_store.COMPLETED)
 
-    def test_retained_failure_beats_late_completion_and_failure_callback_names_selected_intent_once(self) -> None:
+    def test_retained_failure_beats_late_completion_and_keeps_its_reason(self) -> None:
         with self.refuse(), self.assertRaises(MemoryScopeError):
             self.runner._finish("session", 1, po_store.FAILED, "original failure")
         self.runner._settle(self.session, 1, 0, self.files)
         self.runner._settle(self.session, 1, 0, self.files)
         self.assertEqual(self.state(), po_store.FAILED)
-        self.assertEqual(self.failed, [("session", 1, "original failure")])
+        self.assertEqual(self.store.turn("session", 1).reason, "original failure")
         self.assertEqual(self.answers(), [])
 
     def test_database_failure_keeps_intent_and_running_row_until_stop_or_recovery_commits(self) -> None:
@@ -558,7 +550,7 @@ class PoTerminalOwnershipTests(unittest.TestCase):
                     self.runner.stop_turn("session", 1)
                 else:
                     self.runner._settle(self.session, 1, 0, self.files)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - the worker thread hands every failure to the asserting thread
                 errors.append(exc)
         with mock.patch.object(self.store, method, delayed):
             thread = threading.Thread(target=settle_first)

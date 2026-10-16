@@ -696,8 +696,8 @@ written only by the dispatcher (`TaskWriter.record_po_return`).
 one table, `origin_returns` (revision `0022_origin_returns`, `board/origin_outbox.py`): one row per
 transition into Done or Blocked of a card that carries an origin and is not a wait card, with the card
 ref, the transition's event id (unique) and audit request id, the column it entered, when, and its
-delivery (`delivered_at`, `status` `delivered` or `skipped`, the notice result, the session that took
-it, the input's request id). The row is written by `SqlTaskAudit.append`, the one place a committed
+delivery (`delivered_at`, `status` `delivered` or `skipped`, the session that took it, the input's
+request id; `notice` is read only). The row is written by `SqlTaskAudit.append`, the one place a committed
 audit record is written, in the same transaction as the record, and a card transition's move and its
 event commit in one transaction (`TaskWriter._transition_card`): the move, its event and its row stand
 or fall together, and no writer can commit one without the other. Every writer of a transition into
@@ -729,18 +729,11 @@ card's audit up to that move, and the merge a release recorded. Everything about
 event's: the column it entered and when, and its result; the card's present column is never read, so
 the same row always renders the same text.
 
-The delivery is complete only when both its halves are, in this order: (1) the PO submit, idempotent by
-its request id; (2) the `delegated_card_settled` notice (below), written through the bell's strict
-writer `owner_events.record_strict`, which answers `written`, `already_present` (under the dedup key)
-or `failed` (the store raised or did not answer) instead of swallowing the failure as `record` does for
-every other producer; (3) the row marked delivered, only after (1) and (2) were accepted. The row is the
-only delivery record. A notice that failed marks nothing (`origin-return-notice-failed`, degraded), and
-the next tick repeats both steps under the same keys: the submit is the earlier input to the service (a
-`request_conflict` on an id the service holds for the session is taken as it), the notice a no-op on its
-dedup key. A crash between any two steps is repaired the same way: no second input, no second notice.
-An installation with no board store configured at all has no bell: the strict writer answers
-`not_applicable` (logged), which does not hold the delivery, and the row says so (`notice`). A marked
-row is never selected again.
+The delivery is complete when, in this order: (1) the PO submit, idempotent by its request id, was
+accepted; (2) the row is marked delivered. The row is the only delivery record, and the delivery writes
+no owner event. A crash between the two repeats the submit next tick under the same request id: the
+service takes it as the earlier input (a `request_conflict` on an id the service holds for the session
+is taken as it), so there is no second input. A marked row is never selected again.
 
 The PO delivery is the one the wait cards use (`dispatch/po_delivery.py`). A service that does not
 answer, or refuses, postpones it to the next tick (`origin-return-postponed`, degraded). A closed or
@@ -762,8 +755,8 @@ an out-of-sprint card's execution, go to it, and a successor closed in turn gets
   turn; no flag) in the completion transition's data as `po_session`; `task handover` records it in the
   handover record's payload the same way. Neither restricts who may run the command. When the Done's
   recorded `po_session` is the origin session or one of its recorded successors (`po_return.successors`),
-  the Done's row is marked `skipped`, with no input and no notice, so it is never pending again. Anything else is delivered normally,
-  with input and notice: a completion that ran outside a PO turn (no session recorded), one by another
+  the Done's row is marked `skipped`, with no input, so it is never pending again. Anything else is delivered normally,
+  with its input: a completion that ran outside a PO turn (no session recorded), one by another
   session, any Done not made by `task complete`, and every Blocked. The session the dispatcher handed the
   card to (`po_return.executor`) proves nothing and is not asked.
 
@@ -778,33 +771,38 @@ refused at create; a legacy one is Blocked at claim.
 ### Owner events and the bell
 
 What needs the owner, and what the owner should know, is one board entity: the table `owner_events`
-(revision `0018_owner_events`; `0021_delegated_card_settled`, `0023_sprint_e2e_budget` and `0024_e2e_after_merge_kind` add a kind), written and read only through
-`ummanu.board.owner_events`. A row is
+(revision `0018_owner_events`; later revisions restate its kind CHECKs), written and read only
+through `ummanu.board.owner_events`. A row is
 `id`, `kind`, `class`, `subject_ref` (a card, sprint or issue ref, `po-session:<id>`, or null), `text`,
 `created_at`, `read_at` (null while unread) and `dedup_key` (unique).
 
-**Kinds and classes.** The class is derived from the kind (`owner_events.KIND_CLASS`); the database
-holds the kind vocabulary, the class vocabulary and that rule as CHECKs.
+**Kinds and classes.** The bell carries three things only: the end of a sprint, a PO session that
+fell over to the other CLI family, and a fact only the owner can move on. The class is derived from the
+kind (`owner_events.KIND_CLASS`); the database holds the kind vocabulary, the class vocabulary and that
+rule as CHECKs.
 
 | kind | class | written by, at | subject | dedup key |
 | --- | --- | --- | --- | --- |
 | `card_handed_to_owner` | `needs_owner` | `TaskWriter.handover` (`task handover`, inside a PO turn), in the handover transaction | the card | `card_handed_to_owner:<card>:<handover event id>` |
+| `po_card_escalated` | `needs_owner` | `TaskWriter.escalate_po_card` (the dispatcher), in the escalation transaction, for an unresolved timed or failed PO episode (below) | the card | `po_card_escalated:<card>:<claim or answer event id>` |
 | `steward_needs_human` | `needs_owner` | `TaskWriter.move` of a steward report card to Blocked by role `steward` whose reason carries a non-empty "Needs a human" section | the report card | `steward_needs_human:<card>:<move event id>` |
-| `e2e_budget_spent` | `notice` | the dispatcher's e2e stage ([The e2e stage](#the-e2e-stage)), before it Blocks a code card outside every sprint, with no PO origin, whose e2e cap is spent; its text is the Blocked reason. Also the after-merge stage ([After merge](#after-merge)), when a covered card outside every open sprint, with no PO origin, has its cap spent and is declined | the card | `e2e_budget_spent:<card>:<cap>` |
-| `e2e_after_merge` | `notice` | the dispatcher's after-merge e2e ([After merge](#after-merge)): a run that ended with no verdict (another conclusion, a wait outcome other than `target_reached`, refused, unidentified, ambiguous, run on another SHA); or a red run whose hotfix card no open sprint and no PO origin owns, after that card is Blocked | the run's carrier (the newest covered card), or the hotfix card | `e2e_after_merge:<dispatch id>`, `e2e_after_merge:hotfix:<dispatch id>` |
-| `sprint_closed` | `notice` | `SprintWriter.close`, after the close commits | the sprint | `sprint_closed:<sprint>:<close event id>` |
-| `sprint_stopped` | `notice` | `SprintWriter` in the budget charge that reached the hard limit (the dispatcher's budget pass), in its transaction | the sprint | `sprint_stopped:<sprint>:<charge request id>` |
-| `budget_signal` | `notice` | `SprintWriter.record_budget` once the sprint's budget reaches its signal threshold | the sprint | `budget_signal:<sprint>` |
-| `observer_dead` | `notice` | the dispatcher's observer reconcile: a head positively dead at the start of the tick that the tick did not relaunch (backoff, drain, a failed bring-up) | the sprint | `observer_dead:<sprint>:<launch count>` |
-| `head_dead` | `notice` | the dispatcher's wait watchdog: a worker or reviewer head dead or stalled again after its one respawn, the card Blocked for the operator; or a worker respawn that failed | the card | `head_dead:<blocking request id>` |
-| `po_turn_failed` | `notice` | the PO service, when its runner settles a turn `failed` (`PoRunner._finish`); a stop by the owner is `interrupted` and writes nothing | the card when a dispatcher input started the turn, else `po-session:<id>` | `po_turn_failed:<session>:<seq>` |
 | `po_session_moved_account` | `needs_owner` | the PO service, when its runner moved a turn to the other CLI family after an auth, plan or quota refusal (`PoRunner._fall_over`) | `po-session:<id>` | `po_session_moved_account:<session>:<seq>` |
 | `po_session_moved` | `notice` | the same, for any other provider refusal (429, 5xx, reconnect exhaustion) | `po-session:<id>` | `po_session_moved:<session>:<seq>` |
-| `provider_red` | `notice` | `ummanu doctor` (not `--dry-run`): a resource probe `unauthenticated` (expired key or missing login), `exhausted`, `unavailable`, `timed_out` or `probe_broken` | none | `provider_red:<resource>:<state>:<UTC day>` |
-| `delegated_card_settled` | `notice` | the dispatcher's result return ([PO delegation](#po-delegation)), after the origin session (or its successor) took a delegated card's result, through `record_strict`: a failed write is repeated next tick and the return is not recorded until it lands; its text names the card, its terminal state and the origin session, and the successor that took it | the card | `delegated_card_settled:<card>:<transition event id>` |
+| `sprint_closed` | `notice` | `SprintWriter.close`, after the close commits | the sprint | `sprint_closed:<sprint>:<close event id>` |
+| `sprint_stopped` | `notice` | `SprintWriter` in the budget charge that reached the hard limit (the dispatcher's budget pass), in its transaction | the sprint | `sprint_stopped:<sprint>:<charge request id>` |
+| `provider_red` | `notice` | `ummanu doctor` (not `--dry-run`): a resource probe `unauthenticated` (expired key or missing login); the other non-ready verdicts are transient or covered by the cross-family fallback and write nothing | none | `provider_red:<resource>:<state>:<UTC day>` |
 
-**The writer never fails its caller.** Every producer calls `owner_events.record(kind, subject_ref, text,
-dedup_key, to=...)` once, at the place its fact is decided. It is idempotent on the dedup key (`ON
+A Blocked card, a card handed to the PO, a failed PO turn, a dead head, a sprint budget signal, an
+after-merge or e2e budget outcome and a delegated card's returned result write no owner event: the
+pipeline, the observer or the PO resolves them. The CHECKs still admit the kinds earlier releases wrote
+for those facts (`owner_events.READ_ONLY_KINDS`: `card_waits_for_person`, `e2e_budget_spent`,
+`e2e_after_merge`, `budget_signal`, `observer_dead`, `head_dead`, `po_turn_failed`,
+`delegated_card_settled`), so their rows stay listed under `?all=1`; the writer refuses them.
+
+**The writer never fails its caller.** Every advisory producer calls `owner_events.record(kind,
+subject_ref, text, dedup_key, to=...)` once, at the place its fact is decided; the handover and the
+escalation write through `record_required_wait` inside their card transaction instead, and its failure
+rolls that transaction back. It is idempotent on the dedup key (`ON
 CONFLICT DO NOTHING`) and swallows and logs every failure: a store that does not answer, a board that
 owes migrations (merged code runs before the upgrade applies them; refused as `schema_owed`, see
 [Board schema gate](#board-schema-gate)), no board store at all. A producer's
@@ -817,12 +815,7 @@ is `needs_owner`, with an explicit failure/deadline reason and dedup key
 persisted board claim, including queued time, or from the recorded answer for its follow-up. It
 checks current card and turn state; completed, interrupted, superseded/cancelled and handed-over
 work does not become a routine timeout. Restart and retry cannot reset that clock. A replaced/ended
-episode settles its escalation in the card transaction. The service's `po_turn_failed` remains a
-notice for the execution audit; the dispatcher supplies the scoped unresolved escalation.
-
-`card_waits_for_person` now denotes a routine PO/observer notice, including an unrelated fresh
-Blocked episode. Direct e2e notifications are notices; complete routing of uncovered/unowned e2e
-cases to PO is separate work. Steward's explicit non-empty "Needs a human" escalation remains valid.
+episode settles its escalation in the card transaction.
 
 **Stay-unread.** A current unanswered handover or unresolved PO escalation holds its matching event.
 The refusal names the unanswered handover or the escalation reason. A recorded answer ends the
@@ -1774,8 +1767,7 @@ written; a sprint that is not open is refused (`closed`).
   card (bag field `e2e_cap`, `{raises: [{add, authorized_by, decision, at}]}`, one `e2e_cap_raised`
   audit record each) and raises that card's cap. The wait, the re-check and the decline are as above;
 - a card with no origin has nobody to hand the decision to: it is Blocked with `e2e run cap reached
-  (<cap>)` (`blocked_reason: other`) and one `e2e_budget_spent` bell event
-  ([Owner events and the bell](#owner-events-and-the-bell)).
+  (<cap>)` (`blocked_reason: other`).
 
 **`task show`.** A card that reached the stage carries `e2e`: `runs_dispatched`; `run_cap` (a card
 outside every sprint: 3 plus its raises; null for a card of a sprint) and `budget` (the sprint whose
@@ -1867,8 +1859,7 @@ of covered cards is the unit, and one decision card owns all of it:
   `task e2e-budget` command for each spent card. That decision authorizes a raise of each card it names
   spent (`e2e_budget.authorized_raise`), exactly as a card's own decision does; `task e2e-budget` also
   takes a card whose sprint is closed, since such a card spends its own cap here. With no origin anywhere
-  in the batch nobody can be handed the decision: every covered card is declined at once, and each spent
-  one rings the `e2e_budget_spent` bell.
+  in the batch nobody can be handed the decision: every covered card is declined at once.
 
 Every covered card's mark says `e2e: budget spent, waiting on <decision>`, and cards queued while it is open
 join it with one comment each and are marked the same. Each tick the budget is re-checked first: a raise
@@ -1894,7 +1885,7 @@ charged sprint while it is open (else in none), returning to `card:<carrier>`, c
   - otherwise outside every sprint with the newest covered card's PO origin, so its Done or Blocked
     returns to that session ([PO delegation](#po-delegation));
   - otherwise it is created and Blocked at once, reason `after-merge e2e red, no sprint or origin owns
-    it` (`blocked_reason: other`), with one `e2e_after_merge` bell event.
+    it` (`blocked_reason: other`).
 
   Every covered card gets one `## E2E after merge — red` comment naming the hotfix, and its mark says
   `red -> <hotfix card>`. The cards do not go back to the pending set: the hotfix, once merged, is covered
@@ -1903,12 +1894,12 @@ charged sprint while it is open (else in none), returning to `card:<carrier>`, c
   `target_reached` (`deadline_passed`, `source_unreachable`, `cancelled`), a refused dispatch or branch,
   a run never identified, several candidates, or a run on another SHA (the run's state is `blocked`: it
   is never attached). No hotfix. One `## E2E after merge — <requeued|blocked>` comment on every covered
-  card with the outcome, one `e2e_after_merge` bell event on the carrier, and the covered cards go back
+  card with the outcome, and the covered cards go back
   to the pending set; the next run covers them and is charged as usual.
 
 The resolution (`green`, `red`, `requeued`, `blocked`) is written on the run before any of its effects,
-each effect is idempotent (comments and the hotfix under request ids derived from the dispatch id, the
-bell under its dedup key), and the run is marked acted on only after all of them.
+each effect is idempotent (comments and the hotfix under request ids derived from the dispatch id), and
+the run is marked acted on only after all of them.
 
 **`task show`.** A covered card's `e2e` block carries `placement: after_merge`, `state` (`pending`,
 `covered by <run>`, `green`, `red -> <hotfix card>`, `e2e: budget spent, waiting on <decision>`,

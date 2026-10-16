@@ -6,20 +6,18 @@ touches it. Producers write through :func:`record`; the web reads and marks thro
 
 **Kinds and classes.** Every kind belongs to one class, and the class is derived from the kind here
 (:data:`KIND_CLASS`), never passed by a producer. `needs_owner` is a fact only the owner can move on:
-a current unanswered PO handover, an unresolved timed/failed PO episode, or a steward's report with
-an explicit non-empty human escalation reason. Routine Blocked, PO and e2e events are notices. `notice` is a fact
-the owner should know: a sprint closed or stopped, the budget signal, a dead head nobody relaunched, a
-failed PO turn, a red provider, a delegated card's result returned to its PO session. The database holds both vocabularies and the kind-to-class rule as
-CHECK constraints (`board/schema.py`), from the same lists.
+a current unanswered PO handover, an unresolved timed/failed PO episode, a steward's report with
+an explicit non-empty human escalation reason, or a PO session moved off a refused account. `notice` is
+a fact the owner should know: a sprint closed or stopped, a PO session moved to the other CLI family, a
+provider login only the owner can renew. :data:`READ_ONLY_KINDS` are kinds older builds wrote: their
+rows stay readable, and :func:`record` refuses them. The database holds both vocabularies and the
+kind-to-class rule as CHECK constraints (`board/schema.py`), from the same lists.
 
 **Advisory notices never fail their caller.** :func:`record` is idempotent under its dedup key (a unique
 column: a repeat inserts nothing) and swallows every failure after logging it: a store that does not
 answer, a board that owes migrations (merged code runs before the upgrade applies them; the schema
 gate refuses it as `OwnerEventsSchemaOwed`), a store that is not configured at all. A producer's own
-notice never depends on the bell. :func:`record_strict`, for a caller whose work
-is complete only with its event (a delegated card's returned result, secretary-1792): the same write,
-answered as written, already present or failed instead of swallowed, so that caller repeats it.
-Required card waits use :func:`record_required_wait` and :func:`settle_required_wait` instead:
+notice never depends on the bell. Required card waits use :func:`record_required_wait` and :func:`settle_required_wait` instead:
 failures escape the owner-event savepoint and roll back the enclosing card mutation and occurrence.
 
 **Stay-unread.** A `needs_owner` event whose subject card carries the `waiting_owner` mark
@@ -39,7 +37,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ummanu.board.e2e_record import e2e_state
 from ummanu.board.extension_bag import EXTENSION_BAG
 from ummanu.board.owner_handover import MARK_KEYS, OWNER_ESCALATION, attention_record, waiting_owner
 from ummanu.board.schema_gate import SchemaAssessment, SchemaOwed, require
@@ -56,46 +53,48 @@ CARD_HANDED_TO_OWNER = "card_handed_to_owner"
 STEWARD_NEEDS_HUMAN = "steward_needs_human"
 SPRINT_CLOSED = "sprint_closed"
 SPRINT_STOPPED = "sprint_stopped"
-BUDGET_SIGNAL = "budget_signal"
-OBSERVER_DEAD = "observer_dead"
-HEAD_DEAD = "head_dead"
-PO_TURN_FAILED = "po_turn_failed"
 PROVIDER_RED = "provider_red"
-DELEGATED_CARD_SETTLED = "delegated_card_settled"
-E2E_BUDGET_SPENT = "e2e_budget_spent"
-E2E_AFTER_MERGE = "e2e_after_merge"
-CARD_WAITS_FOR_PERSON = "card_waits_for_person"
 PO_CARD_ESCALATED = "po_card_escalated"
 PO_SESSION_MOVED = "po_session_moved"
 PO_SESSION_MOVED_ACCOUNT = "po_session_moved_account"
 
 #: Every kind and the class it belongs to: the CHECKs `owner_event_kind_in_vocabulary` and
-#: `owner_event_class_follows_kind` (board/schema.py, 0018, restated by 0021, 0023, 0024, 0028 and
-#: 0033) are these two lists. A new kind joins it here and in a migration together.
+#: `owner_event_class_follows_kind` (board/schema.py) are these two lists. A new kind joins it here
+#: and in a migration together.
 KIND_CLASS: dict[str, str] = {
-    CARD_WAITS_FOR_PERSON: NOTICE,
     CARD_HANDED_TO_OWNER: NEEDS_OWNER,
     PO_CARD_ESCALATED: NEEDS_OWNER,
     # A PO session moved to the other CLI family because its provider refused the account (auth, plan,
     # quota): only the owner can repair the login or the subscription.
     PO_SESSION_MOVED_ACCOUNT: NEEDS_OWNER,
     STEWARD_NEEDS_HUMAN: NEEDS_OWNER,
-    # Released direct e2e notifications remain visible without claiming owner authority.
-    E2E_BUDGET_SPENT: NOTICE,
-    # Complete PO routing for uncovered e2e work is a separate cut.
-    E2E_AFTER_MERGE: NOTICE,
     SPRINT_CLOSED: NOTICE,
     SPRINT_STOPPED: NOTICE,
-    BUDGET_SIGNAL: NOTICE,
-    OBSERVER_DEAD: NOTICE,
-    HEAD_DEAD: NOTICE,
-    PO_TURN_FAILED: NOTICE,
+    # Only for an `unauthenticated` probe: a login or plan only the owner can renew.
     PROVIDER_RED: NOTICE,
     PO_SESSION_MOVED: NOTICE,
-    # A card a PO session delegated settled and its result went back to that session (0021).
-    DELEGATED_CARD_SETTLED: NOTICE,
+    "card_waits_for_person": NOTICE,
+    "e2e_budget_spent": NOTICE,
+    "e2e_after_merge": NOTICE,
+    "budget_signal": NOTICE,
+    "observer_dead": NOTICE,
+    "head_dead": NOTICE,
+    "po_turn_failed": NOTICE,
+    "delegated_card_settled": NOTICE,
 }
+#: Kinds the CHECKs still admit so historical rows stay readable; :func:`record` refuses them.
+READ_ONLY_KINDS = (
+    "card_waits_for_person",
+    "e2e_budget_spent",
+    "e2e_after_merge",
+    "budget_signal",
+    "observer_dead",
+    "head_dead",
+    "po_turn_failed",
+    "delegated_card_settled",
+)
 KINDS = tuple(KIND_CLASS)
+WRITABLE_KINDS = tuple(kind for kind in KINDS if kind not in READ_ONLY_KINDS)
 NEEDS_OWNER_KINDS = tuple(kind for kind, value in KIND_CLASS.items() if value == NEEDS_OWNER)
 
 #: The subject of a PO turn that no card input started: its session, `po-session:<session id>`.
@@ -179,6 +178,13 @@ def class_of(kind: str) -> str:
         return KIND_CLASS[kind]
     except KeyError:
         raise ValueError(f"{kind!r} is not an owner event kind; the kinds are {', '.join(KINDS)}") from None
+
+
+def writable_class_of(kind: str) -> str:
+    """The class of a kind a producer may write; a read-only or unknown kind is a programming error."""
+    if kind in READ_ONLY_KINDS:
+        raise ValueError(f"{kind!r} is a read-only owner event kind; the writable kinds are {', '.join(WRITABLE_KINDS)}")
+    return class_of(kind)
 
 
 def po_session_subject(session_id: str) -> str:
@@ -460,7 +466,7 @@ def record(kind: str, subject_ref: str | None, text: str, dedup_key: str, *, to:
     (see :func:`_sink`); None, or an installation with no board store, writes nowhere.
     """
     try:
-        class_of(kind)
+        writable_class_of(kind)
         if not str(dedup_key or "").strip():
             raise ValueError("an owner event needs a dedup key")
         sink = _sink(to)
@@ -473,41 +479,6 @@ def record(kind: str, subject_ref: str | None, text: str, dedup_key: str, *, to:
         return False
 
 
-#: The answers of :func:`record_strict`.
-WRITTEN = "written"
-ALREADY_PRESENT = "already_present"
-FAILED = "failed"
-NOT_APPLICABLE = "not_applicable"
-
-
-def record_strict(kind: str, subject_ref: str | None, text: str, dedup_key: str, *, to: Any) -> str:
-    """Write one owner event for a caller whose own work is not complete without it (secretary-1792).
-
-    The same write as :func:`record`, answered three ways instead of swallowed: :data:`WRITTEN`,
-    :data:`ALREADY_PRESENT` under `dedup_key`, or :data:`FAILED` when the store raised or did not
-    answer (logged), which the caller repeats under the same key. An installation with no board store
-    configured at all answers :data:`NOT_APPLICABLE` (logged): there is no bell to wait for. It never
-    raises. An unknown kind or an empty key is the caller's defect and answers :data:`FAILED`.
-    """
-    try:
-        class_of(kind)
-        if not str(dedup_key or "").strip():
-            raise ValueError("an owner event needs a dedup key")
-        sink = _sink(to)
-    except Exception as exc:  # noqa: BLE001 - answered, not raised
-        logger.warning("owner event %s (%s) not recorded: %s: %s", kind, dedup_key, type(exc).__name__, exc)
-        return FAILED
-    if sink is None:
-        logger.info("owner event %s (%s) not recorded: no board store to record it in", kind, dedup_key)
-        return NOT_APPLICABLE
-    try:
-        written = bool(sink.insert(kind, subject_ref or None, _bounded(text), dedup_key))
-    except Exception as exc:  # noqa: BLE001 - the caller repeats it under the same key
-        logger.warning("owner event %s (%s) not recorded: %s: %s", kind, dedup_key, type(exc).__name__, exc)
-        return FAILED
-    return WRITTEN if written else ALREADY_PRESENT
-
-
 def settle(subject_ref: str, *, to: Any) -> int:
     """Mark read every unread `needs_owner` event of a card whose mark just cleared; never raises."""
     try:
@@ -518,20 +489,6 @@ def settle(subject_ref: str, *, to: Any) -> int:
     except Exception as exc:  # noqa: BLE001 - the card's transition never fails on the bell
         logger.warning("owner events of %s not settled: %s: %s", subject_ref, type(exc).__name__, exc)
         return 0
-
-
-def record_person_wait(card: Mapping[str, Any], occurrence: str, *, to: Any) -> None:
-    """Required within the card mutation, never a GET. One event per real wait episode."""
-    reference = str(card.get("ref") or "")
-    if card.get("closed") or card.get("state") == "done" or card.get("type") == "wait":
-        return
-    if waiting_owner(card) is not None or not card.get("sprint"):
-        return
-    routine = (card.get("state") == "blocked" and not e2e_state(card).budget_decline) or (
-        card.get("state") == "in_progress" and card.get("type") in {"decision", "operation"})
-    if routine:
-        record_required_wait(CARD_WAITS_FOR_PERSON, reference, f"{reference}: with the PO/observer",
-                             f"{CARD_WAITS_FOR_PERSON}:{reference}:{occurrence}", to=to)
 
 
 @contextlib.contextmanager
@@ -549,7 +506,7 @@ def _required_wait_store(subject_ref: str, *, to: Any) -> Iterator[Any]:
 def record_required_wait(kind: str, subject_ref: str, text: str, dedup_key: str, *, to: Any) -> None:
     """Create the card's authoritative unread fact inside its mutation transaction."""
     with _required_wait_store(subject_ref, to=to) as sink:
-        if kind not in {CARD_HANDED_TO_OWNER, CARD_WAITS_FOR_PERSON, PO_CARD_ESCALATED} or not dedup_key.strip():
+        if kind not in {CARD_HANDED_TO_OWNER, PO_CARD_ESCALATED} or not dedup_key.strip():
             raise ValueError("a required card wait needs its established kind and occurrence key")
         sink.insert(kind, subject_ref, _bounded(text), dedup_key)
 
@@ -569,32 +526,22 @@ def _bounded(text: str) -> str:
 
 
 __all__ = [
-    "ALREADY_PRESENT",
-    "BUDGET_SIGNAL",
     "CARD_HANDED_TO_OWNER",
-    "CARD_WAITS_FOR_PERSON",
     "CLASSES",
-    "DELEGATED_CARD_SETTLED",
-    "E2E_AFTER_MERGE",
-    "E2E_BUDGET_SPENT",
-    "FAILED",
-    "HEAD_DEAD",
     "KINDS",
     "KIND_CLASS",
     "NEEDS_OWNER",
     "NEEDS_OWNER_KINDS",
     "NOTICE",
-    "NOT_APPLICABLE",
-    "OBSERVER_DEAD",
     "PO_CARD_ESCALATED",
     "PO_SESSION_MOVED",
     "PO_SESSION_MOVED_ACCOUNT",
-    "PO_TURN_FAILED",
     "PROVIDER_RED",
+    "READ_ONLY_KINDS",
     "SPRINT_CLOSED",
     "SPRINT_STOPPED",
     "STEWARD_NEEDS_HUMAN",
-    "WRITTEN",
+    "WRITABLE_KINDS",
     "OwnerEvent",
     "OwnerEventError",
     "OwnerEventNotFound",
@@ -609,9 +556,8 @@ __all__ = [
     "person_wait",
     "po_session_subject",
     "record",
-    "record_person_wait",
     "record_required_wait",
-    "record_strict",
     "settle",
     "settle_required_wait",
+    "writable_class_of",
 ]

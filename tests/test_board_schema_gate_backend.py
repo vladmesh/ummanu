@@ -323,9 +323,6 @@ class SchemaGateBackendTests(unittest.TestCase):
         with self.assertLogs("ummanu.board.owner_events", level="WARNING") as logged:
             self.assertFalse(owner_events.record("sprint_closed", "sprint:1", "x", "k", to=store))
         self.assertIn("OwnerEventsSchemaOwed", "\n".join(logged.output))
-        self.assertEqual(
-            owner_events.record_strict("sprint_closed", "sprint:1", "x", "k2", to=store), owner_events.FAILED
-        )
         self.await_no_sessions(config)
 
     def test_an_owner_event_joined_to_a_client_transaction_is_refused_with_the_client(self) -> None:

@@ -164,9 +164,8 @@ class CliCompositionTests(unittest.TestCase):
         from typing import get_type_hints
 
         from ummanu import cli
-        from ummanu.head_health import PROBE_BROKEN, PROBE_TIMED_OUT, HeadReadiness
+        from ummanu.head_health import HeadReadiness
         from ummanu.host import CollectResult, KindDiff
-        from ummanu.infra.doctor_provider import PROVIDER_RED_STATES
 
         self.assertEqual(
             [field.name for field in fields(cli.DoctorInspection)],
@@ -197,8 +196,6 @@ class CliCompositionTests(unittest.TestCase):
         self.assertEqual(hints["resource_probes"], list[HeadReadiness])
         self.assertEqual(hints["collected"], CollectResult | None)
         self.assertEqual(hints["diffs"], dict[str, KindDiff] | None)
-        self.assertIn(PROBE_BROKEN, PROVIDER_RED_STATES)
-        self.assertIn(PROBE_TIMED_OUT, PROVIDER_RED_STATES)
         self.assertEqual(
             (cli.MEMORY_EXIT_VALIDATION, cli.MEMORY_EXIT_PERMISSION, cli.MEMORY_EXIT_LOCKED), (2, 3, 4)
         )

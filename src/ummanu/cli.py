@@ -1210,7 +1210,7 @@ def print_board_schema_status(board_schema: dict[str, object] | None) -> None:
 
 
 def record_provider_owner_events(report, resources: list[object]) -> int:
-    """One `provider_red` notice per provider, condition and UTC day: repeated doctor runs add nothing.
+    """One `provider_red` notice per provider and UTC day for an `unauthenticated` probe: repeats add nothing.
 
     Doctor is the writer (issue:1d3d86edba8c2193b93e); the web's lamp only reads recorded health. A
     dry run records nothing, and an installation without a board store has nowhere to record.
