@@ -12,10 +12,13 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
+from ummanu import _proc
 from ummanu.board.local_run import parse_local_run_policy
 from ummanu.runtime import docker_guard, test_guard
 from ummanu.runtime.paths import PRODUCT_ENV, default_instance_path, env_value, legacy_name
@@ -217,6 +220,80 @@ class RoleEnvError(RuntimeError):
     """The role runtime env cannot be built without leaking or missing required names."""
 
 
+# Every launched role's gh and git read this managed configuration instead of the owner's login.
+GH_CONFIG_DIR_ENV = "GH_CONFIG_DIR"
+GIT_CONFIG_GLOBAL_ENV = "GIT_CONFIG_GLOBAL"
+GIT_CONFIG_NOSYSTEM_ENV = "GIT_CONFIG_NOSYSTEM"
+# Without a helper git would ask the head's terminal for a username and wait there.
+GIT_TERMINAL_PROMPT_ENV = "GIT_TERMINAL_PROMPT"
+# Relative to the launching user's HOME, the same HOME the owner's identity is read from.
+HEAD_CONFIG_DIR = Path(".local") / "state" / "ummanu" / "head-config"
+_IDENTITY_KEYS = ("user.name", "user.email")
+
+
+def _quote_git_value(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _git_lookup_path() -> str:
+    # A launcher may run with a PATH narrowed to the head's own tools; git is the launcher's.
+    return os.pathsep.join(filter(None, (os.environ.get("PATH"), os.defpath)))
+
+
+def _owner_identity(home: Path) -> dict[str, str]:
+    """The owner's global user.name and user.email under `home`, without system config."""
+    try:
+        completed = _proc.run(
+            ["git", "config", "--global", "--null", "--get-regexp", r"^user\.(name|email)$"],
+            env={"HOME": str(home), "PATH": _git_lookup_path(), GIT_CONFIG_NOSYSTEM_ENV: "1"},
+            timeout=30,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise RoleEnvError(f"cannot read the owner's git identity: {exc}") from None
+    if completed.returncode not in (0, 1):
+        raise RoleEnvError(f"cannot read the owner's git identity: git config exited {completed.returncode}")
+    identity: dict[str, str] = {}
+    for entry in str(completed.stdout).split("\0"):
+        key, _, value = entry.partition("\n")
+        if key in _IDENTITY_KEYS:
+            identity[key] = value
+    return identity
+
+
+def head_credential_env(home: Path | str) -> dict[str, str]:
+    """gh and git bindings that resolve no login and no credential helper, materialized under `home`.
+
+    `GH_CONFIG_DIR` is an empty managed directory; `GIT_CONFIG_GLOBAL` holds only the owner's
+    user.name and user.email; system git config is not read and git never prompts for a login.
+    """
+    home = Path(home).expanduser()
+    root = home / HEAD_CONFIG_DIR
+    gh_dir = root / "gh"
+    gitconfig = root / "gitconfig"
+    identity = _owner_identity(home)
+    lines = ["[user]\n"] if identity else []
+    for key in _IDENTITY_KEYS:
+        if key in identity:
+            lines.append(f"\t{key.split('.')[1]} = {_quote_git_value(identity[key])}\n")
+    content = "".join(lines)
+    try:
+        gh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        current = gitconfig.read_text(encoding="utf-8") if gitconfig.is_file() else None
+        if current != content:
+            fd, temporary = tempfile.mkstemp(prefix=".gitconfig.", dir=root)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+            os.replace(temporary, gitconfig)
+    except (OSError, UnicodeError) as exc:
+        raise RoleEnvError(f"cannot provision the managed head git config under {root}: {exc}") from None
+    return {
+        GH_CONFIG_DIR_ENV: str(gh_dir),
+        GIT_CONFIG_GLOBAL_ENV: str(gitconfig),
+        GIT_CONFIG_NOSYSTEM_ENV: "1",
+        GIT_TERMINAL_PROMPT_ENV: "0",
+    }
+
+
 def docker_guard_dir() -> Path:
     return runtime_product_root() / "src" / "ummanu" / "runtime" / "docker-bin"
 
@@ -316,6 +393,8 @@ def runtime_env(
             env[key] = source[key]
         elif key in base:
             env[key] = base[key]
+
+    env.update(head_credential_env(base.get("HOME") or Path.home()))
 
     # Derived by the trusted launcher, never inherited or taken from runtime.env.
     for key in docker_guard.BINDINGS:
