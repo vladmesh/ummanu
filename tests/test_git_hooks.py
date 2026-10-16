@@ -13,6 +13,8 @@ from unittest import mock
 from tests.production_runtime_fixtures import registered_production_runtime
 from ummanu.dispatch import gate_pr
 from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.installation.upgrade import workspaces as upgrade_workspaces
+from ummanu.projects.availability import ProjectAvailability
 from ummanu.runtime import git_hooks
 
 PRODUCT_ROOT = Path(__file__).resolve().parents[1]
@@ -219,6 +221,23 @@ class ShadowedCheckoutHookTests(unittest.TestCase):
 
         self.assertEqual(git_hooks.shadowed_hooks([self.checkout]), [str(hook)])
         self.assert_refused_naming(hook)
+
+    def test_the_upgrade_step_fails_on_a_registered_binding_hook_and_writes_nothing(self) -> None:
+        hook = self.hook("pre-commit")
+        context = SimpleNamespace(
+            runtime_home=self.home,
+            runtime_user=None,
+            product_root=PRODUCT_ROOT,
+            dry_run=False,
+            report=SimpleNamespace(bindings=[{"id": "project", "repo": str(self.checkout)}]),
+            project_availability=ProjectAvailability(),
+        )
+
+        result = upgrade_workspaces.step_git_hooks(context)  # type: ignore[arg-type]
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn(str(hook), result.detail)
+        self.assertEqual(git_hooks.configured_hooks_path(self.home), "")
 
     def test_samples_a_local_hooks_path_and_an_absent_checkout_do_not_refuse(self) -> None:
         (self.hooks / "pre-commit.sample").write_text("#!/bin/sh\n", encoding="utf-8")
