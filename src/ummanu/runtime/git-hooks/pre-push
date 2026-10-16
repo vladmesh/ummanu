@@ -1,0 +1,27 @@
+#!/bin/sh
+# Refuses a remote ref deletion or a non-fast-forward update unless this push sets
+# UMMANU_ALLOW_REMOTE_REWRITE=1. Git passes only the updates it will send, so a non-forced
+# non-fast-forward never reaches here.
+
+[ "${UMMANU_ALLOW_REMOTE_REWRITE:-}" = 1 ] && exit 0
+
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+	case $local_sha in
+	*[!0]*) ;;
+	*)
+		echo "pre-push: refusing to delete $remote_ref; set UMMANU_ALLOW_REMOTE_REWRITE=1 on this push to allow it" >&2
+		status=1
+		continue
+		;;
+	esac
+	case $remote_sha in
+	*[!0]*) ;;
+	*) continue ;;
+	esac
+	if ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+		echo "pre-push: refusing a non-fast-forward update of $remote_ref; set UMMANU_ALLOW_REMOTE_REWRITE=1 on this push to allow it" >&2
+		status=1
+	fi
+done
+exit $status

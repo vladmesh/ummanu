@@ -13016,10 +13016,10 @@ class GithubGateHost(CommandHostRuntime):
                 return done(json.dumps({"total_count": len(runs), "workflow_runs": runs}))
         return done("[]")
 
-    def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
+    def run_capture(self, args, label, *, cwd=None, extra_env=None):  # type: ignore[override]
         if args[:1] == ["gh"]:
             return self._fake_gh(args)
-        return super().run_capture(args, label, cwd=cwd)
+        return super().run_capture(args, label, cwd=cwd, extra_env=extra_env)
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         if args[:1] == ["gh"]:
@@ -13509,12 +13509,12 @@ class DispatcherGateTests(unittest.TestCase):
             host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
             original = host.run_capture
 
-            def forged(args, label, *, cwd=None):
+            def forged(args, label, *, cwd=None, extra_env=None):
                 if label == "gate candidate history":
                     return subprocess.CompletedProcess(
                         args, 0, "Co-Authored-By: Claude <noreply@anthropic.com>\n", ""
                     )
-                return original(args, label, cwd=cwd)
+                return original(args, label, cwd=cwd, extra_env=extra_env)
 
             with mock.patch.object(host, "run_capture", side_effect=forged):  # noqa: SIM117
                 with self.assertRaisesRegex(HostError, "candidate history could not be read"):
@@ -13546,10 +13546,10 @@ class DispatcherGateTests(unittest.TestCase):
             host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
             original = host.run_capture
 
-            def message_fails(args, label, *, cwd=None):
+            def message_fails(args, label, *, cwd=None, extra_env=None):
                 if label == "gate candidate history message":
                     return subprocess.CompletedProcess(args, 128, "", "fatal: bad object")
-                return original(args, label, cwd=cwd)
+                return original(args, label, cwd=cwd, extra_env=extra_env)
 
             with mock.patch.object(host, "run_capture", side_effect=message_fails):  # noqa: SIM117
                 with self.assertRaisesRegex(HostError, "candidate history could not be read for"):
@@ -13561,10 +13561,10 @@ class DispatcherGateTests(unittest.TestCase):
             host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
             original = host.run_capture
 
-            def decoding_fails(args, label, *, cwd=None):
+            def decoding_fails(args, label, *, cwd=None, extra_env=None):
                 if label == "gate candidate history message":
                     raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
-                return original(args, label, cwd=cwd)
+                return original(args, label, cwd=cwd, extra_env=extra_env)
 
             with mock.patch.object(host, "run_capture", side_effect=decoding_fails):  # noqa: SIM117
                 with self.assertRaisesRegex(HostError, "could not be decoded"):
@@ -13576,10 +13576,10 @@ class DispatcherGateTests(unittest.TestCase):
             host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
             original = host.run_capture
 
-            def only_the_history_fails(args, label, *, cwd=None):
+            def only_the_history_fails(args, label, *, cwd=None, extra_env=None):
                 if label == "gate candidate history":
                     return subprocess.CompletedProcess(args, 128, "", "fatal: bad revision")
-                return original(args, label, cwd=cwd)
+                return original(args, label, cwd=cwd, extra_env=extra_env)
 
             with mock.patch.object(  # noqa: SIM117
                 host, "run_capture", side_effect=only_the_history_fails
@@ -13797,8 +13797,8 @@ class DispatcherGateTests(unittest.TestCase):
             foreign: list[str] = []
             real = host.run_capture
 
-            def move_the_remote_after_the_read(args, label, *, cwd=None):
-                answer = real(args, label, cwd=cwd)
+            def move_the_remote_after_the_read(args, label, *, cwd=None, extra_env=None):
+                answer = real(args, label, cwd=cwd, extra_env=extra_env)
                 if label == "gate remote branch sha" and not foreign:
                     foreign.append(self._foreign_push(root, branch, "race"))
                 return answer
@@ -14506,9 +14506,9 @@ class DispatcherGateTests(unittest.TestCase):
         seen: list[str] = []
         real = gate_module._backend_call
 
-        def spy(host, args, label, *, cwd=None, project=""):
+        def spy(host, args, label, *, cwd=None, project="", extra_env=None):
             seen.append(label)
-            return real(host, args, label, cwd=cwd, project=project)
+            return real(host, args, label, cwd=cwd, project=project, extra_env=extra_env)
 
         return seen, mock.patch.object(gate_module, "_backend_call", spy)
 
@@ -14652,10 +14652,10 @@ class DispatcherGateTests(unittest.TestCase):
                 super().__init__(root, adapter)
                 self.text = text
 
-            def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
+            def run_capture(self, args, label, *, cwd=None, extra_env=None):  # type: ignore[override]
                 if args[:1] == ["git"] and "fetch" in args:
                     return subprocess.CompletedProcess(args, 128, "", self.text)
-                return super().run_capture(args, label, cwd=cwd)
+                return super().run_capture(args, label, cwd=cwd, extra_env=extra_env)
 
         for text in (self.GNUTLS_DROP, self.HTTP2_DROP):
             with self.subTest(text=text[:40]):
@@ -14688,7 +14688,7 @@ class DispatcherGateTests(unittest.TestCase):
             def _run(self, args, label, *, cwd=None):  # type: ignore[override]
                 return super()._run(args, label, cwd=cwd)
 
-            def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
+            def run_capture(self, args, label, *, cwd=None, extra_env=None):  # type: ignore[override]
                 if args[:1] == ["git"] and "push" in args:
                     return subprocess.CompletedProcess(
                         args,
@@ -14699,7 +14699,7 @@ class DispatcherGateTests(unittest.TestCase):
                         "(protected branch hook declined)\n"
                         "error: failed to push some refs",
                     )
-                return super().run_capture(args, label, cwd=cwd)
+                return super().run_capture(args, label, cwd=cwd, extra_env=extra_env)
 
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/ummanu-633")
@@ -14861,13 +14861,13 @@ class DispatcherGateTests(unittest.TestCase):
         card blocks at once with the accurate reason instead of re-running the hung suite."""
 
         class HangingLocalGate(GateHost):
-            def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
+            def run_capture(self, args, label, *, cwd=None, extra_env=None):  # type: ignore[override]
                 if args[:2] == ["bash", "-lc"]:
                     raise HostError(
                         "local gate failed: Command '['bash', '-lc', 'python3 -m unittest']' "
                         "timed out after 900 seconds"
                     )
-                return super().run_capture(args, label, cwd=cwd)
+                return super().run_capture(args, label, cwd=cwd, extra_env=extra_env)
 
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/ummanu-633")

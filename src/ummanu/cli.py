@@ -589,6 +589,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     from ummanu.infra.doctor_findings import accepted, active_findings
     from ummanu.infra.identifier_findings import MACHINE_ID_INVALID
     from ummanu.runtime import interactive_workspace
+    from ummanu.runtime.git_hooks import HOOKS_PATH_FINDING
 
     instance_path = Path(args.instance)
     report = validate_instance(instance_path)
@@ -655,7 +656,10 @@ def run_doctor(args: argparse.Namespace) -> int:
             print(f"error: head fallback: {finding['message']}")
         elif finding["code"] == "dispatcher_tick_p95_slow":
             print(f"red: {finding['code']}: {finding['message']}")
-        elif str(finding["code"]).startswith("live_root.") or finding["code"] == MACHINE_ID_INVALID:
+        elif str(finding["code"]).startswith("live_root.") or finding["code"] in {
+            MACHINE_ID_INVALID,
+            HOOKS_PATH_FINDING,
+        }:
             print(f"{finding['code']}: {finding['message']}")
         if accepted(finding):
             raw = {key: value for key, value in finding.items()
@@ -955,6 +959,8 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     findings.extend(automation_run_findings(report.data_dir))
     inspect_host = not args.offline and (not args.dry_run or args.host or args.host_fixture)
     findings.extend(doctor_live_root_findings(report, args, inspect_host=inspect_host))
+    if inspect_host and not args.host_fixture:
+        findings.extend(doctor_git_hooks_findings(report))
     findings.extend(stored_identifier_findings(report.instance_path.parent))
     collected: CollectResult | None = None
     expected = None
@@ -1087,6 +1093,20 @@ def doctor_live_root_findings(report, args: argparse.Namespace, *, inspect_host:
     except ValueError:
         home = None
     return live_root_findings(live_root, unit_dirs=unit_dirs, home=home)
+
+
+def doctor_git_hooks_findings(report) -> list[dict[str, object]]:
+    """The runtime user's global hooks path against the configured product checkout's shipped hooks."""
+    from ummanu.host_apply import resolve_runtime_owner
+    from ummanu.runtime.git_hooks import HOOKS_PATH_FINDING, hooks_path_finding
+    from ummanu.runtime.paths import configured_product_root
+
+    try:
+        _, home = resolve_runtime_owner(report.instance_path.parent)
+    except ValueError as exc:
+        return [{"code": HOOKS_PATH_FINDING, "message": f"runtime home is unresolved: {exc}"}]
+    finding = hooks_path_finding(home, configured_product_root())
+    return [] if finding is None else [finding]
 
 
 def automation_run_findings(data_dir: Path | None) -> list[dict[str, object]]:

@@ -296,6 +296,10 @@ class PortableFixture(unittest.TestCase):
         interactive = self.product / "packaging" / "interactive-workspace"
         interactive.mkdir(parents=True)
         (interactive / "AGENTS.md").write_text("# portable interactive head\n", encoding="utf-8")
+        hooks = self.product / "src" / "ummanu" / "runtime" / "git-hooks"
+        hooks.mkdir()
+        (hooks / "pre-push").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (hooks / "pre-push").chmod(0o755)
         # An installed product is a Git checkout: `dependencies` and `memory` bind their receipts to
         # its revision and tracked inputs, so a fixture that is not one could never be current.
         for command in (
@@ -1162,7 +1166,7 @@ class PortableInstallationTests(PortableFixture):
         # The running checkout's own manifest targets `~/.claude/skills` and `~/.hermes/...`. It
         # was never named here, so a step that read it would leave those directories behind in
         # this fixture's home, and nothing else in the run would say so.
-        self.assertEqual(sorted(path.name for path in self.home.iterdir()), ["bin", "shells"])
+        self.assertEqual(sorted(path.name for path in self.home.iterdir()), [".gitconfig", "bin", "shells"])
         self.assert_invoker_home_untouched()
         self.assert_hermetic(result.render())
 

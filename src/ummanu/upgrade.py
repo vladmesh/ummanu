@@ -56,6 +56,7 @@ from ummanu.installation.upgrade.types import (
 )
 from ummanu.installation.upgrade.workspaces import (
     step_codex_home,
+    step_git_hooks,
     step_head_registry,
     step_instance_packing,
     step_interactive_workspace,
@@ -83,6 +84,7 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_board_store_roles,
     step_memory_clients,
     step_codex_home,
+    step_git_hooks,
     step_po_workspace,
     step_interactive_workspace,
     step_head_registry,

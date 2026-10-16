@@ -353,6 +353,7 @@ class RemoteExecution:
         *,
         label: str,
         timeout: float = 900,
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Run one registered-project remote Git operation as the checkout's resolved Git child.
 
@@ -374,7 +375,7 @@ class RemoteExecution:
                     [*prefix, *args],
                     label=label,
                     timeout=timeout,
-                    extra_env=environment,
+                    extra_env={**environment, **(extra_env or {})},
                     child=child,
                 )
             except StateRepoError as exc:
