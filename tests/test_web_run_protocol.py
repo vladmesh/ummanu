@@ -1728,6 +1728,7 @@ class ErrorContractTests(ProductRuntimeFixture):
         "sprint_head_view": lambda layer: layer.sprint_head_view("ummanu-9", "a" * 32),
         "po_delegated": lambda layer: layer.po_delegated("session-contract"),
         "board_view": lambda layer: layer.board_view(),
+        "board_filters": lambda layer: layer.board_filters(),
     }
 
     OPERATION_CALLS: ClassVar[dict[str, Any]] = {

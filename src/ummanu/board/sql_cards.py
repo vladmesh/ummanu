@@ -875,12 +875,22 @@ class SqlCardClient:
         """Stored Card rows only; Product/Issue ownership is not restore emptiness."""
         return self._rows()
 
-    def board_cards(self, *, done_since: datetime, blocking_markers: Iterable[str]) -> list[dict[str, Any]]:
-        """The cards of the web board in one statement: every live card outside Done, and every Done
-        card, archived too, moved since `done_since` or linked to an open sprint.
+    def board_cards(
+        self,
+        *,
+        done_since: datetime,
+        blocking_markers: Iterable[str],
+        project: str | None,
+        sprint: str | None,
+        no_sprint: bool,
+    ) -> list[dict[str, Any]]:
+        """The typed cards of the web board in one statement: every live card outside Done, and every
+        Done card, archived too, moved since `done_since` or linked to an open sprint.
 
-        A Blocked card carries the body of its latest comment under one of `blocking_markers`
-        written since it entered Blocked (any such comment when that moment is unknown).
+        `project` and `sprint` narrow it to that project or sprint when given, `no_sprint` to cards
+        of no sprint. A Blocked card carries the body of its latest comment under one of
+        `blocking_markers` written since it entered Blocked (any such comment when that moment is
+        unknown).
         """
         # The moment is read as an epoch: an out-of-range `date_moved` would otherwise fail the
         # whole statement in the driver instead of one card's age.
@@ -893,16 +903,29 @@ class SqlCardClient:
             "AND c.task_ref = t.task_ref AND c.marker = ANY(%s::text[]) "
             "AND (t.date_moved IS NULL OR c.created_at >= t.date_moved) "
             "ORDER BY c.created_at DESC, c.comment_id DESC LIMIT 1) blocking ON true "
-            "WHERE (t.state <> 'done' AND NOT t.archived) "
-            "OR (t.state = 'done' AND (t.date_moved >= %s OR s.status = 'open')) "
+            "WHERE t.task_type IS NOT NULL "
+            "AND ((t.state <> 'done' AND NOT t.archived) "
+            "OR (t.state = 'done' AND (t.date_moved >= %s OR s.status = 'open'))) "
+            "AND (%s::text IS NULL OR t.project_id = %s) "
+            "AND (%s::text IS NULL OR t.sprint_ref = %s) "
+            "AND (NOT %s::boolean OR t.sprint_ref IS NULL) "
             "ORDER BY t.task_ref",
-            (list(blocking_markers), done_since),
+            (list(blocking_markers), done_since, project, project, sprint, sprint, no_sprint),
         )
         names = (
             "ref", "title", "state", "type", "project", "sprint", "moved", "head_override",
             "worker_head", "review_head_override", "review_head", "extensions", "blocking_comment",
         )
         return [dict(zip(names, values, strict=True)) for values in rows]
+
+    def open_sprint_refs(self) -> list[str]:
+        """The references of the open sprints, newest first."""
+        return [
+            str(ref)
+            for (ref,) in self._query(
+                "SELECT ref FROM sprints WHERE status = 'open' ORDER BY sprint_number DESC NULLS LAST, ref"
+            )
+        ]
 
     # --- board shape -----------------------------------------------------------------
 

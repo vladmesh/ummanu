@@ -13,6 +13,7 @@ from ummanu.web.page_assets import _ACTIONS_SCRIPT, _SPRINT_FORM_SCRIPT
 from ummanu.web.page_parts import (
     EXECUTOR_CHOICE,
     GATE_TONES,
+    _board_link,
     _budget_line,
     _checked,
     _chip,
@@ -315,6 +316,7 @@ def sprint(document: dict[str, Any]) -> str:
             '<div class="hero">',
             f"<h1>{escape(ref)}</h1>",
             f'<div class="chips">{"".join(chips)}</div>',
+            f'<a href="{escape(_board_link(sprint=ref))}">board</a>',
             f'<span class="age" style="margin-left:auto">read at {escape(str(document.get("observed_at") or "an unknown time"))}</span>',
             (
                 f'<div class="title">{_long((value or {}).get("goal"), chars=200)}</div>'

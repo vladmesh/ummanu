@@ -96,6 +96,7 @@ details.drain[open] > summary { display: none; }
 .block-head { display: flex; align-items: baseline; gap: .6rem; margin-bottom: .6rem; }
 .block-head .count { font: .8rem var(--mono); color: var(--muted); }
 .block-head .more { margin-left: auto; font-size: .85rem; }
+.block-head .more + .more { margin-left: 0; }
 .compact-sprints { display: grid; grid-template-columns: repeat(auto-fill, minmax(26rem, 1fr)); gap: 1rem; }
 @media (max-width: 600px) { .compact-sprints { grid-template-columns: minmax(0, 1fr); } }
 .compact-sprint { display: grid; gap: .7rem; align-content: start; padding: .9rem 1rem; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; min-width: 0; }
@@ -395,6 +396,8 @@ form.sprint .hint { color: var(--muted); font-size: .8rem; }
 
 /* the board: one column per card state; a narrow screen stacks them into one list */
 .board { display: grid; grid-template-columns: repeat(7, minmax(10.5rem, 1fr)); gap: .6rem; align-items: start; overflow-x: auto; }
+.board-filter { margin-bottom: 1rem; }
+.board-filter-active, .board-filter > a { align-self: center; }
 .board-column { background: var(--raised); border: 1px solid var(--line); border-radius: 6px; padding: .5rem; min-width: 0; }
 .board-column > header { display: flex; align-items: baseline; gap: .5rem; margin-bottom: .4rem; }
 .board-column > header h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0; }

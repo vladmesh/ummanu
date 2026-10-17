@@ -1,4 +1,5 @@
-"""The board page through its route: columns, tiles and a board that cannot be read.
+"""The board page through its route: columns, tiles, filters, the links to it and a board that
+cannot be read.
 
 Hermetic. The real `ReadLayer` reads a fake board client that answers `board_cards` with the rows a
 board store statement returns; which rows the store selects is `tests/test_web_board_store.py`.
@@ -7,13 +8,16 @@ board store statement returns; which rows the store selects is `tests/test_web_b
 from __future__ import annotations
 
 import re
+import tempfile
 import unittest
 from datetime import UTC, datetime
 from decimal import Decimal
 from html import unescape
+from pathlib import Path
 from typing import Any
 
-from tests.web_fakes import Recording
+from tests.support.instance import status_instance
+from tests.web_fakes import Recording, system_snapshot
 from ummanu.board.owner_handover import WAITING_OWNER, WAITING_OWNER_BY, WAITING_OWNER_REASON
 from ummanu.web.app import WebApp
 from ummanu.webproto.reads import ReadLayer
@@ -45,9 +49,16 @@ def row(ref: str, state: str, **values: Any) -> dict[str, Any]:
 class BoardClient:
     """The board store's `board_cards`, answering the rows it was given, or failing as told."""
 
-    def __init__(self, rows: list[dict[str, Any]] | None = None, *, failure: Exception | None = None) -> None:
+    def __init__(
+        self,
+        rows: list[dict[str, Any]] | None = None,
+        *,
+        failure: Exception | None = None,
+        open_sprints: list[str] | None = None,
+    ) -> None:
         self.rows = rows or []
         self.failure = failure
+        self.open_sprints = open_sprints or []
         self.asked: list[dict[str, Any]] = []
 
     def board_cards(self, **arguments: Any) -> list[dict[str, Any]]:
@@ -56,11 +67,17 @@ class BoardClient:
             raise self.failure
         return self.rows
 
+    def open_sprint_refs(self) -> list[str]:
+        if self.failure is not None:
+            raise self.failure
+        return self.open_sprints
 
-def page(client: Any) -> tuple[int, str]:
-    reads = ReadLayer("/nonexistent/instance", board_client=client, clock=lambda: NOW)
+
+def page(client: Any, path: str = "/board", *, instance: str = "/nonexistent/instance") -> tuple[int, str]:
+    reads = ReadLayer(instance, board_client=client, clock=lambda: NOW)
     app = WebApp(reads, *(Recording() for _ in range(7)))
-    response = app.handle("GET", "/board")
+    route, _mark, query = path.partition("?")
+    response = app.handle("GET", route, query=query)
     return response.status, response.body.decode("utf-8")
 
 
@@ -203,6 +220,143 @@ class TileTests(unittest.TestCase):
         self.assertIn('title="choose the deploy window">waits for the owner</p>', waiting)
         self.assertTrue(tile_of(html, "u-2").startswith('<li class="tile">'))
         self.assertNotIn("waits for the owner", tile_of(html, "u-2"))
+
+
+class FilterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (root / "projects").mkdir()
+        for project in ("codegen", "ummanu"):
+            (root / "projects" / f"{project}.yaml").write_text(
+                f"id: {project}\nrepo: {root}\nenabled: true\nadapter: ummanu\ndefault_branch: main\n",
+                encoding="utf-8",
+            )
+        self.instance = str(status_instance(root).instance_path)
+
+    def form(self, html: str) -> str:
+        return re.search(r'<form class="inline board-filter".*?</form>', html, re.DOTALL).group(0)
+
+    def selected(self, form: str, name: str) -> list[tuple[str, str, bool]]:
+        """Each option of the named select: its value, its label and whether it is selected."""
+        select = re.search(rf'<select id="board-{name}" name="{name}">(.*?)</select>', form).group(1)
+        return [
+            (unescape(value), unescape(label), bool(mark))
+            for value, mark, label in re.findall(r'<option value="([^"]*)"( selected)?>(.*?)</option>', select)
+        ]
+
+    def test_each_filter_reaches_the_board_statement_and_none_asks_for_cards_of_no_sprint(self) -> None:
+        cases = {
+            "/board": {"project": None, "sprint": None, "no_sprint": False},
+            "/board?project=codegen": {"project": "codegen", "sprint": None, "no_sprint": False},
+            "/board?sprint=sprint%3A7": {"project": None, "sprint": "sprint:7", "no_sprint": False},
+            "/board?sprint=none": {"project": None, "sprint": None, "no_sprint": True},
+            "/board?project=codegen&sprint=sprint%3A7": {"project": "codegen", "sprint": "sprint:7", "no_sprint": False},
+            "/board?project=&sprint=": {"project": None, "sprint": None, "no_sprint": False},
+        }
+        for path, expected in cases.items():
+            with self.subTest(path):
+                client = BoardClient()
+                status, _html = page(client, path, instance=self.instance)
+                self.assertEqual(status, 200)
+                self.assertEqual(len(client.asked), 1)
+                asked = {name: client.asked[0][name] for name in expected}
+                self.assertEqual(asked, expected)
+                self.assertEqual(client.asked[0]["done_since"], datetime.fromtimestamp(NOW - 48 * HOUR, UTC))
+
+    def test_the_form_offers_the_registered_projects_no_sprint_and_the_open_sprints_with_the_active_ones_selected(
+        self,
+    ) -> None:
+        client = BoardClient([row("u-1", "ready")], open_sprints=["sprint:9", "sprint:7"])
+        _status, html = page(client, "/board?project=codegen&sprint=none", instance=self.instance)
+        form = self.form(html)
+        self.assertIn('method="get" action="/board"', form)
+        self.assertIn("showing: project codegen · sprint вне спринта", text(form))
+        self.assertEqual(
+            self.selected(form, "project"),
+            [("", "all projects", False), ("codegen", "codegen", True), ("ummanu", "ummanu", False)],
+        )
+        self.assertEqual(
+            self.selected(form, "sprint"),
+            [
+                ("", "all sprints", False),
+                ("none", "вне спринта", True),
+                ("sprint:9", "sprint:9", False),
+                ("sprint:7", "sprint:7", False),
+            ],
+        )
+        self.assertIn('<a href="/board">whole board</a>', form)
+
+    def test_the_whole_board_is_shown_as_such_with_all_projects_and_all_sprints_selected(self) -> None:
+        _status, html = page(BoardClient(open_sprints=["sprint:7"]), instance=self.instance)
+        form = self.form(html)
+        self.assertIn("showing: the whole board", text(form))
+        self.assertEqual([label for _value, label, mark in self.selected(form, "project") if mark], ["all projects"])
+        self.assertEqual([label for _value, label, mark in self.selected(form, "sprint") if mark], ["all sprints"])
+
+    def test_a_filter_no_card_matches_is_an_empty_board_with_that_filter_shown_and_offered(self) -> None:
+        status, html = page(
+            BoardClient(open_sprints=["sprint:7"]),
+            "/board?project=gone%3Cb%3E&sprint=sprint%3A404",
+            instance=self.instance,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual({count for _title, count, _tiles in columns(html)}, {"0"})
+        self.assertEqual(len(columns(html)), 7)
+        form = self.form(html)
+        self.assertIn("showing: project gone<b> · sprint sprint:404", text(form))
+        self.assertNotIn("<b>", form)
+        self.assertIn(("gone<b>", "gone<b>", True), self.selected(form, "project"))
+        self.assertIn(("sprint:404", "sprint:404", True), self.selected(form, "sprint"))
+
+    def test_choices_that_cannot_be_read_leave_the_form_and_the_board_standing_with_their_reasons(self) -> None:
+        client = BoardClient([row("u-1", "ready")])
+        client.open_sprint_refs = lambda: (_ for _ in ()).throw(RuntimeError("no sprints table"))
+        status, html = page(client, "/board?sprint=sprint%3A7")
+        self.assertEqual(status, 200)
+        self.assertTrue(tile_of(html, "u-1"))
+        form = text(self.form(html))
+        self.assertIn("the registered projects could not be read: ", form)
+        self.assertIn("the open sprints could not be read: no sprints table", form)
+        self.assertIn(("sprint:7", "sprint:7", True), self.selected(self.form(html), "sprint"))
+
+    def test_an_unreadable_board_still_shows_the_filter_it_was_asked_for(self) -> None:
+        client = BoardClient(failure=RuntimeError("the board store did not answer"))
+        _status, html = page(client, "/board?project=codegen", instance=self.instance)
+        self.assertIn("board not readable:", html)
+        self.assertIn("showing: project codegen", text(self.form(html)))
+
+
+class LinkTests(unittest.TestCase):
+    def app(self, *, reads: Recording, sprint_reads: Recording | None = None) -> WebApp:
+        return WebApp(reads, Recording(), sprint_reads or Recording(), *(Recording() for _ in range(5)))
+
+    def test_the_overview_links_the_whole_board_beside_all_sprints(self) -> None:
+        response = self.app(reads=Recording(system_snapshot=system_snapshot())).handle("GET", "/")
+        self.assertEqual(response.status, 200)
+        self.assertIn(
+            '<a class="more" href="/board">board</a><a class="more" href="/sprints">all sprints</a>',
+            response.body.decode("utf-8"),
+        )
+
+    def test_the_project_page_links_the_board_filtered_to_that_project(self) -> None:
+        snapshot = system_snapshot()
+        snapshot["projects"]["items"] = [{"id": "team a&b", "repo": "/srv/a", "enabled": True}]
+        response = self.app(reads=Recording(system_snapshot=snapshot)).handle("GET", "/projects/team%20a%26b")
+        self.assertEqual(response.status, 200)
+        self.assertIn('<a href="/board?project=team+a%26b">board</a>', response.body.decode("utf-8"))
+
+    def test_the_sprint_page_links_the_board_filtered_to_that_sprint(self) -> None:
+        sprint = {
+            "ref": "sprint:7",
+            "sprint": {"source": {"state": "available"}, "value": {"ref": "sprint:7", "status": "open"}},
+            "observer": {},
+            "work": {},
+        }
+        response = self.app(reads=Recording(), sprint_reads=Recording(sprint_state=sprint)).handle(
+            "GET", "/sprints/sprint:7"
+        )
+        self.assertEqual(response.status, 200)
+        self.assertIn('<a href="/board?sprint=sprint%3A7">board</a>', response.body.decode("utf-8"))
 
 
 class TotalityTests(unittest.TestCase):
