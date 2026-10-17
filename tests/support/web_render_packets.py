@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 NOW = datetime(2026, 9, 20, 12, tzinfo=UTC)
 SOURCE = {"state": "available", "reason": None, "observed_at": "2026-09-20T12:00:00Z", "data_age_seconds": 0}
 REFUSED = {**SOURCE, "state": "unavailable", "reason": "denied <source>"}
-ASSETS = ("STYLE", "_ACTIONS_SCRIPT", "_REFRESH_SCRIPT", "_RESET_SCRIPT", "_TASK_SCRIPT",
+ASSETS = ("STYLE", "_ACTIONS_SCRIPT", "_BOARD_SCRIPT", "_REFRESH_SCRIPT", "_RESET_SCRIPT", "_TASK_SCRIPT",
           "_SPRINT_FORM_SCRIPT", "_PO_FORM_SCRIPT", "_PO_SESSION_SCRIPT")
 
 

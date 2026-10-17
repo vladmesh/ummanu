@@ -127,7 +127,7 @@ class PresentationResourcesTests(unittest.TestCase):
     def test_source_rules_cover_python_and_canonical_css_and_scripts(self):
         source = [*WEB.glob("*.py"), *WEB.joinpath("static").glob("*.css"), *WEB.joinpath("static").glob("*.js")]
         self.assertTrue(any(p.suffix == ".css" for p in source))
-        self.assertEqual(sum(p.suffix == ".js" for p in source), 7)
+        self.assertEqual(sum(p.suffix == ".js" for p in source), 8)
         for path in source:
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("del limits", text, path.name)

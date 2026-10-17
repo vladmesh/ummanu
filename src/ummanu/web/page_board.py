@@ -6,6 +6,7 @@ from html import escape
 from typing import Any
 from urllib.parse import quote
 
+from ummanu.web.page_assets import _BOARD_SCRIPT
 from ummanu.web.page_parts import _age, _link, _or_dash
 from ummanu.web.page_shell import _page
 from ummanu.web.page_values import _mapping
@@ -27,6 +28,7 @@ def board(document: dict[str, Any], *, filters: dict[str, Any]) -> str:
     """One column per card state with its count, each card a tile; a narrow screen stacks the columns.
 
     Above them the active filter and a GET form over `filters` that changes or resets it.
+    An empty column is marked so it can collapse; the board's scroll position survives a reload.
     """
     source = _mapping(document.get("source"))
     columns = document.get("columns")
@@ -45,7 +47,7 @@ def board(document: dict[str, Any], *, filters: dict[str, Any]) -> str:
             content,
         ]
     )
-    return _page("Board", body, nav="board")
+    return _page("Board", body, script=_BOARD_SCRIPT, nav="board", fit_viewport=True)
 
 
 def _column(column: dict[str, Any]) -> str:
@@ -54,8 +56,9 @@ def _column(column: dict[str, Any]) -> str:
     blocked = column.get("state") == "blocked"
     cards = [_tile(_mapping(card), blocked=blocked) for card in column.get("cards") or []]
     tiles = f'<ol class="tiles">{"".join(cards)}</ol>' if cards else '<p class="empty">no cards</p>'
+    kind = "board-column" if cards else "board-column board-column-empty"
     return (
-        f'<section class="board-column" aria-label="{escape(f"{title}: {count} cards")}">'
+        f'<section class="{kind}" aria-label="{escape(f"{title}: {count} cards")}">'
         f'<header><h2>{escape(title)}</h2><span class="count">{escape(str(count))}</span></header>'
         f"{tiles}</section>"
     )
@@ -78,16 +81,16 @@ def _tile(tile: dict[str, Any], *, blocked: bool) -> str:
         else ""
     )
     meta = " · ".join(
-        [
+        f'<span class="meta-item">{item}</span>'
+        for item in (
             escape(str(tile.get("type") or NO_TYPE)),
             escape(str(tile.get("project") or NO_PROJECT)),
             _sprint(_mapping(tile.get("sprint"))),
             f'<span title="current head">{_or_dash(tile.get("head"))}</span>',
-        ]
+        )
     )
-    reason = (
-        f'<p class="tile-reason">{escape(str(tile.get("blocked_reason") or NO_REASON))}</p>' if blocked else ""
-    )
+    said = escape(str(tile.get("blocked_reason") or NO_REASON))
+    reason = f'<p class="tile-reason" title="{said}">{said}</p>' if blocked else ""
     return "".join(
         [
             f'<li class="tile{" tile-owner" if waiting else ""}">',

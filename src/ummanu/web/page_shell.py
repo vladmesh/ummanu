@@ -276,8 +276,12 @@ def _page(
     script: str = "",
     nav: str = "",
     crumbs: tuple[tuple[str, str], ...] = (),
+    fit_viewport: bool = False,
 ) -> str:
-    """The shared shell: top bar, navigation with `nav` marked, and `crumbs` (what is open under it)."""
+    """The shared shell: top bar, navigation with `nav` marked, and `crumbs` (what is open under it).
+
+    `fit_viewport` lifts the page width cap and, on a desktop screen, bounds `main` to the viewport.
+    """
     current = ' aria-current="page"'
     links = "".join(
         f'<a href="{escape(href)}"{current if key == nav else ""}>{escape(label)}</a>'
@@ -300,7 +304,7 @@ def _page(
             f"<title>{escape(title)} · {escape(TITLE)}</title>",
             f"<style>{STYLE}</style>",
             "<script>try{const theme=localStorage.getItem('ummanu.web.theme');if(theme==='light'||theme==='dark')document.documentElement.dataset.theme=theme;}catch(error){}</script>",
-            "</head><body>",
+            '</head><body class="fit-viewport">' if fit_viewport else "</head><body>",
             '<header class="top"><div class="row">',
             f'<a class="brand" href="/">{escape(TITLE)}</a>',
             f'<nav class="primary" aria-label="primary">{links}</nav>',

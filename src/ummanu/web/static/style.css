@@ -394,34 +394,48 @@ form.sprint .hint { color: var(--muted); font-size: .8rem; }
 .refused, .pending { border-left: 3px solid var(--warn); background: var(--warn-soft); padding: .5rem .75rem; margin: .5rem 0; border-radius: 0 4px 4px 0; }
 .launch { font-weight: 600; }
 
-/* the board: seven columns of at least 10rem that scroll inside the board when they do not fit;
-   a narrow screen stacks them into one list. Tile rules stay under .board: the sprint page owns .tiles and .tile */
-.board { display: grid; grid-template-columns: repeat(7, minmax(10rem, 1fr)); gap: .6rem; align-items: start; overflow-x: auto; }
+/* the board: a column per state that scrolls sideways inside the board when they do not fit, an empty
+   column collapsed to its upright header. On a desktop screen the page fills the viewport and each
+   column scrolls its own tiles, so the board's scrollbar stays on screen; a narrow screen stacks the
+   columns into one list. Tile rules stay under .board: the sprint page owns .tiles and .tile */
+body.fit-viewport main { max-width: none; }
+.board { display: flex; gap: .6rem; overflow-x: auto; }
 .board-filter { margin-bottom: 1rem; }
 .board-filter-active, .board-filter > a { align-self: center; }
-.board-column { background: var(--raised); border: 1px solid var(--line); border-radius: 6px; padding: .5rem; min-width: 0; }
-.board-column > header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 .5rem; margin-bottom: .4rem; }
+.board-column { flex: 1 1 0; min-width: 16.5rem; display: flex; flex-direction: column; background: var(--raised); border: 1px solid var(--line); border-radius: 6px; padding: .5rem; }
+.board-column-empty { flex: none; min-width: 0; writing-mode: vertical-lr; }
+.board-column > header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 .5rem; margin-block-end: .4rem; }
 .board-column > header h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0; overflow-wrap: anywhere; }
 .board-column > header .count { font: .8rem var(--mono); color: var(--muted); }
 .board-column .empty { font-size: .8rem; margin: 0; }
-.board ol.tiles { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: .4rem; }
+.board ol.tiles { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: .4rem; }
 .board .tile { display: grid; grid-template-columns: minmax(0, 1fr); gap: .1rem; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: .4rem .5rem; min-width: 0; }
 .board .tile p { margin: 0; }
-.board .tile-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 .4rem; }
-.board .tile-head .ref { min-width: 0; overflow-wrap: anywhere; }
-.board .tile-head .age { margin-left: auto; }
+.board .tile-head { display: flex; align-items: baseline; gap: .4rem; }
+.board .tile-head .ref { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.board .tile-head .age { flex: none; margin-left: auto; }
 .board .tile-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: .88rem; }
-.board .tile-meta, .board .tile-reason { font-size: .75rem; color: var(--muted); overflow-wrap: anywhere; }
-.board .tile-reason { color: var(--bad); }
+.board .tile-meta, .board .tile-reason { font-size: .75rem; color: var(--muted); }
+.board .meta-item { display: inline-block; max-width: 100%; vertical-align: bottom; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.board .tile-reason { color: var(--bad); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
 .board .tile-owner { border: 2px dashed var(--warn); }
 .board .tile-owner-label { font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--warn); overflow-wrap: anywhere; }
-@media (max-width: 900px) { .board { grid-template-columns: minmax(0, 1fr); overflow-x: visible; } }
+@media (min-width: 901px) {
+  body.fit-viewport { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
+  body.fit-viewport main { flex: 1 1 auto; min-height: 0; width: 100%; display: flex; flex-direction: column; padding-block-end: .75rem; }
+  body.fit-viewport .board { flex: 1 1 auto; min-height: 12rem; }
+  .board ol.tiles { min-height: 0; overflow-y: auto; }
+}
+@media (max-width: 900px) {
+  .board { flex-direction: column; overflow-x: visible; }
+  .board-column { flex: none; min-width: 0; writing-mode: horizontal-tb; }
+}
 
 /* the shared bottom bar: what each provider has left, on every page.
    Its height is reserved on the body rather than overlaid, so nothing a page draws -- the /po
    composer least of all -- ends up underneath it. The row never wraps: it scrolls sideways
    instead, which is what keeps the reserved height true at phone width as well as at desktop. */
-:root { --bar-height: 2.4rem; }
+:root { --bar-height: 2.4rem; scroll-padding-bottom: calc(var(--bar-height) + .5rem); }
 body { padding-bottom: var(--bar-height); }
 .statusbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; height: var(--bar-height); background: var(--surface); border-top: 1px solid var(--line); }
 .statusbar .row { max-width: 1280px; margin: 0 auto; padding: 0 20px; height: 100%; display: flex; align-items: center; gap: 1.1rem; white-space: nowrap; overflow-x: auto; font-size: .78rem; color: var(--muted); }

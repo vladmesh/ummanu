@@ -30,6 +30,9 @@ _ACTIONS_SCRIPT = files("ummanu.web").joinpath("static/actions.js").read_text(en
 _REFRESH_SCRIPT = files("ummanu.web").joinpath("static/refresh.js").read_text(encoding="utf-8")
 
 
+_BOARD_SCRIPT = files("ummanu.web").joinpath("static/board.js").read_text(encoding="utf-8")
+
+
 _RESET_SCRIPT = files("ummanu.web").joinpath("static/reset.js").read_text(encoding="utf-8")
 
 
