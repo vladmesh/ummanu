@@ -122,8 +122,12 @@ def run_restore_board(args: argparse.Namespace) -> int:
 
     instance_path, data_dir, _ = _target(Path(args.instance))
     count = import_normalized_board(data_dir, instance=instance_path.parent)
-    sprints = restore_state(data_dir).get("sprint_count", 0)
-    return {"ok": True, "action": "restore-board", "cards": count, "sprints": sprints}
+    state = restore_state(data_dir)
+    return {
+        "ok": True, "action": "restore-board", "cards": count, "sprints": state["sprint_count"],
+        "origin_outbox_coverage": state["origin_outbox_coverage"],
+        "origin_outbox_diagnostic": state["origin_outbox_diagnostic"],
+    }
 
 
 def run_restore_reconcile(args: argparse.Namespace) -> int:

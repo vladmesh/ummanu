@@ -12,8 +12,13 @@ from unittest import mock
 
 import ummanu.data as data_module
 from tests.fakes.tasks import empty_seed
+from tests.origin_checkpoint_fixtures import obligations
 from tests.sql_backend_fixtures import card_store
 from ummanu import memory_journal
+from ummanu.board.origin_checkpoint import read_checkpoint_outbox, require_outbox_parity
+from ummanu.board.origin_outbox import OriginOutboxStore
+from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.board.sql_cards import SqlCardClient
 from ummanu.data import (
     export_all,
     export_artifacts,
@@ -144,6 +149,60 @@ class DataLayoutTests(unittest.TestCase):
 class ExportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.store = card_store(self, empty_seed())
+
+    def _seed_obligations(self, count):
+        rows, history = obligations(count)
+        with self.store.transaction():
+            for event in history:
+                SqlTaskAudit(self.store).append(event["request_id"], event, restoring=True)
+            OriginOutboxStore(self.store).restore(rows)
+        return rows
+
+    def test_board_cut_exports_more_than_a_dispatch_tick_including_completed_returns(self):
+        rows = self._seed_obligations(503)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reader = TaskExportReader(client=self.store)
+            export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
+            require_outbox_parity(rows, read_checkpoint_outbox(root / "board"))
+            first = (root / "board" / "origin_returns.ndjson").read_bytes()
+            export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
+            self.assertEqual(first, (root / "board" / "origin_returns.ndjson").read_bytes())
+
+    def test_delivery_between_card_and_outbox_reads_stays_outside_the_board_cut(self):
+        rows = self._seed_obligations(3)
+        other = SqlCardClient(self.store.credentials, self.store.instance_dir)
+        self.addCleanup(other.close)
+        reader = TaskExportReader(client=self.store)
+        original = reader.export
+
+        def read_then_deliver():
+            cards = original()
+            pending = OriginOutboxStore(other).pending()[0]
+            self.assertTrue(OriginOutboxStore(other).mark(
+                pending.id, status="delivered", session="new-session", po_request_id="new-delivery",
+            ))
+            return cards
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(reader, "export", side_effect=read_then_deliver):
+            root = Path(tmp)
+            export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
+            require_outbox_parity(rows, read_checkpoint_outbox(root / "board"))
+        self.assertEqual(OriginOutboxStore(other).pending(), [])
+
+    def test_invalid_outbox_export_preserves_the_previous_cut(self):
+        self._seed_obligations(3)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reader = TaskExportReader(client=self.store)
+            export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
+            before = {path.name: path.read_bytes() for path in (root / "board").iterdir() if path.is_file()}
+            with self.store.transaction():
+                self.store._execute("UPDATE origin_returns SET request_id = 'foreign-audit'")
+            with self.assertRaisesRegex(RuntimeError, "audit.request_id"):
+                export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
+            after = {path.name: path.read_bytes() for path in (root / "board").iterdir() if path.is_file()}
+            self.assertEqual(before, after)
 
     def test_normalize_board_card_keeps_required_surface(self):
         card = {

@@ -404,14 +404,9 @@ class SqlTaskAudit:
             return None
 
     def append(self, request_id: str, event: dict[str, Any], *, restoring: bool = False) -> str:
-        """Commit one record: the one place a committed audit record is written.
+        """Commit a record and its origin obligation in the same transaction.
 
-        A card's transition into Done or Blocked owes its origin session a return when the card
-        carries a PO origin: its outbox row (`board.origin_outbox.enqueue`) is written here, beside
-        the record and in its transaction, so the move, its event and the obligation commit together
-        (secretary-1792). `restoring` is the normalized-board restore replaying history
-        (`restore._restore_board_history`): a replayed record is not a new transition and owes
-        nothing, since its return was owed, and made, when it first committed.
+        Restored history owes no new return; recovery imports the saved outbox separately.
         """
         with self._locked():
             committed, _pending, _replace = self._pending_owner(request_id, event, operation="append")

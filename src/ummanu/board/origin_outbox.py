@@ -23,7 +23,7 @@ records a delivery once. `task show` reads a card's rows for its `origin` block.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any
 
@@ -126,6 +126,37 @@ class OriginOutboxStore:
         """Whether the store has the table (revision 0022); asked without an error that would abort a transaction."""
         rows = self.client._query(f"SELECT to_regclass('public.{TABLE}') IS NOT NULL")
         return bool(rows and rows[0][0])
+
+    def export(self) -> list[dict[str, Any]]:
+        """Every obligation in delivery order, including completed deliveries, on the caller's snapshot."""
+        rows = self.client._query(f"SELECT {_COLUMNS} FROM {TABLE} ORDER BY id")
+        result = []
+        for values in rows:
+            row = asdict(OutboxRow(*values))
+            row["created_at"] = _iso(row["created_at"])
+            row["delivered_at"] = _iso(row["delivered_at"])
+            result.append(row)
+        return result
+
+    def restore(self, rows: list[dict[str, Any]]) -> None:
+        """Merge by event identity and prove complete parity inside the caller's transaction."""
+        from ummanu.board.origin_checkpoint import OriginCheckpointError, require_outbox_parity
+
+        if not self.client._depth:
+            raise OriginCheckpointError("origin return restore requires a transaction")
+        self.client._execute(f"LOCK TABLE {TABLE} IN SHARE ROW EXCLUSIVE MODE")
+        existing = {row["event_id"]: row for row in self.export()}
+        fields = tuple(OutboxRow.__dataclass_fields__)[1:]
+        for row in rows:
+            prior = existing.get(row["event_id"])
+            if prior is not None:
+                require_outbox_parity([row], [prior])
+                continue
+            self.client._execute(
+                f"INSERT INTO {TABLE} ({', '.join(fields)}) VALUES ({', '.join('%s' for _ in fields)})",
+                tuple(row[field] for field in fields),
+            )
+        require_outbox_parity(rows, self.export())
 
     def pending(self, *, limit: int = PENDING_LIMIT) -> list[OutboxRow]:
         """The undelivered rows, oldest first: one query over the partial index of undelivered ids.

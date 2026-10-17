@@ -15,6 +15,7 @@ from unittest import mock
 
 import ummanu.restore as restore_module
 from tests.fakes.tasks import empty_seed
+from tests.origin_checkpoint_fixtures import obligations, write_outbox
 from tests.restore_fixtures import (
     _restore_card,
     _seed_instance_facts,
@@ -22,6 +23,10 @@ from tests.restore_fixtures import (
 )
 from tests.runtime_account_fixtures import fixture_runtime_account
 from tests.sql_backend_fixtures import card_store
+from ummanu._fsutil import write_json, write_ndjson
+from ummanu.board.origin_checkpoint import read_checkpoint_outbox, require_outbox_parity
+from ummanu.board.origin_outbox import OriginOutboxStore
+from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.checkpoint import _validate_board
 from ummanu.cli import main as cli_main
 from ummanu.config import validate_instance
@@ -65,6 +70,120 @@ def _seed_legacy_facts(data_dir: Path) -> Path:
 
 
 class RestoreTests(unittest.TestCase):
+    def _portable_origin_board(self, data_dir):
+        init_layout(data_dir)
+        card = _restore_card(reference="ummanu-1", column="Ready")
+        card["closed"] = True
+        rows, history = obligations()
+        board = data_dir / "board"
+        write_json(board / "cards.json", {"version": 1, "cards": [card]})
+        write_ndjson(board / "cards.ndjson", [card])
+        write_ndjson(board / "audit.ndjson", history)
+        write_outbox(board, rows)
+        return rows
+
+    def test_origin_restore_retries_without_requeueing_completed_deliveries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            rows = self._portable_origin_board(data_dir)
+            client = card_store(self, empty_seed())
+            for _ in range(2):
+                self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+                require_outbox_parity(rows, OriginOutboxStore(client).export())
+            self.assertEqual([row.event_id for row in OriginOutboxStore(client).pending()], [rows[0]["event_id"]])
+            self.assertTrue(TaskReader(client).show("ummanu-1")["closed"])
+            self.assertEqual(restore_state(data_dir)["origin_outbox_coverage"], "complete")
+
+    def test_origin_conflict_rolls_back_cards_audit_and_an_earlier_insert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            rows = self._portable_origin_board(data_dir)
+            client = card_store(self, empty_seed())
+            contradictory = dict(rows[1], session="another-recipient")
+            with client.transaction():
+                OriginOutboxStore(client).restore([contradictory])
+            before = OriginOutboxStore(client).export()
+            with self.assertRaisesRegex(RestoreError, "transition-1.*ummanu-1.*session"):
+                import_normalized_board(data_dir, client=client)
+            self.assertEqual(client.card_count(), 0)
+            self.assertEqual(SqlTaskAudit(client).events(), [])
+            self.assertEqual(OriginOutboxStore(client).export(), before)
+
+    def test_pending_checkpoint_cannot_overwrite_a_later_confirmed_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self._portable_origin_board(data_dir)
+            client = card_store(self, empty_seed())
+            import_normalized_board(data_dir, client=client)
+            store = OriginOutboxStore(client)
+            row = store.pending()[0]
+            store.mark(row.id, status="delivered", session="recipient", po_request_id="confirmed-input")
+            before = store.export()
+            with self.assertRaisesRegex(RestoreError, "transition-0.*delivered_at"):
+                import_normalized_board(data_dir, client=client)
+            self.assertEqual(store.export(), before)
+
+    def test_interrupted_origin_import_rolls_back_and_can_be_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            rows = self._portable_origin_board(data_dir)
+            client = card_store(self, empty_seed())
+            execute = client._execute
+
+            def interrupt(sql, params=(), **kwargs):
+                if sql.startswith("INSERT INTO origin_returns") and params[1] == rows[1]["event_id"]:
+                    raise RuntimeError("interrupted import")
+                return execute(sql, params, **kwargs)
+
+            with mock.patch.object(client, "_execute", side_effect=interrupt), self.assertRaisesRegex(RuntimeError, "interrupted"):
+                import_normalized_board(data_dir, client=client)
+            self.assertEqual(client.card_count(), 0)
+            self.assertEqual(OriginOutboxStore(client).export(), [])
+            self.assertEqual(SqlTaskAudit(client).events(), [])
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+            require_outbox_parity(rows, OriginOutboxStore(client).export())
+
+    def test_new_checkpoint_refuses_missing_corrupt_and_unlinked_outbox_before_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            rows = self._portable_origin_board(data_dir)
+            client = card_store(self, empty_seed())
+            path = data_dir / "board" / "origin_returns.ndjson"
+            for defect in ("missing", "json", "digest", "audit", "delivery", "card"):
+                with self.subTest(defect=defect):
+                    write_outbox(data_dir / "board", rows)
+                    if defect == "missing":
+                        path.unlink()
+                    elif defect == "json":
+                        path.write_text("broken\n")
+                    elif defect == "digest":
+                        write_ndjson(path, rows[:2])
+                    else:
+                        changed = [dict(row) for row in rows]
+                        field = {"audit": "request_id", "delivery": "status", "card": "task_ref"}[defect]
+                        changed[0][field] = "invalid"
+                        write_outbox(data_dir / "board", changed)
+                    with self.assertRaises(RestoreError):
+                        import_normalized_board(data_dir, client=client)
+                    self.assertEqual(client.card_count(), 0)
+                    self.assertEqual(SqlTaskAudit(client).events(), [])
+                    self.assertEqual(OriginOutboxStore(client).export(), [])
+
+    def test_released_checkpoint_keeps_existing_outbox_and_reports_missing_coverage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            rows = self._portable_origin_board(data_dir)
+            client = card_store(self, empty_seed())
+            import_normalized_board(data_dir, client=client)
+            (data_dir / "board" / "origin_returns.ndjson").unlink()
+            write_json(data_dir / "board" / "export.json", {"version": 1})
+            self.assertIsNone(read_checkpoint_outbox(data_dir / "board"))
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+            require_outbox_parity(rows, OriginOutboxStore(client).export())
+            state = restore_state(data_dir)
+            self.assertEqual(state["origin_outbox_coverage"], "unavailable")
+            self.assertIn("unknown deliveries were not reconstructed", state["origin_outbox_diagnostic"])
+
     def test_an_empty_restore_namespace_is_still_local(self) -> None:
         audit = mock.Mock(events=mock.Mock(return_value=[]))
         self.assertTrue(restore_module._namespace_is_local(audit, "recorded", set()))

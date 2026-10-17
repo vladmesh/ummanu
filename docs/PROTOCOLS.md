@@ -704,9 +704,15 @@ or fall together, and no writer can commit one without the other. Every writer o
 Done or Blocked reaches it: `task move` of any role (the dispatcher's edges, a release's Done, the wait
 edges, which owe nothing since a wait card writes no row), `task complete`, and a pending transition
 finished by repair. Archive, reopen and any later move write no row and touch none. The
-normalized-board restore replays history through `append(..., restoring=True)` and owes nothing for it:
-those returns were owed, and made, when the transitions first committed (a PostgreSQL-level recovery
-restores the table itself).
+normalized-board restore replays history through `append(..., restoring=True)` and imports the
+saved outbox as state, keyed by `event_id`, in the same restore transaction. Pending, delivered and
+skipped rows retain their order, audit request id, timestamps, notice, recipient session and
+`po_request_id`; the last field is the PO delivery key, distinct from the audit `request_id`.
+Conflicting deliveries fail and roll back the import. Restore sends no return and starts no PO
+session. A saved pending row does not prove that its PO session is available: PO session/request
+portability is outside this checkpoint's coverage. Released version-1 board exports have no outbox
+coverage; recovery reports that boundary and never reconstructs unknown deliveries from history.
+The portable file and integrity checks are specified in [Recovery](RECOVERY.md#board-import).
 
 **Return of the result.** Each tick, after the claim pass, the dispatcher reads the undelivered
 outbox rows in id order, one indexed query, and scans no card (`dispatch/origin_returns.py`).

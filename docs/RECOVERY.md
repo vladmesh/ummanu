@@ -230,6 +230,8 @@ split, so a checkpoint's Git cost follows what changed instead of the size of th
   that does not extend the committed one (the first split checkpoint after a flat one, or rewritten
   history) is replaced from its first segment. Segments are cut at line ends and hold at most 32 MiB
   unless one line is longer, so no blob reaches the 100 MB file limit of the GitHub remote.
+- `export.json` and `origin_returns.ndjson` stay single files. The outbox contains mutable delivery
+  state and is read through the same flat/split reader.
 - A logical file's bytes are the concatenation of its parts in index order; a gap in the sequence or
   an unexpected entry is a broken checkpoint, not a shorter one.
 
@@ -482,7 +484,9 @@ malformed or unreadable new file cannot revive legacy success. The production ti
 checkpoint work nor its failures into its own outcome.
 
 The board cut is one read-only REPEATABLE READ transaction over cards, Product/Issue rows, batched
-metadata and comments, request/audit history and sprints on the same client. `board-bulk.lock` is
+metadata and comments, request/audit history, sprints and the complete origin-return outbox on the same
+client. Completed deliveries are included and the dispatcher's 500-row pending limit does not apply.
+`board-bulk.lock` is
 shared only for these reads, preventing overlap with bulk recovery; normal transactional board
 writers can commit while the cut sees its earlier snapshot. Dispatcher state and run JSON files can
 be replaced while exported: a read sees one complete version through atomic rename, and append-only
@@ -957,9 +961,34 @@ runs neither the memory reindex nor the host materialiser.
 
 ### Board import
 
-Card and sprint parity are checked separately and both fail closed: a mismatch leaves recovery
+Card, sprint and covered outbox parity fail closed: a mismatch leaves recovery
 unfinished and visible in `doctor`. A live backend holding a sprint entity absent from the export
 stops the restore.
+
+Version-2 `board/export.json` requires `origin_returns.ndjson`, `origin_return_count` and
+`origin_return_sha256` (SHA-256 of the file's exact bytes, including the empty file). Every row carries
+`id`, `task_ref`, `event_id`, audit `request_id`, `target_state`, `created_at`, `delivered_at`, `status`,
+`notice`, `session` and `po_request_id`. Records are ordered by increasing source `id`; target SQL
+ids are local and parity compares relative event order. Times use UTC RFC 3339 with microseconds.
+Publication, checkpoint materialization and normalized import reject missing files, invalid records,
+count/digest mismatches, duplicate events and inconsistent card/audit links before accepting the cut.
+The export summary's analytics digest seals the outbox digest; the snapshot manifest also covers the
+physical file. An invalid export cannot replace the last validated board export or published tip.
+
+The outbox import follows sprint comments in the declared write order. It locks delivery writes,
+inserts missing events without deleting existing rows, and proves every delivery field and event
+order before the transaction commits. Existing conflicting, extra or reordered obligations refuse
+the whole import. Retries cannot requeue a delivered/skipped row. Audit replay keeps
+`restoring=True`; neither current card state nor replay generates obligations. Reopened and archived
+cards retain their saved returns. Restore sends no external effects and revives no processes or
+claims. PO session/request state is outside this portable contract, so a pending obligation alone
+does not establish that its origin session can receive it.
+
+Released version-1 checkpoints without an outbox remain readable. Recovery's `origin-outbox` result
+and `restore-board` output explicitly report unavailable coverage; `restore-state.json` records
+`origin_outbox_coverage` and `origin_outbox_diagnostic`. Existing target obligations remain untouched,
+and unknown deliveries are never reconstructed from audit. This coverage diagnostic does not turn a
+valid legacy recovery into a failure.
 
 The import restores sprint entities whole (goal, Definition of Done, repositories, product, issues,
 reservations, status, budget, current card, resume, entries, source audit metadata). A restored entity
@@ -970,7 +999,8 @@ A checkpoint without a sprints file restores as an installation without sprints.
 
 **Write order.** The import writes in the phases `src/ummanu/board/import_order.py` declares, and
 nowhere else is the order stated: exported request/audit history first, then Products, Issues and
-task cards, card comments (task, Issue and Product), closure, card order, sprints and sprint comments.
+task cards, card comments (task, Issue and Product), closure, card order, sprints, sprint comments and
+origin returns.
 Each phase names the schema tables it writes. The rule is that for every immediate foreign key in
 `src/ummanu/board/schema.py` between two tables the import writes, the parent's phase comes no later
 than the child's (a `DEFERRABLE INITIALLY DEFERRED` key holds at commit, whatever the order). History
@@ -1017,7 +1047,8 @@ Restore-only bulk boundaries, all idempotent on rerun:
   target without clearing progress or repeating unrelated writes. Absolute positions of archived rows
   are not compared.
 
-Restore is complete only after fresh card and sprint snapshots prove full content and order parity.
+Restore is complete only after fresh card and sprint snapshots and the covered outbox prove full
+content, delivery state and order parity.
 Released per-card create/restore events remain valid resume evidence. Recovery never clears
 audit/progress or rotates a namespace still bound to the target.
 

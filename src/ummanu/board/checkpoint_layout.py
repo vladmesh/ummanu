@@ -37,13 +37,15 @@ FLAT = "flat"
 SPLIT = "split"
 
 #: The logical files of a board checkpoint, in either layout.
-LOGICAL_FILES = ("cards.ndjson", "sprints.ndjson", "events.ndjson", "audit.ndjson", "export.json")
+LOGICAL_FILES = (
+    "cards.ndjson", "sprints.ndjson", "events.ndjson", "audit.ndjson", "export.json", "origin_returns.ndjson",
+)
 #: Logical files stored one record per file in the split layout: records change in place.
 RECORD_FILES = {"cards.ndjson": ("cards", ".json"), "sprints.ndjson": ("sprints", ".json")}
 #: Logical files stored as immutable segments in the split layout: they only ever grow.
 SEGMENT_FILES = {"audit.ndjson": ("audit", ".ndjson"), "events.ndjson": ("events", ".ndjson")}
 #: Logical files that stay single files in the split layout.
-SINGLE_FILES = ("export.json",)
+SINGLE_FILES = ("export.json", "origin_returns.ndjson")
 
 # Parts are grouped a thousand to a directory so no single Git tree grows with the board.
 _PER_DIRECTORY = 1000
@@ -111,7 +113,7 @@ class CheckpointBoard:
         return self.directory / name
 
     def has(self, name: str) -> bool:
-        """Whether the checkpoint carries the logical file; a split checkpoint carries all of them."""
+        """Whether the logical file exists; split record and log files may have no parts."""
         self._check_name(name)
         if self.layout == SPLIT and name not in SINGLE_FILES:
             return True
@@ -200,7 +202,12 @@ def publish_split_board(staging: Path, destination: Path) -> None:
     for name, (directory, suffix) in SEGMENT_FILES.items():
         _sync_segments(_read_staged(staging, name), previous.get(name), destination / directory, suffix)
     for name in SINGLE_FILES:
-        _write_bytes_if_changed(destination / name, _read_staged(staging, name))
+        if name == "origin_returns.ndjson" and not (staging / name).exists():
+            stale = destination / name
+            if stale.exists() or stale.is_symlink():
+                _remove(stale)
+        else:
+            _write_bytes_if_changed(destination / name, _read_staged(staging, name))
     for name in (*RECORD_FILES, *SEGMENT_FILES):
         legacy = destination / name
         if legacy.exists() or legacy.is_symlink():

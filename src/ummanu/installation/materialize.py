@@ -42,7 +42,9 @@ from ummanu.tasks import TaskReader
 from ummanu.upgrade import STEPS, run_steps
 from ummanu.webfront.commands import configured_sites, missing_sites_message
 
-CHECKPOINT_BOARD = ("cards.ndjson", "sprints.ndjson", "events.ndjson", "audit.ndjson", "export.json")
+CHECKPOINT_BOARD = (
+    "cards.ndjson", "sprints.ndjson", "events.ndjson", "audit.ndjson", "export.json", "origin_returns.ndjson",
+)
 
 
 
@@ -127,12 +129,18 @@ def materialize_checkpoint(
     store step wrote into the data target before it (`_checked_data_target`).
     """
     bootstrap_evidence = _checked_data_target(data_dir, own=own)
+    from ummanu.board.origin_checkpoint import OriginCheckpointError, read_checkpoint_outbox
+
     board_source = instance_dir / "state" / "board"
     runs_source = instance_dir / "state" / "runs"
     try:
         board = open_checkpoint_board(board_source)
     except CheckpointLayoutError as exc:
         raise InstallError(f"private checkpoint has an unreadable board layout: {exc}") from None
+    try:
+        read_checkpoint_outbox(board_source)
+    except OriginCheckpointError as exc:
+        raise InstallError(str(exc)) from None
     for name in ("cards.ndjson", "export.json"):
         if not board.has(name):
             raise InstallError(f"private checkpoint is missing state/board/{name}")
