@@ -88,11 +88,13 @@ def _checkpoint(
 
 
 def split_board(board: Path) -> None:
-    """Rewrite a flat `state/board` in the split layout; a logical file it lacked becomes empty."""
+    """Publish split records and logs without inventing outbox coverage."""
     staging = Path(tempfile.mkdtemp(prefix=".split-", dir=board.parent))
     try:
         for name in LOGICAL_FILES:
             source = board / name
+            if name == "origin_returns.ndjson" and not source.exists():
+                continue
             (staging / name).write_bytes(source.read_bytes() if source.is_file() else b"")
         publish_split_board(staging, board)
     finally:

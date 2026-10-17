@@ -17,6 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes.installation import split_board
 from tests.fakes.tasks import empty_seed
 from tests.origin_checkpoint_fixtures import obligations, write_outbox
 from tests.restore_fixtures import _restore_card
@@ -218,10 +219,22 @@ class SnapshotRepositoryTests(SnapshotCase):
         with self.assertRaisesRegex(InstallError, "origin return checkpoint"):
             materialize_checkpoint(self.live, missing)
         self.assertFalse(missing.exists())
+        split_instance = self.root / "split-instance"
+        shutil.copytree(self.live, split_instance)
+        split_source = split_instance / "state" / "board"
+        split_board(split_source)
+        split_missing = self.root / "split-missing-data"
+        with self.assertRaisesRegex(InstallError, "origin return checkpoint"):
+            materialize_checkpoint(split_instance, split_missing)
+        self.assertFalse(split_missing.exists())
         (source / "export.json").write_text(json.dumps({"version": 1, "card_count": 1, "sprint_count": 0}))
         legacy = self.root / "legacy-data"
         self.assertEqual(materialize_checkpoint(self.live, legacy), (1, 0))
         self.assertIsNone(read_checkpoint_outbox(legacy / "board"))
+        (split_source / "export.json").write_bytes((source / "export.json").read_bytes())
+        split_legacy = self.root / "split-legacy-data"
+        self.assertEqual(materialize_checkpoint(split_instance, split_legacy), (1, 0))
+        self.assertIsNone(read_checkpoint_outbox(split_legacy / "board"))
 
     def test_committed_snapshot_materializes_and_restores_ordered_origin_delivery_state(self):
         rows, history = obligations(6)
