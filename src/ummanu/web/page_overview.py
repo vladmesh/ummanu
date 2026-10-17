@@ -11,6 +11,7 @@ from ummanu.web.doctor import DOCTOR_NOT_BUILT, unreadable as doctor_unreadable
 from ummanu.web.page_assets import _ACTIONS_SCRIPT
 from ummanu.web.page_parts import (
     _beside,
+    _board_link,
     _budget_line,
     _chip,
     _current_card_cell,
@@ -60,7 +61,7 @@ def dashboard(
             '<section class="sprints-block">',
             '<header class="block-head"><h2>Open sprints</h2>'
             + (f'<span class="count">{len(open_items)}</span>' if open_items else "")
-            + '<a class="more" href="/sprints">all sprints</a></header>',
+            + '<a class="more" href="/board">board</a><a class="more" href="/sprints">all sprints</a></header>',
             _open_sprints(sprints),
             "</section>",
         ]
@@ -610,7 +611,7 @@ def project_page(snapshot: dict[str, Any], *, project_id: str, sprints: dict[str
     body = (
         '<div class="lead"><h1>'
         + escape(project_id)
-        + "</h1></div>"
+        + f'</h1><a href="{escape(_board_link(project=project_id))}">board</a></div>'
         + _panel("Project", _rows(["", ""], rows))
         + '<div style="margin-top:1rem">'
         + _panel("Sprints", sprint_body, count=len(sprint_items) or None, open_=False)

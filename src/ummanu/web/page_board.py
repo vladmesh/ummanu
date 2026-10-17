@@ -9,6 +9,7 @@ from urllib.parse import quote
 from ummanu.web.page_parts import _age, _link, _or_dash
 from ummanu.web.page_shell import _page
 from ummanu.web.page_values import _mapping
+from ummanu.webproto import board_view
 
 #: What a tile says for a value its card holds no readable form of.
 NO_TITLE = "no readable title"
@@ -22,8 +23,11 @@ NO_REASON = "reason not recorded"
 OWNER_LABEL = "waits for the owner"
 
 
-def board(document: dict[str, Any]) -> str:
-    """One column per card state with its count, each card a tile; a narrow screen stacks the columns."""
+def board(document: dict[str, Any], *, filters: dict[str, Any]) -> str:
+    """One column per card state with its count, each card a tile; a narrow screen stacks the columns.
+
+    Above them the active filter and a GET form over `filters` that changes or resets it.
+    """
     source = _mapping(document.get("source"))
     columns = document.get("columns")
     if source.get("state") != "available" or not isinstance(columns, list):
@@ -37,6 +41,7 @@ def board(document: dict[str, Any]) -> str:
             '<div class="lead"><h1>Board</h1>',
             f'<span class="muted">Done: the last {escape(str(window))} h and every Done card of an open sprint</span>',
             f'<span class="age">read at {escape(str(document.get("observed_at") or "an unknown time"))}</span></div>',
+            _filter_form(_mapping(document.get("filter")), filters),
             content,
         ]
     )
@@ -101,3 +106,48 @@ def _sprint(sprint: dict[str, Any]) -> str:
     if sprint.get("state") == "linked" and ref:
         return f'<a href="/sprints/{quote(str(ref))}">{escape(str(ref))}</a>'
     return SPRINT_UNKNOWN if sprint.get("state") == "unreadable" else NO_SPRINT
+
+
+def _filter_form(active: dict[str, Any], filters: dict[str, Any]) -> str:
+    project = str(active.get("project") or "")
+    sprint = str(active.get("sprint") or "")
+    shown = []
+    if project:
+        shown.append(f"project {escape(project)}")
+    if sprint:
+        shown.append(f"sprint {escape(NO_SPRINT if sprint == board_view.NO_SPRINT else sprint)}")
+    projects = _mapping(filters.get("projects"))
+    sprints = _mapping(filters.get("sprints"))
+    project_options = _options([("", "all projects")], _choices(projects, project), project)
+    sprint_options = _options(
+        [("", "all sprints"), (board_view.NO_SPRINT, NO_SPRINT)],
+        [value for value in _choices(sprints, sprint) if value != board_view.NO_SPRINT],
+        sprint,
+    )
+    reasons = "".join(
+        f'<span class="muted">{escape(str(source.get("reason") or "no reason was recorded"))}</span>'
+        for source in (_mapping(projects.get("source")), _mapping(sprints.get("source")))
+        if source.get("state") != "available"
+    )
+    return (
+        '<form class="inline board-filter" method="get" action="/board">'
+        f'<span class="board-filter-active">showing: {" · ".join(shown) or "the whole board"}</span>'
+        f'<div><label for="board-project">project</label><select id="board-project" name="project">{project_options}</select></div>'
+        f'<div><label for="board-sprint">sprint</label><select id="board-sprint" name="sprint">{sprint_options}</select></div>'
+        '<button type="submit" class="quiet">Filter</button>'
+        f'<a href="/board">whole board</a>{reasons}</form>'
+    )
+
+
+def _choices(section: dict[str, Any], active: str) -> list[str]:
+    """The section's values, with the active one kept even when the section does not offer it."""
+    items = section.get("items")
+    values = [item for item in items if isinstance(item, str) and item] if isinstance(items, list) else []
+    return values if not active or active in values else [active, *values]
+
+
+def _options(fixed: list[tuple[str, str]], values: list[str], active: str) -> str:
+    return "".join(
+        f'<option value="{escape(value)}"{" selected" if value == active else ""}>{escape(label)}</option>'
+        for value, label in [*fixed, *((value, value) for value in values)]
+    )

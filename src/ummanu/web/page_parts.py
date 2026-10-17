@@ -6,7 +6,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from html import escape
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from ummanu.web.page_assets import MAX_TABS
 from ummanu.web.page_values import _RENDER_CLOCK, _mapping
@@ -201,6 +201,11 @@ def _state_cell(state: str, reason: str) -> str:
 
 def _link(ref: str) -> str:
     return f'<a class="ref" href="/tasks/{quote(ref)}">{escape(ref)}</a>'
+
+
+def _board_link(**preset: str) -> str:
+    """The board's address with its filter preset, each value URL-encoded."""
+    return f"/board?{urlencode(preset)}"
 
 
 def _or_dash(value: Any) -> str:

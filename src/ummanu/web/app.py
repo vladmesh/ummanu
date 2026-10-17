@@ -514,8 +514,9 @@ class WebApp:
         po = self._or_reason(self.po.po_running_count) if self.po is not None else None
         return _html(200, pages.dashboard(snapshot, pause=pause, sprints=sprints, po=po))
 
-    def _board_page(self, _params, _query, _body) -> Response:
-        return _html(200, pages.board(self.reads.board_view()))
+    def _board_page(self, _params, query, _body) -> Response:
+        document = self.reads.board_view(project=_one(query, "project"), sprint=_one(query, "sprint"))
+        return _html(200, pages.board(document, filters=self.reads.board_filters()))
 
     def _task_page(self, params, query, _body) -> Response:
         ref = params["ref"]

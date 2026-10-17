@@ -3940,21 +3940,29 @@ null. One Pipeline listing (`TaskReader.list`: one `getAllTasks`, the metadata i
 rows in one read) and nothing per card; `items` is null, never `[]`, with an unavailable `source` when
 the board could not be read.
 
-**`board_view()`** — every work card in its column (`issues`, `ready`, `in_progress`, `validate`,
-`assessment`, `blocked`, `done`, in that order), each column with its `count` and its `cards`, the
-oldest `date_moved` first and an unknown one counted as oldest. One board store statement
-(`SqlCardClient.board_cards`) over `tasks`, their `task_comments` and `sprints`; Product and Issue
-rows are never read, and nothing comes from the audit journal or the dispatcher. A column holds the
-live cards in its state; `done` holds the Done cards moved in the last 48 hours and every Done card,
-archived ones included, of an open sprint. A tile is `{ref, title, type, project, sprint, head,
-moved, blocked_reason, waiting_owner}`: `sprint` is `{state: linked|none|unreadable, ref}`; `head` is
-the chosen head else the resolved one, the worker's in `in_progress` and the reviewer's in `validate`,
+**`board_view(project=None, sprint=None)`** — every work card (a task with a `task_type`) in its
+column (`issues`, `ready`, `in_progress`, `validate`, `assessment`, `blocked`, `done`, in that
+order), each column with its `count` and its `cards`, the oldest `date_moved` first and an unknown
+one counted as oldest. One board store statement (`SqlCardClient.board_cards`) over `tasks`, their
+`task_comments` and `sprints`, whatever the filter and the card count; Product and Issue rows are
+never read, and nothing comes from the audit journal or the dispatcher. A column holds the live
+cards in its state; `done` holds the Done cards moved in the last 48 hours and every Done card,
+archived ones included, of an open sprint. `project` keeps that project's cards of this window,
+`sprint` that sprint's, and `sprint="none"` the cards of no sprint; both together intersect, and a
+value no card matches is empty columns. The document echoes them as `filter: {project, sprint}`.
+A tile is `{ref, title, type, project, sprint, head, moved, blocked_reason, waiting_owner}`: `sprint`
+is `{state: linked|none|unreadable, ref}`; `head` is the chosen head else the resolved one, the worker's in `in_progress` and the reviewer's in `validate`,
 null elsewhere; `moved` is `{at, age_seconds}`, null for a missing, future or out-of-range
 `date_moved`; `blocked_reason` is the first non-empty content line of the latest comment a move into
 Blocked wrote since the card entered Blocked (its marker is the moving role: `dispatcher`,
 `observer`, `po` or `steward`), null when there is none; `waiting_owner` is the PO's handover mark.
 A text value that is missing or not a string is null. Any failure of the read is the document's
 unavailable `source` with its reason and `columns` null, never a refusal.
+
+**`board_filters()`** — what the board can be narrowed to: `projects`, the registered project ids
+from the instance bindings, and `sprints`, the open sprint references newest first from one board
+store statement (`SqlCardClient.open_sprint_refs`). Each is `{source, items}` read apart; one that
+cannot be read is its unavailable `source` with `items` null.
 
 ### Sources fail apart
 
@@ -4729,17 +4737,17 @@ unrouted method on a routed path is 405; neither reaches a handler.
 
 | method | route | operation | answers |
 | --- | --- | --- | --- |
-| GET | `/` | `reads.system_snapshot` (+ `po.po_running_count`) | the compact dashboard: pipeline controls and running PO turns, the current health problem, open sprints with their card, heads and budget |
-| GET | `/board` | `reads.board_view` | every work card in one column per state with its count, each a tile: ref, title on one line, type, project, sprint or "вне спринта", current head, age in the column, a Blocked card's reason and a mark for a card waiting for the owner; a narrow screen stacks the columns; an unreadable board is a "board not readable" notice with its reason |
+| GET | `/` | `reads.system_snapshot` (+ `po.po_running_count`) | the compact dashboard: pipeline controls and running PO turns, the current health problem, open sprints with their card, heads and budget, and links to the board and all sprints |
+| GET | `/board` | `reads.board_view` (+ `reads.board_filters`) | every work card in one column per state with its count, narrowed by `?project=<id>` and `?sprint=<ref>` or `?sprint=none` (вне спринта), each a tile: ref, title on one line, type, project, sprint or "вне спринта", current head, age in the column, a Blocked card's reason and a mark for a card waiting for the owner; a narrow screen stacks the columns; above them the active filter and a GET form (the registered projects, вне спринта, the open sprints) with a reset to the whole board; a filter no card matches is an empty board; an unreadable board is a "board not readable" notice with its reason |
 | GET | `/tasks/{ref}` | `reads.task_snapshot` (+ `ops.run_list`, `po.po_session_titles`) | one card: its full description, state, attempt, heads with model and effort, product runs, worker and reviewer output, result, event tail; and, when the card carries them, the **Delegation** block ("Delegated by" the PO session's title linked to `/po/sessions/<id>`, its short id when untitled or gone, the successor the result goes to now, and each return: state, delivery, when, which session received it), the **Wait** block (the target as a run link, a card link with the awaited states, or a time; waiting since, deadline, state, the frozen result with its evidence link, and each return address with its delivery) and the **E2E** block (each run's SHA, link, state or result and wait card; the budget or cap, the budget mark with its decision card, and the after-merge state and runs). A PO store that does not answer marks the titles unavailable and leaves the rest of the page |
 | GET | `/tasks/{ref}/heads/{run_id}` | `reads.head_view` | one of the card's local-pty heads, read-only: its terminal's tail as redacted plain text and its journal's tail; a run id the card did not record is 404 |
 | GET | `/sprints` | `sprint_reads.sprint_list` | active sprints or the searchable `?view=archive`, optionally filtered by `q` and `project` |
 | GET | `/projects` | `reads.system_snapshot` | registered projects |
-| GET | `/projects/{project}` | `reads.system_snapshot` (+ `sprint_reads.sprint_list`) | one project's registration details and collapsible sprint list |
+| GET | `/projects/{project}` | `reads.system_snapshot` (+ `sprint_reads.sprint_list`) | one project's registration details, a link to `/board?project=<id>` and collapsible sprint list |
 | GET | `/sprints/new` | `sprint_reads.sprint_options` | the "new sprint" form, on this installation's own products, open issues, projects and head profiles |
 | POST | `/sprints` | `sprint_ops.sprint_create` | open one sprint from that form; 303 to its page, or the form again with what was refused |
 | GET | `/sprints/{ref}/heads/{run_id}` | `reads.sprint_head_view` | the sprint's observer head in the card head view's shape, read-only; a run id other than the one the dispatcher's observer record holds is 404 |
-| GET | `/sprints/{ref}` | `sprint_reads.sprint_state` | one sprint: its current card, gate, heads and budget, **what it waits on** (`work.waiting_on`: a run, the owner or the PO, each linking its card; nothing when the list is empty), the observer's last decision, its cards, Definition of Done, resume and issues, its pins, and whether its observer is up |
+| GET | `/sprints/{ref}` | `sprint_reads.sprint_state` | one sprint: its current card, gate, heads and budget, **what it waits on** (`work.waiting_on`: a run, the owner or the PO, each linking its card; nothing when the list is empty), the observer's last decision, its cards, Definition of Done, resume and issues, its pins, whether its observer is up, and a link to `/board?sprint=<ref>` |
 | GET | `/api/system` | `reads.system_snapshot` | the dashboard's document |
 | GET | `/api/tasks/{ref}` | `reads.task_snapshot` | the card page's document; `?events=N` sets the tail length |
 | GET | `/api/tasks/{ref}/events` | `reads.task_events` | one page of history; `?cursor=C&limit=N` |

@@ -285,17 +285,49 @@ class ReadLayer(ProtocolBoundary):
             "items": items,
         }
 
-    def board_view(self) -> dict[str, Any]:
+    def board_view(self, *, project: str | None = None, sprint: str | None = None) -> dict[str, Any]:
         """Every work card in its board column as one tile, from the board store alone.
 
-        The read has one guard: whatever fails it is the document's unavailable source and its
-        reason, so the board is shown as unreadable rather than refused.
+        `project` and `sprint` (`none` for no sprint) narrow it. The read has one guard: whatever
+        fails it is the document's unavailable source and its reason, so the board is shown as
+        unreadable rather than refused.
         """
         now = self._clock()
         try:
-            return board_reads.board_document(self._client(), now=now)
+            return board_reads.board_document(self._client(), now=now, project=project, sprint=sprint)
         except Exception as exc:  # noqa: BLE001 -- the board read's one guard
-            return board_reads.unreadable(f"the board could not be read: {_reason(exc)}", now=now)
+            return board_reads.unreadable(
+                f"the board could not be read: {_reason(exc)}", now=now, project=project, sprint=sprint
+            )
+
+    def board_filters(self) -> dict[str, Any]:
+        """What the board can be narrowed to: the registered projects and the open sprints.
+
+        Each is its own section, so one that cannot be read leaves the other and the board standing.
+        """
+        now = self._clock()
+        readings = (
+            read_source(
+                "projects",
+                lambda: [item["id"] for item in self._projects(self.report(), now=now)["items"]],
+                refusal=lambda exc: f"the registered projects could not be read: {_reason(exc)}",
+                now=now,
+                evidence=None,
+            ),
+            read_source(
+                "sprints",
+                lambda: self._client().open_sprint_refs(),
+                refusal=lambda exc: f"the open sprints could not be read: {_reason(exc)}",
+                now=now,
+                evidence=None,
+            ),
+        )
+        return {
+            "schema_version": board_reads.SCHEMA_VERSION,
+            "kind": "board_filters",
+            "observed_at": sources.isoformat(now),
+            **{reading.key: {"source": reading.source.to_json(), "items": reading.value} for reading in readings},
+        }
 
     def task_events(
         self, ref: str, cursor: str | None = None, *, limit: int = DEFAULT_LIMIT

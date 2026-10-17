@@ -47,11 +47,17 @@ NO_SPRINT = "none"
 UNREADABLE = "unreadable"
 
 
-def board_document(client: Any, *, now: float) -> dict[str, Any]:
-    """The board read from `client.board_cards`, every card placed in its column, oldest move first."""
+def board_document(client: Any, *, now: float, project: str | None, sprint: str | None) -> dict[str, Any]:
+    """The board read from `client.board_cards`, every card placed in its column, oldest move first.
+
+    `project` and `sprint` narrow it when given; the sprint `none` keeps only cards of no sprint.
+    """
     rows = client.board_cards(
         done_since=datetime.fromtimestamp(now - DONE_WINDOW_HOURS * 3600, UTC),
         blocking_markers=BLOCKING_MARKERS,
+        project=project,
+        sprint=None if sprint == NO_SPRINT else sprint,
+        no_sprint=sprint == NO_SPRINT,
     )
     placed: dict[str, list[dict[str, Any]]] = {state: [] for state, _title in COLUMNS}
     for row in rows:
@@ -62,6 +68,8 @@ def board_document(client: Any, *, now: float) -> dict[str, Any]:
     return _document(
         now,
         source=sources.available(now),
+        project=project,
+        sprint=sprint,
         columns=[
             {"state": state, "title": title, "count": len(placed[state]), "cards": sorted(placed[state], key=_oldest_first)}
             for state, title in COLUMNS
@@ -69,17 +77,27 @@ def board_document(client: Any, *, now: float) -> dict[str, Any]:
     )
 
 
-def unreadable(reason: str, *, now: float) -> dict[str, Any]:
+def unreadable(reason: str, *, now: float, project: str | None, sprint: str | None) -> dict[str, Any]:
     """The board that could not be read: its reason, and no columns rather than empty ones."""
-    return _document(now, source=sources.unavailable(reason, now=now), columns=None)
+    return _document(
+        now, source=sources.unavailable(reason, now=now), project=project, sprint=sprint, columns=None
+    )
 
 
-def _document(now: float, *, source: sources.Source, columns: list[dict[str, Any]] | None) -> dict[str, Any]:
+def _document(
+    now: float,
+    *,
+    source: sources.Source,
+    project: str | None,
+    sprint: str | None,
+    columns: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "kind": "board",
         "observed_at": sources.isoformat(now),
         "source": source.to_json(),
+        "filter": {"project": project, "sprint": sprint},
         "done_window_hours": DONE_WINDOW_HOURS,
         "columns": columns,
     }
