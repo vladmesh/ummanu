@@ -9,6 +9,7 @@ import json
 import multiprocessing
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -546,6 +547,10 @@ class BoardCutTests(unittest.TestCase):
             reader.export = lambda: read([{"reference": "demo-1"}])
             audit.status.side_effect = lambda: read({"ok": True})
             audit.events.side_effect = lambda: read([])
+            client._query.side_effect = lambda *_: read([
+                (1, "demo-1", "transition", "audit-request", "done", datetime(2026, 1, 1, tzinfo=UTC),
+                 None, None, None, None, None),
+            ])
             with (
                 mock.patch.object(data, "task_audit_for", return_value=audit),
                 mock.patch.object(
@@ -555,10 +560,12 @@ class BoardCutTests(unittest.TestCase):
                 ),
                 mock.patch("ummanu.sprints.sprint_client") as sprint_factory,
             ):
-                cards, history, sprints = data._read_board_cut(root, root, reader, None)
+                cards, history, sprints, outbox = data._read_board_cut(root, root, reader, None)
             self.assertEqual(cards, [{"reference": "demo-1"}])
             self.assertEqual(history, [])
             self.assertIs(sprints[0]["client"], client)
+            self.assertEqual(len(outbox), 1)
+            self.assertEqual(outbox[0]["event_id"], "transition")
             sprint_factory.assert_not_called()
             client.read_snapshot.assert_called_once_with()
             with try_file_lock(root / "dispatcher" / "board-bulk.lock") as acquired:
