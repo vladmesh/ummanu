@@ -199,8 +199,10 @@ def _state_cell(state: str, reason: str) -> str:
     )
 
 
-def _link(ref: str) -> str:
-    return f'<a class="ref" href="/tasks/{quote(ref)}">{escape(ref)}</a>'
+def _link(ref: str, *, titled: bool = False) -> str:
+    """A card's ref linked to its page; `titled` also names the ref in `title=`."""
+    title = f' title="{escape(ref)}"' if titled else ""
+    return f'<a class="ref" href="/tasks/{quote(ref)}"{title}>{escape(ref)}</a>'
 
 
 def _board_link(**preset: str) -> str:

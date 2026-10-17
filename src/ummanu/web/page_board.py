@@ -40,10 +40,10 @@ def board(document: dict[str, Any], *, filters: dict[str, Any]) -> str:
     window = document.get("done_window_hours")
     body = "\n".join(
         [
-            '<div class="lead"><h1>Board</h1>',
-            f'<span class="muted">Done: the last {escape(str(window))} h and every Done card of an open sprint</span>',
-            f'<span class="age">read at {escape(str(document.get("observed_at") or "an unknown time"))}</span></div>',
+            '<div class="lead board-lead"><h1>Board</h1>',
             _filter_form(_mapping(document.get("filter")), filters),
+            f'<p class="board-note"><span class="muted">Done: the last {escape(str(window))} h and every Done card of an open sprint</span>',
+            f'<span class="age">read at {escape(str(document.get("observed_at") or "an unknown time"))}</span></p></div>',
             content,
         ]
     )
@@ -66,7 +66,7 @@ def _column(column: dict[str, Any]) -> str:
 
 def _tile(tile: dict[str, Any], *, blocked: bool) -> str:
     ref = tile.get("ref")
-    reference = _link(ref) if ref else '<span class="ref">no readable ref</span>'
+    reference = _link(ref, titled=True) if ref else '<span class="ref">no readable ref</span>'
     title = tile.get("title")
     moved = _mapping(tile.get("moved"))
     age = (

@@ -168,7 +168,7 @@ class TileTests(unittest.TestCase):
         )
         _status, html = page(client)
         linked = tile_of(html, "u-1")
-        self.assertIn('<a class="ref" href="/tasks/u-1">u-1</a>', linked)
+        self.assertIn('<a class="ref" href="/tasks/u-1" title="u-1">u-1</a>', linked)
         self.assertIn('<p class="tile-title" title="title of u-1">title of u-1</p>', linked)
         self.assertIn('<a href="/sprints/sprint%3A7">sprint:7</a>', linked)
         self.assertIn(">3h</span>", linked)
