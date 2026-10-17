@@ -52,6 +52,10 @@ from ummanu.dispatch.worker_launch import (
 )
 from ummanu.dispatch.worker_lifecycle import WorkerContinuationStage
 
+#: The reason of the dispatcher's move into Blocked on a worker's own block; the worker's
+#: `report:blocked` comment carries the real one.
+BLOCKED_RELAY = "worker report:blocked"
+
 
 def worker_report_marker(
     runtime: Any,
@@ -226,7 +230,7 @@ def handle_worker_report(
             task,
             record,
             target="blocked",
-            reason="worker report:blocked",
+            reason=BLOCKED_RELAY,
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "worker-blocked", ref),
             terminal_state="blocked",
             disposition="blocked",

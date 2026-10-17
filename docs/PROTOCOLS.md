@@ -3953,9 +3953,15 @@ value no card matches is empty columns. The document echoes them as `filter: {pr
 A tile is `{ref, title, type, project, sprint, head, moved, blocked_reason, waiting_owner}`: `sprint`
 is `{state: linked|none|unreadable, ref}`; `head` is the chosen head else the resolved one, the worker's in `in_progress` and the reviewer's in `validate`,
 null elsewhere; `moved` is `{at, age_seconds}`, null for a missing, future or out-of-range
-`date_moved`; `blocked_reason` is the first non-empty content line of the latest comment a move into
-Blocked wrote since the card entered Blocked (its marker is the moving role: `dispatcher`,
-`observer`, `po` or `steward`), null when there is none; `waiting_owner` is the PO's handover mark.
+`date_moved`; `blocked_reason` comes from the comment the move into Blocked wrote: the earliest
+comment marked with a moving role (`dispatcher`, `observer`, `po` or `steward`) at or after
+`date_moved`, the latest such comment when `date_moved` is unknown, so a later note never replaces
+it. When that comment is the dispatcher's relay of a worker's block (`BLOCKED_RELAY` in
+`dispatch/worker_report.py`), the reason comes from the worker's latest `report:blocked` comment at
+or before it. The shown line is the first line that says something: the marker, empty lines, a bare
+`classification: <value>` line and a heading that is only a label (`## Blocker`) are skipped, and
+heading marks, a leading `classification: <value>` clause and a leading `Blocker:` label are
+stripped. It is null when no such line is left; `waiting_owner` is the PO's handover mark.
 A text value that is missing or not a string is null. Any failure of the read is the document's
 unavailable `source` with its reason and `columns` null, never a refusal.
 
