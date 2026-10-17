@@ -42,6 +42,7 @@ def row(ref: str, state: str, **values: Any) -> dict[str, Any]:
         "review_head": None,
         "extensions": {},
         "blocking_comment": None,
+        "worker_report": None,
         **values,
     }
 
@@ -234,6 +235,35 @@ class TileTests(unittest.TestCase):
         self.assertEqual(reason.findall(tile_of(html, "u-2")), [("reason not recorded", "reason not recorded")])
         self.assertEqual(reason.findall(tile_of(html, "u-3")), [("reason not recorded", "reason not recorded")])
         self.assertEqual(reason.findall(tile_of(html, "u-4")), [])
+
+    def test_a_blocked_tile_reason_is_the_first_line_that_says_something_and_looks_behind_the_relay(
+        self,
+    ) -> None:
+        report = (
+            "[report:blocked]\nclassification: external_fact\n\n## Blocker\n\n"
+            "Classification: external_fact. There is no authorised session.\n## Places checked"
+        )
+        cases = [
+            ("a labelled heading", {"blocking_comment": "[report:blocked]\n## Blocker: external_fact, a kit defect"},
+             "external_fact, a kit defect"),
+            ("a label heading and a classification clause", {"blocking_comment": report},
+             "There is no authorised session."),
+            ("the relay of a worker report", {"blocking_comment": "[dispatcher]\nworker report:blocked",
+                                              "worker_report": report}, "There is no authorised session."),
+            ("the relay with no worker report", {"blocking_comment": "[dispatcher]\nworker report:blocked"},
+             "reason not recorded"),
+            ("a reason that names the relay", {"blocking_comment": "[dispatcher]\nworker report:blocked twice",
+                                               "worker_report": report}, "worker report:blocked twice"),
+            ("only labels", {"blocking_comment": "[observer]\nclassification: other\n# Blocker\nBlocker:"},
+             "reason not recorded"),
+            ("a worker report that is not text", {"blocking_comment": "[dispatcher]\nworker report:blocked",
+                                                  "worker_report": 7}, "reason not recorded"),
+        ]
+        reason = re.compile(r'<p class="tile-reason" title="[^"]*">(.*?)</p>')
+        for name, values, expected in cases:
+            with self.subTest(name):
+                _status, html = page(BoardClient([row("u-1", "blocked", **values)]))
+                self.assertEqual(reason.findall(tile_of(html, "u-1")), [expected])
 
     def test_a_card_handed_to_the_owner_has_a_marked_tile_with_a_text_label(self) -> None:
         mark = {

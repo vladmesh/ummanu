@@ -7,6 +7,7 @@ failed read. See docs/PROTOCOLS.md, "Reading the pipeline".
 from __future__ import annotations
 
 import math
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -16,6 +17,7 @@ from ummanu.board.legacy_codec import TASK_STATE_BY_COLUMN
 from ummanu.board.models import CardState
 from ummanu.board.owner_handover import waiting_owner
 from ummanu.board.sql_rows import comment_marker
+from ummanu.dispatch.worker_report import BLOCKED_RELAY
 from ummanu.webproto import sources
 
 SCHEMA_VERSION = 1
@@ -36,6 +38,15 @@ BLOCKING_MARKERS: tuple[str, ...] = tuple(
     )
 )
 
+#: The marker of the worker's own block report, whose body holds the reason a relay only names.
+WORKER_BLOCKED_REPORT = "report:blocked"
+
+#: What a reason line may start with that says nothing yet: a heading's marks, a `Blocker:` label
+#: and a `classification: <value>` clause.
+_HEADING = re.compile(r"#+\s*")
+_BLOCKER_LABEL = re.compile(r"\Ablocker\s*:\s*", re.IGNORECASE)
+_CLASSIFICATION = re.compile(r"\Aclassification\s*:\s*[^\s.,;]+[.,;]?\s*", re.IGNORECASE)
+
 #: Whose head a tile names in a column: the chosen head first, then the resolved one.
 HEAD_FIELDS: dict[str, tuple[str, str]] = {
     "in_progress": ("head_override", "worker_head"),
@@ -55,6 +66,7 @@ def board_document(client: Any, *, now: float, project: str | None, sprint: str 
     rows = client.board_cards(
         done_since=datetime.fromtimestamp(now - DONE_WINDOW_HOURS * 3600, UTC),
         blocking_markers=BLOCKING_MARKERS,
+        report_marker=WORKER_BLOCKED_REPORT,
         project=project,
         sprint=None if sprint == NO_SPRINT else sprint,
         no_sprint=sprint == NO_SPRINT,
@@ -112,7 +124,7 @@ def _tile(row: dict[str, Any], state: str, *, now: float) -> dict[str, Any]:
         "sprint": _sprint(row.get("sprint")),
         "head": _head(row, state),
         "moved": _moved(row.get("moved"), now=now),
-        "blocked_reason": _blocked_reason(row.get("blocking_comment")) if state == "blocked" else None,
+        "blocked_reason": _blocked_reason(row) if state == "blocked" else None,
         "waiting_owner": waiting_owner({"extensions": row.get("extensions")}),
     }
 
@@ -163,15 +175,36 @@ def _moved(value: Any, *, now: float) -> dict[str, Any] | None:
     return {"at": at, "age_seconds": now - moment}
 
 
-def _blocked_reason(body: Any) -> str | None:
-    """The first non-empty content line of the blocking comment, below its marker line."""
+def _blocked_reason(row: dict[str, Any]) -> str | None:
+    """The first line that says something of the comment that blocked the card, or of the worker's
+    block report when that comment only relays it."""
+    lines = _content_lines(row.get("blocking_comment"))
+    if lines == [BLOCKED_RELAY]:
+        lines = _content_lines(row.get("worker_report"))
+    for line in lines:
+        reason = _saying(line)
+        if reason is not None:
+            return reason
+    return None
+
+
+def _content_lines(body: Any) -> list[str]:
+    """A comment's non-empty lines on one line each, below its marker line."""
     if not isinstance(body, str):
-        return None
+        return []
     lines = body.splitlines()
     if comment_marker(body) is not None:
         lines = lines[1:]
-    for line in lines:
-        text = _line(line)
-        if text is not None:
-            return text
-    return None
+    return [text for text in map(_line, lines) if text is not None]
+
+
+def _saying(line: str) -> str | None:
+    """A reason line without the marks and labels it may start with; None when nothing is left or
+    it is a heading that is only a label."""
+    heading = _HEADING.match(line)
+    text = line[heading.end():] if heading else line
+    if heading and re.fullmatch(r"\w+:?", text):
+        return None
+    text = _BLOCKER_LABEL.sub("", text, count=1)
+    text = _CLASSIFICATION.sub("", text, count=1)
+    return text or None

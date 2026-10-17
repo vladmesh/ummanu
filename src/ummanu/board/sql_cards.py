@@ -880,6 +880,7 @@ class SqlCardClient:
         *,
         done_since: datetime,
         blocking_markers: Iterable[str],
+        report_marker: str,
         project: str | None,
         sprint: str | None,
         no_sprint: bool,
@@ -888,21 +889,29 @@ class SqlCardClient:
         Done card, archived too, moved since `done_since` or linked to an open sprint.
 
         `project` and `sprint` narrow it to that project or sprint when given, `no_sprint` to cards
-        of no sprint. A Blocked card carries the body of its latest comment under one of
-        `blocking_markers` written since it entered Blocked (any such comment when that moment is
-        unknown).
+        of no sprint. A Blocked card carries the body of the comment its move into Blocked wrote: the
+        earliest under one of `blocking_markers` written since it entered Blocked (the latest such
+        comment when that moment is unknown), and the latest `report_marker` comment written at or
+        before it.
         """
         # The moment is read as an epoch: an out-of-range `date_moved` would otherwise fail the
         # whole statement in the driver instead of one card's age.
         rows = self._query(
             "SELECT t.task_ref, t.title, t.state, t.task_type, t.project_id, t.sprint_ref, "
             "extract(epoch FROM t.date_moved), t.head_override, t.resolved_worker_head, "
-            "t.review_head_override, t.resolved_review_head, t.extensions, blocking.body "
+            "t.review_head_override, t.resolved_review_head, t.extensions, blocking.body, report.body "
             "FROM tasks t LEFT JOIN sprints s ON s.ref = t.sprint_ref "
-            "LEFT JOIN LATERAL (SELECT c.body FROM task_comments c WHERE t.state = 'blocked' "
+            "LEFT JOIN LATERAL (SELECT c.body, c.created_at FROM task_comments c WHERE t.state = 'blocked' "
             "AND c.task_ref = t.task_ref AND c.marker = ANY(%s::text[]) "
             "AND (t.date_moved IS NULL OR c.created_at >= t.date_moved) "
-            "ORDER BY c.created_at DESC, c.comment_id DESC LIMIT 1) blocking ON true "
+            # A known moment orders ascending on the first two keys; an unknown one ties there and
+            # falls through to the descending pair.
+            "ORDER BY CASE WHEN t.date_moved IS NULL THEN NULL ELSE c.created_at END, "
+            "CASE WHEN t.date_moved IS NULL THEN NULL ELSE c.comment_id END, "
+            "c.created_at DESC, c.comment_id DESC LIMIT 1) blocking ON true "
+            "LEFT JOIN LATERAL (SELECT r.body FROM task_comments r WHERE r.task_ref = t.task_ref "
+            "AND r.marker = %s AND r.created_at <= blocking.created_at "
+            "ORDER BY r.created_at DESC, r.comment_id DESC LIMIT 1) report ON true "
             "WHERE t.task_type IS NOT NULL "
             "AND ((t.state <> 'done' AND NOT t.archived) "
             "OR (t.state = 'done' AND (t.date_moved >= %s OR s.status = 'open'))) "
@@ -910,11 +919,12 @@ class SqlCardClient:
             "AND (%s::text IS NULL OR t.sprint_ref = %s) "
             "AND (NOT %s::boolean OR t.sprint_ref IS NULL) "
             "ORDER BY t.task_ref",
-            (list(blocking_markers), done_since, project, project, sprint, sprint, no_sprint),
+            (list(blocking_markers), report_marker, done_since, project, project, sprint, sprint, no_sprint),
         )
         names = (
             "ref", "title", "state", "type", "project", "sprint", "moved", "head_override",
             "worker_head", "review_head_override", "review_head", "extensions", "blocking_comment",
+            "worker_report",
         )
         return [dict(zip(names, values, strict=True)) for values in rows]
 

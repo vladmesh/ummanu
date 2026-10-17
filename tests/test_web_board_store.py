@@ -125,7 +125,15 @@ class BoardStoreReadTests(unittest.TestCase):
         self.assertEqual(sprints["source"]["state"], "available", sprints["source"])
         self.assertEqual(sprints["items"], ["sprint:10", "sprint:9"])
 
-    def test_a_blocked_card_carries_the_latest_comment_a_move_into_blocked_wrote_since_it_entered(self) -> None:
+    def reasons(self) -> dict[str, str | None]:
+        return {
+            tile["ref"]: tile["blocked_reason"]
+            for column in self.columns()
+            for tile in column["cards"]
+            if column["state"] == "blocked"
+        }
+
+    def test_a_blocked_card_carries_the_comment_its_move_into_blocked_wrote(self) -> None:
         moved = NOW - HOUR
         blocked = self.card("ummanu-1", "blocked", moved=moved)
         self.board.add_comment(blocked, "[dispatcher]\nVitality (review): healthy", created=moved - 60)
@@ -134,14 +142,66 @@ class BoardStoreReadTests(unittest.TestCase):
         self.board.add_comment(blocked, "[worker]\na worker note after the move", created=moved + 60)
         silent = self.card("ummanu-2", "blocked", moved=moved)
         self.board.add_comment(silent, "[observer]\nan older move's reason", created=moved - 600)
-        tiles = {
-            tile["ref"]: tile["blocked_reason"]
-            for column in self.columns()
-            for tile in column["cards"]
-        }
         self.assertEqual(
-            tiles, {"ummanu-1": "wait watchdog: the review head stalled", "ummanu-2": None}
+            self.reasons(), {"ummanu-1": "wait watchdog: the review head stalled", "ummanu-2": None}
         )
+
+    def test_a_later_blocking_role_note_never_replaces_the_reason_of_the_move(self) -> None:
+        moved = NOW - HOUR
+        blocked = self.card("ummanu-1", "blocked", moved=moved)
+        self.board.add_comment(blocked, "[observer]\nheld until the owner decides", created=moved)
+        self.board.add_comment(blocked, "[po]\nowner: findings preserved", created=moved + 60)
+        self.board.add_comment(blocked, "[dispatcher]\nVitality (worker): healthy_quiet", created=moved + 120)
+        self.assertEqual(self.reasons(), {"ummanu-1": "held until the owner decides"})
+
+    def test_a_worker_block_shows_its_report_behind_the_dispatcher_relay(self) -> None:
+        moved = NOW - HOUR
+        labelled = self.card("ummanu-1", "blocked", moved=moved)
+        self.board.add_comment(labelled, "[report:blocked]\nclassification: external_fact\n\nan older round", created=moved - 900)
+        self.board.add_comment(
+            labelled,
+            "[report:blocked]\nclassification: external_fact\n\n"
+            "## Blocker: external_fact, a kit 0.8.0 generator defect\n\nI accept the reviewer's finding.",
+            created=moved - 229,
+        )
+        self.board.add_comment(labelled, "[dispatcher]\nworker report:blocked", created=moved)
+        self.board.add_comment(
+            labelled, "[po]\nowner: e2e after_merge disabled, manual mega only; findings preserved.", created=moved + 459
+        )
+        bare = self.card("ummanu-2", "blocked", moved=moved)
+        self.board.add_comment(
+            bare,
+            "[report:blocked]\nclassification: external_fact\n\n## Blocker\n\n"
+            "Classification: external_fact. There is no authorised Telethon session for the owner's account.\n\n"
+            "## Places checked",
+            created=moved - 38,
+        )
+        self.board.add_comment(bare, "[dispatcher]\nworker report:blocked", created=moved)
+        own = self.card("ummanu-3", "blocked", moved=moved)
+        self.board.add_comment(own, "[report:blocked]\nclassification: external_fact\n\nan unrelated report", created=moved - 600)
+        self.board.add_comment(
+            own,
+            "[dispatcher]\nwait watchdog: the review head's vitality episode confirms a stall with no review verdict",
+            created=moved,
+        )
+        relayed_alone = self.card("ummanu-4", "blocked", moved=moved)
+        self.board.add_comment(relayed_alone, "[dispatcher]\nworker report:blocked", created=moved)
+        self.board.add_comment(relayed_alone, "[report:blocked]\nclassification: other\n\nwritten after the move", created=moved + 60)
+        self.assertEqual(
+            self.reasons(),
+            {
+                "ummanu-1": "external_fact, a kit 0.8.0 generator defect",
+                "ummanu-2": "There is no authorised Telethon session for the owner's account.",
+                "ummanu-3": "wait watchdog: the review head's vitality episode confirms a stall with no review verdict",
+                "ummanu-4": None,
+            },
+        )
+
+    def test_a_blocked_card_of_unknown_move_carries_its_latest_blocking_role_comment(self) -> None:
+        blocked = self.card("ummanu-1", "blocked", moved=None)
+        self.board.add_comment(blocked, "[observer]\nan older reason", created=NOW - 2 * HOUR)
+        self.board.add_comment(blocked, "[dispatcher]\nthe newest reason", created=NOW - HOUR)
+        self.assertEqual(self.reasons(), {"ummanu-1": "the newest reason"})
 
     def test_the_read_is_one_statement_whatever_the_card_count(self) -> None:
         self.board.ensure_sprint("sprint:1", status="open")
