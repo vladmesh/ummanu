@@ -395,13 +395,19 @@ form.sprint .hint { color: var(--muted); font-size: .8rem; }
 .launch { font-weight: 600; }
 
 /* the board: a column per state that scrolls sideways inside the board when they do not fit, an empty
-   column collapsed to its upright header. On a desktop screen the page fills the viewport and each
-   column scrolls its own tiles, so the board's scrollbar stays on screen; a narrow screen stacks the
-   columns into one list. Tile rules stay under .board: the sprint page owns .tiles and .tile */
-body.fit-viewport main { max-width: none; }
+   column collapsed to its upright header. On a desktop screen tall enough the page fills the viewport
+   and each column scrolls its own tiles, so the board's scrollbar stays on screen; on a shorter one the
+   page scrolls the header and filter away and leaves the board the viewport above the bar. A narrow
+   screen stacks the columns into one list. Tile rules stay under .board: the sprint page owns .tiles
+   and .tile */
+body.fit-viewport .top .row, body.fit-viewport main { max-width: none; }
+.board-lead { align-items: center; gap: .5rem 1rem; margin-bottom: .5rem; }
+.board-filter { align-items: center; }
+.board-filter > div { display: flex; align-items: center; gap: .3rem; }
+.board-filter label { margin: 0; }
+.board-note { flex: 1 1 15rem; min-width: 0; margin: 0; text-align: right; font-size: .72rem; line-height: 1.3; }
+.board-note .age { margin-left: .4rem; font-size: inherit; }
 .board { display: flex; gap: .6rem; overflow-x: auto; }
-.board-filter { margin-bottom: 1rem; }
-.board-filter-active, .board-filter > a { align-self: center; }
 .board-column { flex: 1 1 0; min-width: 16.5rem; display: flex; flex-direction: column; background: var(--raised); border: 1px solid var(--line); border-radius: 6px; padding: .5rem; }
 .board-column-empty { flex: none; min-width: 0; writing-mode: vertical-lr; }
 .board-column > header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 .5rem; margin-block-end: .4rem; }
@@ -411,8 +417,8 @@ body.fit-viewport main { max-width: none; }
 .board ol.tiles { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: .4rem; }
 .board .tile { display: grid; grid-template-columns: minmax(0, 1fr); gap: .1rem; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: .4rem .5rem; min-width: 0; }
 .board .tile p { margin: 0; }
-.board .tile-head { display: flex; align-items: baseline; gap: .4rem; }
-.board .tile-head .ref { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.board .tile-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 .4rem; }
+.board .tile-head .ref { min-width: 0; overflow-wrap: anywhere; }
 .board .tile-head .age { flex: none; margin-left: auto; }
 .board .tile-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: .88rem; }
 .board .tile-meta, .board .tile-reason { font-size: .75rem; color: var(--muted); }
@@ -421,10 +427,17 @@ body.fit-viewport main { max-width: none; }
 .board .tile-owner { border: 2px dashed var(--warn); }
 .board .tile-owner-label { font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--warn); overflow-wrap: anywhere; }
 @media (min-width: 901px) {
-  body.fit-viewport { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
-  body.fit-viewport main { flex: 1 1 auto; min-height: 0; width: 100%; display: flex; flex-direction: column; padding-block-end: .75rem; }
-  body.fit-viewport .board { flex: 1 1 auto; min-height: 12rem; }
+  body.fit-viewport main { padding-block: 1rem .75rem; }
   .board ol.tiles { min-height: 0; overflow-y: auto; }
+}
+@media (min-width: 901px) and (min-height: 600px) {
+  body.fit-viewport { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
+  body.fit-viewport main { flex: 1 1 auto; min-height: 0; width: 100%; display: flex; flex-direction: column; }
+  body.fit-viewport .board { flex: 1 1 auto; min-height: 12rem; }
+}
+@media (min-width: 901px) and (max-height: 599.98px) {
+  body.fit-viewport .top { position: static; }
+  body.fit-viewport .board { height: calc(100vh - var(--bar-height) - .75rem); height: calc(100dvh - var(--bar-height) - .75rem); }
 }
 @media (max-width: 900px) {
   .board { flex-direction: column; overflow-x: visible; }
@@ -439,6 +452,7 @@ body.fit-viewport main { max-width: none; }
 body { padding-bottom: var(--bar-height); }
 .statusbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; height: var(--bar-height); background: var(--surface); border-top: 1px solid var(--line); }
 .statusbar .row { max-width: 1280px; margin: 0 auto; padding: 0 20px; height: 100%; display: flex; align-items: center; gap: 1.1rem; white-space: nowrap; overflow-x: auto; font-size: .78rem; color: var(--muted); }
+body.fit-viewport .statusbar .row { max-width: none; }
 .statusbar .lamp { display: inline-flex; align-items: center; gap: .4rem; padding: .1rem .55rem; border-radius: 999px; font-weight: 600; border: 1px solid transparent; }
 .statusbar .lamp::before { content: ""; width: .5rem; height: .5rem; border-radius: 50%; background: currentColor; }
 .statusbar .lamp:hover { text-decoration: none; filter: brightness(1.08); }
@@ -469,6 +483,7 @@ body { padding-bottom: var(--bar-height); }
 .statusbar details.credits > summary::-webkit-details-marker { display: none; }
 .statusbar details.credits > summary:hover, .statusbar details.credits[open] > summary { color: var(--ink); border-style: solid; }
 .statusbar .credits-pop { position: fixed; bottom: calc(var(--bar-height) + .5rem); left: max(12px, calc((100vw - 1280px) / 2 + 20px)); z-index: 7; display: grid; gap: .35rem; width: max-content; min-width: min(18rem, calc(100vw - 24px)); max-width: min(26rem, calc(100vw - 24px)); box-sizing: border-box; padding: .6rem .8rem; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.18); white-space: normal; font-family: var(--sans, inherit); color: var(--ink); }
+body.fit-viewport .statusbar .credits-pop { left: 12px; }
 .statusbar .credits-pop .pop-line { display: block; }
 .statusbar .credits-pop .pop-line.expires { color: var(--muted); font-variant-numeric: tabular-nums; }
 .statusbar .credits-pop .pop-line.warn { color: var(--warn); }

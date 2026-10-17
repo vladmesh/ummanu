@@ -280,7 +280,8 @@ def _page(
 ) -> str:
     """The shared shell: top bar, navigation with `nav` marked, and `crumbs` (what is open under it).
 
-    `fit_viewport` lifts the page width cap and, on a desktop screen, bounds `main` to the viewport.
+    `fit_viewport` lifts the width cap of the top bar, the page and the bottom bar and, on a desktop
+    screen, bounds the board to the viewport.
     """
     current = ' aria-current="page"'
     links = "".join(
