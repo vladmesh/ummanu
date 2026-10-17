@@ -36,6 +36,7 @@ LOOPBACK_NOTICE = (
 #: Primary navigation in order of use; keys are page names, so the current page is marked.
 NAV: tuple[tuple[str, str, str], ...] = (
     ("dashboard", "/", "Dashboard"),
+    ("board", "/board", "Board"),
     ("sprints", "/sprints", "Sprints"),
     ("projects", "/projects", "Projects"),
     ("po", "/po", "PO"),

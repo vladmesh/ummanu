@@ -371,7 +371,7 @@ Operations, idempotency, ownership and outcomes: [Protocols](PROTOCOLS.md#runnin
 
 ## The web transport
 
-`ummanu.web` serves the dashboard, card, sprint, project, history, `/po`, `/doctor` and
+`ummanu.web` serves the dashboard, board, card, sprint, project, history, `/po`, `/doctor` and
 `/owner-events` pages and a JSON API over
 HTTP, using the standard-library `http.server`. It is a transport like `web-read`/`web-run`: each
 entry of `ummanu.web.app.ROUTES` is one `ummanu.webproto` operation, and one table

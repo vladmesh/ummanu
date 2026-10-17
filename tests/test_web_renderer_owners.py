@@ -19,7 +19,7 @@ from ummanu.web import page_assets, page_shell, page_values, pages
 WEB = Path(__file__).resolve().parents[1] / "src/ummanu/web"
 LAYERS = {
     "page_values": 0, "page_assets": 0, "page_parts": 1, "page_shell": 2,
-    "page_overview": 3, "page_card": 3, "page_sprint": 3, "page_po": 3, "pages": 4,
+    "page_overview": 3, "page_board": 3, "page_card": 3, "page_sprint": 3, "page_po": 3, "pages": 4,
 }
 
 

@@ -875,6 +875,35 @@ class SqlCardClient:
         """Stored Card rows only; Product/Issue ownership is not restore emptiness."""
         return self._rows()
 
+    def board_cards(self, *, done_since: datetime, blocking_markers: Iterable[str]) -> list[dict[str, Any]]:
+        """The cards of the web board in one statement: every live card outside Done, and every Done
+        card, archived too, moved since `done_since` or linked to an open sprint.
+
+        A Blocked card carries the body of its latest comment under one of `blocking_markers`
+        written since it entered Blocked (any such comment when that moment is unknown).
+        """
+        # The moment is read as an epoch: an out-of-range `date_moved` would otherwise fail the
+        # whole statement in the driver instead of one card's age.
+        rows = self._query(
+            "SELECT t.task_ref, t.title, t.state, t.task_type, t.project_id, t.sprint_ref, "
+            "extract(epoch FROM t.date_moved), t.head_override, t.resolved_worker_head, "
+            "t.review_head_override, t.resolved_review_head, t.extensions, blocking.body "
+            "FROM tasks t LEFT JOIN sprints s ON s.ref = t.sprint_ref "
+            "LEFT JOIN LATERAL (SELECT c.body FROM task_comments c WHERE t.state = 'blocked' "
+            "AND c.task_ref = t.task_ref AND c.marker = ANY(%s::text[]) "
+            "AND (t.date_moved IS NULL OR c.created_at >= t.date_moved) "
+            "ORDER BY c.created_at DESC, c.comment_id DESC LIMIT 1) blocking ON true "
+            "WHERE (t.state <> 'done' AND NOT t.archived) "
+            "OR (t.state = 'done' AND (t.date_moved >= %s OR s.status = 'open')) "
+            "ORDER BY t.task_ref",
+            (list(blocking_markers), done_since),
+        )
+        names = (
+            "ref", "title", "state", "type", "project", "sprint", "moved", "head_override",
+            "worker_head", "review_head_override", "review_head", "extensions", "blocking_comment",
+        )
+        return [dict(zip(names, values, strict=True)) for values in rows]
+
     # --- board shape -----------------------------------------------------------------
 
     def _rpc_getProjectByName(self, *, name: str) -> dict[str, Any] | None:

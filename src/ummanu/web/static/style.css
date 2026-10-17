@@ -393,6 +393,25 @@ form.sprint .hint { color: var(--muted); font-size: .8rem; }
 .refused, .pending { border-left: 3px solid var(--warn); background: var(--warn-soft); padding: .5rem .75rem; margin: .5rem 0; border-radius: 0 4px 4px 0; }
 .launch { font-weight: 600; }
 
+/* the board: one column per card state; a narrow screen stacks them into one list */
+.board { display: grid; grid-template-columns: repeat(7, minmax(10.5rem, 1fr)); gap: .6rem; align-items: start; overflow-x: auto; }
+.board-column { background: var(--raised); border: 1px solid var(--line); border-radius: 6px; padding: .5rem; min-width: 0; }
+.board-column > header { display: flex; align-items: baseline; gap: .5rem; margin-bottom: .4rem; }
+.board-column > header h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0; }
+.board-column > header .count { font: .8rem var(--mono); color: var(--muted); }
+.board-column .empty { font-size: .8rem; margin: 0; }
+ol.tiles { list-style: none; margin: 0; padding: 0; display: grid; gap: .4rem; }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: .4rem .5rem; min-width: 0; }
+.tile p { margin: 0; }
+.tile-head { display: flex; align-items: baseline; gap: .4rem; }
+.tile-head .age { margin-left: auto; }
+.tile-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: .88rem; }
+.tile-meta, .tile-reason { font-size: .75rem; color: var(--muted); overflow-wrap: anywhere; }
+.tile-reason { color: var(--bad); }
+.tile-owner { border: 2px dashed var(--warn); }
+.tile-owner-label { font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--warn); }
+@media (max-width: 900px) { .board { grid-template-columns: minmax(0, 1fr); overflow-x: visible; } }
+
 /* the shared bottom bar: what each provider has left, on every page.
    Its height is reserved on the body rather than overlaid, so nothing a page draws -- the /po
    composer least of all -- ends up underneath it. The row never wraps: it scrolls sideways
