@@ -31,7 +31,7 @@ from ummanu.kernel.errors import TaskError
 from ummanu.runtime.head import TaskRef
 from ummanu.status import collect_status
 from ummanu.tasks import TaskReader, task_audit_for
-from ummanu.webproto import agents as agent_reads, head_view as head_reads, sources
+from ummanu.webproto import agents as agent_reads, board_view as board_reads, head_view as head_reads, sources
 from ummanu.webproto._values import _reason, _text
 from ummanu.webproto.boundary import ProtocolBoundary
 from ummanu.webproto.cursor import Cursor, decode
@@ -284,6 +284,18 @@ class ReadLayer(ProtocolBoundary):
             "source": sources.available(now).to_json(),
             "items": items,
         }
+
+    def board_view(self) -> dict[str, Any]:
+        """Every work card in its board column as one tile, from the board store alone.
+
+        The read has one guard: whatever fails it is the document's unavailable source and its
+        reason, so the board is shown as unreadable rather than refused.
+        """
+        now = self._clock()
+        try:
+            return board_reads.board_document(self._client(), now=now)
+        except Exception as exc:  # noqa: BLE001 -- the board read's one guard
+            return board_reads.unreadable(f"the board could not be read: {_reason(exc)}", now=now)
 
     def task_events(
         self, ref: str, cursor: str | None = None, *, limit: int = DEFAULT_LIMIT

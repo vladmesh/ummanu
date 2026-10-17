@@ -75,6 +75,7 @@ class Route:
 #: The whole externally reachable surface of this service.
 ROUTES: tuple[Route, ...] = (
     Route("GET", "/", "dashboard", "reads.system_snapshot", page=True),
+    Route("GET", "/board", "board_page", "reads.board_view", page=True),
     Route("GET", "/tasks/{ref}", "task_page", "reads.task_snapshot", page=True),
     # One of the card's local-pty heads, read-only; an unrecorded run id is 404.
     Route("GET", "/tasks/{ref}/heads/{run_id}", "head_page", "reads.head_view", page=True),
@@ -512,6 +513,9 @@ class WebApp:
         # A count only, so no token; an unavailable PO store just hides it.
         po = self._or_reason(self.po.po_running_count) if self.po is not None else None
         return _html(200, pages.dashboard(snapshot, pause=pause, sprints=sprints, po=po))
+
+    def _board_page(self, _params, _query, _body) -> Response:
+        return _html(200, pages.board(self.reads.board_view()))
 
     def _task_page(self, params, query, _body) -> Response:
         ref = params["ref"]

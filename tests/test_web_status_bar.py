@@ -119,6 +119,13 @@ class RouteFixture(unittest.TestCase):
         unreadable = InstallationUnavailable("not part of this test")
         self.reads = Recording(
             system_snapshot=snapshot_with_a_project(),
+            board_view={
+                "kind": "board",
+                "observed_at": "2026-09-20T12:00:00Z",
+                "source": available(),
+                "done_window_hours": 48,
+                "columns": [],
+            },
             task_snapshot={
                 "ref": "ummanu-9",
                 "observed_at": "2026-09-20T12:00:00Z",
@@ -258,6 +265,7 @@ class EveryPageCarriesTheBarTests(RouteFixture):
             walked,
             {
                 "/",
+                "/board",
                 "/tasks/ummanu-9",
                 "/tasks/ummanu-9/heads/r-1",
                 "/sprints",
@@ -537,7 +545,7 @@ class BarCostsNoExtraReadTests(RouteFixture):
                 bar = bar_of(self.get(path, app=app))
                 self.assertIn("74%", bar)
                 self.assertIn("41%", bar)
-        self.assertEqual(len(paths) * 5, 70, "the walk really did render many pages")
+        self.assertEqual(len(paths) * 5, 75, "the walk really did render many pages")
         self.assertEqual(self.fetched, [CLAUDE_USAGE_URL, CODEX_USAGE_URL])
 
     def test_the_next_cache_window_asks_once_more_and_not_once_per_page(self) -> None:

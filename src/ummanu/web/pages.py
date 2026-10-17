@@ -1,5 +1,6 @@
 """Public page renderers and request context entrypoints consumed by WebApp."""
 
+from ummanu.web.page_board import board as board
 from ummanu.web.page_card import head_view as head_view, po_sessions_named as po_sessions_named, task as task
 from ummanu.web.page_overview import (
     commands as commands,
