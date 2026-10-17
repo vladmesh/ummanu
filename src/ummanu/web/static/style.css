@@ -400,8 +400,7 @@ form.sprint .hint { color: var(--muted); font-size: .8rem; }
    page scrolls the header and filter away and leaves the board the viewport above the bar. A narrow
    screen stacks the columns into one list. Tile rules stay under .board: the sprint page owns .tiles
    and .tile */
-body.fit-viewport .top .row, body.fit-viewport main, body.fit-viewport .statusbar .row { max-width: none; }
-body.fit-viewport .statusbar .credits-pop { left: 12px; }
+body.fit-viewport .top .row, body.fit-viewport main { max-width: none; }
 .board-lead { align-items: center; gap: .5rem 1rem; margin-bottom: .5rem; }
 .board-filter { align-items: center; }
 .board-filter > div { display: flex; align-items: center; gap: .3rem; }
@@ -453,6 +452,7 @@ body.fit-viewport .statusbar .credits-pop { left: 12px; }
 body { padding-bottom: var(--bar-height); }
 .statusbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; height: var(--bar-height); background: var(--surface); border-top: 1px solid var(--line); }
 .statusbar .row { max-width: 1280px; margin: 0 auto; padding: 0 20px; height: 100%; display: flex; align-items: center; gap: 1.1rem; white-space: nowrap; overflow-x: auto; font-size: .78rem; color: var(--muted); }
+body.fit-viewport .statusbar .row { max-width: none; }
 .statusbar .lamp { display: inline-flex; align-items: center; gap: .4rem; padding: .1rem .55rem; border-radius: 999px; font-weight: 600; border: 1px solid transparent; }
 .statusbar .lamp::before { content: ""; width: .5rem; height: .5rem; border-radius: 50%; background: currentColor; }
 .statusbar .lamp:hover { text-decoration: none; filter: brightness(1.08); }
@@ -483,6 +483,7 @@ body { padding-bottom: var(--bar-height); }
 .statusbar details.credits > summary::-webkit-details-marker { display: none; }
 .statusbar details.credits > summary:hover, .statusbar details.credits[open] > summary { color: var(--ink); border-style: solid; }
 .statusbar .credits-pop { position: fixed; bottom: calc(var(--bar-height) + .5rem); left: max(12px, calc((100vw - 1280px) / 2 + 20px)); z-index: 7; display: grid; gap: .35rem; width: max-content; min-width: min(18rem, calc(100vw - 24px)); max-width: min(26rem, calc(100vw - 24px)); box-sizing: border-box; padding: .6rem .8rem; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.18); white-space: normal; font-family: var(--sans, inherit); color: var(--ink); }
+body.fit-viewport .statusbar .credits-pop { left: 12px; }
 .statusbar .credits-pop .pop-line { display: block; }
 .statusbar .credits-pop .pop-line.expires { color: var(--muted); font-variant-numeric: tabular-nums; }
 .statusbar .credits-pop .pop-line.warn { color: var(--warn); }
