@@ -84,7 +84,7 @@ def page(client: Any, path: str = "/board", *, instance: str = "/nonexistent/ins
 def columns(html: str) -> list[tuple[str, str, list[str]]]:
     """Each column in page order: its title, its count, and its tiles' markup."""
     found = []
-    for section in html.split('<section class="board-column"')[1:]:
+    for section in html.split('<section class="board-column')[1:]:
         title = re.search(r"<h2>(.*?)</h2>", section).group(1)
         count = re.search(r'<span class="count">(.*?)</span>', section).group(1)
         found.append((title, count, re.findall(r'<li class="tile.*?</li>', section, re.DOTALL)))
@@ -96,7 +96,7 @@ def tile_of(html: str, ref: str) -> str:
 
 
 def text(markup: str) -> str:
-    return unescape(re.sub(r"<[^>]+>", " ", markup))
+    return " ".join(unescape(re.sub(r"<[^>]+>", " ", markup)).split())
 
 
 class ColumnTests(unittest.TestCase):
@@ -129,6 +129,27 @@ class ColumnTests(unittest.TestCase):
         ready = [re.search(r'href="/tasks/([^"]+)"', tile).group(1) for tile in shown[1][2]]
         self.assertEqual(ready, ["u-3", "u-2", "u-1"])
 
+    def test_a_column_without_cards_is_marked_empty_and_a_column_with_cards_is_not(self) -> None:
+        _status, html = page(BoardClient([row("u-1", "ready"), row("u-2", "done")]))
+        marked = re.findall(r'<section class="board-column( board-column-empty)?" aria-label="([^:]+):', html)
+        self.assertEqual(
+            [(title, bool(empty)) for empty, title in marked],
+            [
+                ("Issues", True),
+                ("Ready", False),
+                ("In progress", True),
+                ("Validate", True),
+                ("Assessment", True),
+                ("Blocked", True),
+                ("Done", False),
+            ],
+        )
+
+    def test_the_board_page_alone_fits_the_viewport(self) -> None:
+        body = re.compile(r"<body[^>]*>")
+        self.assertEqual(body.findall(page(BoardClient())[1]), ['<body class="fit-viewport">'])
+        self.assertEqual(body.findall(page(BoardClient(), "/sprints")[1]), ["<body>"])
+
     def test_the_read_asks_for_done_since_the_window_and_the_header_links_the_board(self) -> None:
         client = BoardClient()
         _status, html = page(client)
@@ -152,6 +173,13 @@ class TileTests(unittest.TestCase):
         self.assertIn(">3h</span>", linked)
         outside = text(tile_of(html, "u-2"))
         self.assertIn("research · codegen · вне спринта", outside)
+
+    def test_each_metadata_item_is_one_unbreakable_item(self) -> None:
+        client = BoardClient([row("u-1", "ready", project="codegen-orchestrator", sprint=None, type="code")])
+        _status, html = page(client)
+        meta = re.search(r'<p class="tile-meta">.*?</p>', tile_of(html, "u-1")).group(0)
+        items = re.findall(r'<span class="meta-item">(.*?)</span>(?: · |</p>)', meta)
+        self.assertEqual([text(item) for item in items], ["code", "codegen-orchestrator", "вне спринта", "—"])
 
     def test_the_head_is_the_worker_in_progress_the_reviewer_in_validate_and_none_elsewhere(self) -> None:
         heads = {
@@ -199,10 +227,12 @@ class TileTests(unittest.TestCase):
             ]
         )
         _status, html = page(client)
-        reason = re.compile(r'<p class="tile-reason">(.*?)</p>')
-        self.assertEqual(reason.findall(tile_of(html, "u-1")), ["red gate on the same SHA"])
-        self.assertEqual(reason.findall(tile_of(html, "u-2")), ["reason not recorded"])
-        self.assertEqual(reason.findall(tile_of(html, "u-3")), ["reason not recorded"])
+        reason = re.compile(r'<p class="tile-reason" title="([^"]*)">(.*?)</p>')
+        self.assertEqual(
+            reason.findall(tile_of(html, "u-1")), [("red gate on the same SHA", "red gate on the same SHA")]
+        )
+        self.assertEqual(reason.findall(tile_of(html, "u-2")), [("reason not recorded", "reason not recorded")])
+        self.assertEqual(reason.findall(tile_of(html, "u-3")), [("reason not recorded", "reason not recorded")])
         self.assertEqual(reason.findall(tile_of(html, "u-4")), [])
 
     def test_a_card_handed_to_the_owner_has_a_marked_tile_with_a_text_label(self) -> None:
@@ -376,7 +406,7 @@ class TotalityTests(unittest.TestCase):
                 notice = re.search(r'<p class="unavailable"><b>board not readable:</b> (.*?)</p>', html)
                 self.assertTrue(notice.group(1).startswith("the board could not be read: "), html)
                 self.assertIn(said, unescape(notice.group(1)))
-                self.assertNotIn('<section class="board-column"', html)
+                self.assertNotIn('<section class="board-column', html)
 
     def test_hostile_rows_render_a_tile_with_honest_placeholders(self) -> None:
         cases: list[tuple[str, dict[str, Any], list[str]]] = [
