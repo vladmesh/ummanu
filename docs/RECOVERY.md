@@ -230,8 +230,8 @@ split, so a checkpoint's Git cost follows what changed instead of the size of th
   that does not extend the committed one (the first split checkpoint after a flat one, or rewritten
   history) is replaced from its first segment. Segments are cut at line ends and hold at most 32 MiB
   unless one line is longer, so no blob reaches the 100 MB file limit of the GitHub remote.
-- `export.json`, `origin_returns.ndjson`, `owner_events.ndjson`, `po_sql.json` and `po_notes.json`
-  stay single files.
+- `export.json`, `origin_returns.ndjson`, `owner_events.ndjson`, `po_sql.json`, `po_notes.json` and
+  `po_queue.ndjson` stay single files.
   These payloads contain mutable state and are read through the same flat/split reader.
 - A logical file's bytes are the concatenation of its parts in index order; a gap in the sequence or
   an unexpected entry is a broken checkpoint, not a shorter one.
@@ -1140,6 +1140,52 @@ the final status gate name a captured file without parity, never legacy unavaila
 absence. The notes phase is a filesystem step with its own retry: it is not part of any SQL
 transaction and is not rolled back with one.
 
+### PO queue capture
+
+`<data>/po-queue/` is the PO service's input queue (`po.queue.PoQueue`): one JSON document per input
+not yet taken as a turn, named so that name order is submission order, and under `refused/` the
+inputs it set aside, each with the input's fields plus `reason`. Every queue write (`put`, `remove`,
+`refuse`, from submit, sprint-session seeding, hand-over and its refusal and failure paths) takes the
+installation's PO recovery target lock, the same reentrant lock PO admission, runner claims and
+settles take. The board export takes that lock before the bulk lane and the PO SQL snapshot, reads
+the PO SQL rows as the snapshot's first statements, captures the queue, and releases the lock before
+the remaining board reads, serialization, scans, publication and Git. Lock order is target lock,
+then bulk lane, then SQL, in the exporter as in the runner and service; nothing waits for a turn's
+process. A claim or queue write therefore lands either wholly before the cut or wholly after it.
+
+The capture reads the queue directory and `refused/` beneath descriptors without following links.
+Its inputs are the regular files whose names end in `.json` and do not start with a dot; dot files
+are in-flight temporaries and other regular files are not inputs. A symlink, a non-regular entry, or
+an input that is not UTF-8, has a duplicate field or a non-finite number, or does not have exactly
+the fields the queue writes (`session_id`, `text`, `request_id`, `source` of `web`, `dispatcher` or
+`po-service`, `queued_at`; optional `card` and `metadata` objects and `note`; `reason` only in
+`refused/`) refuses the export without quoting content, and the previous local export and committed
+checkpoint stay as they were. `card` and `metadata` contents are kept as data whatever they hold.
+
+`po_queue.ndjson` holds one line `{"document", "name", "section"}` per input, pending ones then
+refused ones, each in name order, with the whole parsed document. `export.json` declares `po_queue`
+version `1`: `directory` (`present`, or `absent` when the source had no queue directory, with zero
+inputs), `pending` and `refused` counts, `bytes` and `sha256` of the payload, and `po_sql_sha256`,
+which must equal the `po_sql` digest of the same export. A declared capture always has its payload,
+empty for an empty queue; a checkpoint without the declaration and without the payload predates the
+capability and reports `checkpoint has no PO queue coverage; pending and refused PO inputs are
+unavailable`. Staging, snapshot verification and materialization refuse an undeclared payload, a
+missing payload, a count, digest or binding mismatch, an unknown version, a duplicate field, an
+unsafe name and records out of section or name order. The board export scans every decoded field
+of every input with the instance's redaction values and `runtime.env` before it replaces the local
+export, and the checkpoint scans them again with the escaped file before commit/push; a hit names
+only section, record ordinal and field.
+
+The capture is the source facts, not a reconciliation: an input whose request id the PO SQL capture
+already holds (its claim committed before its removal), an input with no request row, and a refused
+copy beside its still pending input after an interrupted refusal are all kept as they were.
+Materialization writes the payload to `<data>/board/po_queue.ndjson` as inert data. Restore validates
+it, writes no `<data>/po-queue/` file, claims no request and starts no turn; queue execution and
+reconciliation are not restored. `restore-state.json` and `restore-board` expose
+`po_queue_coverage` (`captured`, `absent` or `unavailable`), `po_queue_pending`, `po_queue_refused`
+and `po_queue_diagnostic`; recovery reports the diagnostic as `po-queue`. Doctor and the final status
+gate raise no finding for it.
+
 ### PO SQL restore
 
 `recover` and `restore-board` share `restore.restore_po(data_dir, source=..., instance=...,
@@ -1360,9 +1406,10 @@ rewritten. Request-id replay returns its recorded turn without spawning. Ordinar
 their existing resume, recovery and fallback behavior. Automatic provider switching is disabled for
 explicitly restored sessions so it cannot discard the recorded native binding.
 
-Reconciliation of uncertain external effects is not automated. Pending/refused inputs in
-`<data>/po-queue/` and images under `<data>/po/sessions/<id>/attachments/` are not transported. SQL
-parity, prepared contexts and restored notes do not establish full PO recovery readiness.
+Reconciliation of uncertain external effects is not automated. Pending/refused inputs travel only
+as the inert [PO queue capture](#po-queue-capture); images under
+`<data>/po/sessions/<id>/attachments/` are not transported. SQL parity, prepared contexts, restored
+notes and the captured queue do not establish full PO recovery readiness.
 
 Released v1/v2 checkpoints lacking both declaration and file remain supported and report
 `checkpoint has no PO SQL coverage; sessions, turns, feed and request bindings are unavailable`.

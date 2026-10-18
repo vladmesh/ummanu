@@ -94,7 +94,7 @@ def split_board(board: Path) -> None:
         for name in LOGICAL_FILES:
             source = board / name
             if (
-                name in {"origin_returns.ndjson", "po_sql.json", "owner_events.ndjson", "po_notes.json"}
+                name in {"origin_returns.ndjson", "po_sql.json", "owner_events.ndjson", "po_notes.json", "po_queue.ndjson"}
                 and not source.exists()
             ):
                 continue

@@ -279,6 +279,7 @@ unit tests/test_origin_checkpoint.py
 unit tests/test_close_checkpoint.py
 unit tests/test_po_checkpoint.py
 unit tests/test_po_notes_checkpoint.py
+unit tests/test_po_queue_checkpoint.py
 unit tests/test_po_restore.py
 unit tests/test_po_restore_plan.py
 unit tests/test_po_restored_context.py

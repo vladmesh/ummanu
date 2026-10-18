@@ -47,13 +47,16 @@ LOGICAL_FILES = (
     "po_sql.json",
     "owner_events.ndjson",
     "po_notes.json",
+    "po_queue.ndjson",
 )
 #: Logical files stored one record per file in the split layout: records change in place.
 RECORD_FILES = {"cards.ndjson": ("cards", ".json"), "sprints.ndjson": ("sprints", ".json")}
 #: Logical files stored as immutable segments in the split layout: they only ever grow.
 SEGMENT_FILES = {"audit.ndjson": ("audit", ".ndjson"), "events.ndjson": ("events", ".ndjson")}
 #: Logical files that stay single files in the split layout.
-SINGLE_FILES = ("export.json", "origin_returns.ndjson", "po_sql.json", "owner_events.ndjson", "po_notes.json")
+SINGLE_FILES = (
+    "export.json", "origin_returns.ndjson", "po_sql.json", "owner_events.ndjson", "po_notes.json", "po_queue.ndjson"
+)
 
 # Parts are grouped a thousand to a directory so no single Git tree grows with the board.
 _PER_DIRECTORY = 1000

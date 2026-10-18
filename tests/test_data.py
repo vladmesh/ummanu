@@ -5,6 +5,7 @@ import os
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -25,6 +26,7 @@ from ummanu.board.owner_checkpoint import read_checkpoint_owner_events, require_
 from ummanu.board.owner_events import OwnerEventStore
 from ummanu.board.po_checkpoint import PO_FILE, read_checkpoint_po
 from ummanu.board.po_notes_checkpoint import NOTES_CHECKPOINT_FILE, NotesCapture, read_checkpoint_notes
+from ummanu.board.po_queue_checkpoint import read_checkpoint_queue
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.data import (
@@ -52,6 +54,9 @@ from ummanu.memory_write import (
     propose_memory_fact,
     supersede_memory_fact,
 )
+from ummanu.po import recovery_admission
+from ummanu.po.queue import PoQueue
+from ummanu.po.recovery_admission import PoRecoveryAdmission
 from ummanu.po.workspace import NOTES_FILE, workspace_dir
 from ummanu.sprint_observer import none_choice
 from ummanu.sprints import SPRINT_BOARD_NAME, SprintWriter
@@ -245,6 +250,62 @@ class ExportTests(unittest.TestCase):
             self.assertNotIn("private", str(failure.exception))
             after = {path.name: path.read_bytes() for path in (root / "board").iterdir() if path.is_file()}
             self.assertEqual(before, after)
+
+    def test_a_claim_and_dequeue_at_the_boundary_wait_for_the_coherent_po_queue_cut(self):
+        """A claim committed by another connection after the cut began is neither in the rows nor
+        dequeued in the capture; the next cut holds the claim and no longer the input."""
+        seed_po(self.store, po_records())
+        other = SqlCardClient(self.store.credentials, self.store.instance_dir)
+        self.addCleanup(other.close)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            queue = PoQueue(root)
+            queue.put(session_id="open", text="claimed before a crash", request_id="send", source="web")
+            waiting = queue.put(session_id="empty", text="next", request_id="next-send", source="web")
+            admission = PoRecoveryAdmission(root, mock.Mock())
+
+            def claim_then_dequeue():
+                with admission.mutation(), other.transaction():
+                    other._execute("INSERT INTO po_turns (session_id, seq, started_at, state, stdout_path) "
+                                   "VALUES ('empty', 1, %s, 'running', '/new/stdout')", (MOMENT,))
+                    other._execute("INSERT INTO po_requests (request_id, operation, fingerprint, session_id, seq, "
+                                   "created_at) VALUES ('next-send', 'po_send', %s, 'empty', 1, %s)", ("a" * 64, MOMENT))
+                queue.remove(waiting)
+
+            writer = threading.Thread(target=claim_then_dequeue)
+            arrived = threading.Event()
+            real_lock = recovery_admission.directory_lock
+
+            def lock(path):
+                if threading.current_thread() is writer:
+                    arrived.set()
+                return real_lock(path)
+
+            original = self.store._query
+
+            def start_writer_in_window(query, *args, **kwargs):
+                if "FROM po_sessions" in query and not arrived.is_set():
+                    writer.start()
+                    self.assertTrue(arrived.wait(30))
+                return original(query, *args, **kwargs)
+
+            reader = TaskExportReader(client=self.store)
+            with (
+                mock.patch.object(recovery_admission, "directory_lock", side_effect=lock),
+                mock.patch.object(self.store, "_query", side_effect=start_writer_in_window),
+            ):
+                export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
+            writer.join(30)
+            self.assertFalse(writer.is_alive())
+            for expected_inputs, claimed in ((["send", "next-send"], False), (["send"], True)):
+                captured = read_checkpoint_queue(root / "board")
+                requests = {row["request_id"] for row in read_checkpoint_po(root / "board")["po_requests"]}
+                summary = json.loads((root / "board" / "export.json").read_text())
+                self.assertEqual([item.document["request_id"] for item in captured.capture.inputs], expected_inputs)
+                self.assertIn("send", requests)
+                self.assertEqual("next-send" in requests, claimed)
+                self.assertEqual(captured.po_sql_sha256, summary["po_sql"]["sha256"])
+                export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
 
     def test_board_cut_preserves_all_bell_rows_with_stable_tie_order(self):
         rows = bell_rows(513)

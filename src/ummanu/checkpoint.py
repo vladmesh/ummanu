@@ -82,6 +82,12 @@ from ummanu.board.po_notes_checkpoint import (
     read_checkpoint_notes,
     scan_notes_secrets,
 )
+from ummanu.board.po_queue_checkpoint import (
+    QUEUE_CHECKPOINT_FILE,
+    PoQueueCheckpointError,
+    read_checkpoint_queue,
+    scan_queue_secrets,
+)
 from ummanu.data import (
     PIPELINE_STATE_DIR,
     export_board,
@@ -122,6 +128,7 @@ BOARD_ENTRIES = (
     OWNER_FILE,
     PO_FILE,
     NOTES_CHECKPOINT_FILE,
+    QUEUE_CHECKPOINT_FILE,
     "cards.ndjson",
     "sprints.ndjson",
     "events.ndjson",
@@ -372,7 +379,10 @@ def _analytics_checkpoint_id(entries: list[dict[str, Any]]) -> str:
 
 def _verify_analytics_directory_files(root: Path, board: CheckpointBoard, files: tuple[str, ...]) -> None:
     if board.layout == FLAT:
-        allowed = {*files, OUTBOX_FILE, OWNER_FILE, PO_FILE, NOTES_CHECKPOINT_FILE, ANALYTICS_MANIFEST, ".gitignore"}
+        allowed = {
+            *files, OUTBOX_FILE, OWNER_FILE, PO_FILE, NOTES_CHECKPOINT_FILE, QUEUE_CHECKPOINT_FILE,
+            ANALYTICS_MANIFEST, ".gitignore",
+        }
     else:
         allowed = {*board.physical_entries(), ANALYTICS_MANIFEST, ".gitignore"}
     try:
@@ -393,7 +403,11 @@ def _verify_analytics_export_summary(board: CheckpointBoard) -> None:
         read_checkpoint_close_facts(board.directory)
         read_checkpoint_po(board.directory)
         read_checkpoint_notes(board.directory)
-    except (OriginCheckpointError, OwnerCheckpointError, PoCheckpointError, CloseCheckpointError, PoNotesError) as exc:
+        read_checkpoint_queue(board.directory)
+    except (
+        OriginCheckpointError, OwnerCheckpointError, PoCheckpointError, CloseCheckpointError, PoNotesError,
+        PoQueueCheckpointError,
+    ) as exc:
         raise AnalyticsManifestError(str(exc)) from None
     export_path = board.path("export.json")
     try:
@@ -1404,6 +1418,13 @@ class SnapshotExporter(CheckpointWriter):
                         text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values)
                     )
                 except PoNotesError as exc:
+                    raise CheckpointBlocked(str(exc)) from None
+            if path == f"state/board/{QUEUE_CHECKPOINT_FILE}":
+                try:
+                    scan_queue_secrets(
+                        text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values)
+                    )
+                except PoQueueCheckpointError as exc:
                     raise CheckpointBlocked(str(exc)) from None
             if redact(text, env_files=[runtime_env], secret_values=secret_values) != text:
                 hits.append(path)
@@ -2510,6 +2531,13 @@ def _scan_for_secrets(
                 )
             except PoNotesError as exc:
                 raise CheckpointBlocked(str(exc)) from None
+        if component == "board" and entry == QUEUE_CHECKPOINT_FILE:
+            try:
+                scan_queue_secrets(
+                    text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values)
+                )
+            except PoQueueCheckpointError as exc:
+                raise CheckpointBlocked(str(exc)) from None
         # Scan against this installation rather than the process home default:
         # a recovery/doctor can intentionally point at another instance, and a
         # credential in that instance must still fail closed.
@@ -2536,7 +2564,11 @@ def _validate_board(
         read_checkpoint_close_facts(staging)
         read_checkpoint_po(staging)
         read_checkpoint_notes(staging)
-    except (OriginCheckpointError, OwnerCheckpointError, PoCheckpointError, CloseCheckpointError, PoNotesError) as exc:
+        read_checkpoint_queue(staging)
+    except (
+        OriginCheckpointError, OwnerCheckpointError, PoCheckpointError, CloseCheckpointError, PoNotesError,
+        PoQueueCheckpointError,
+    ) as exc:
         raise CheckpointBlocked(str(exc)) from None
     summary = _read_json(staging / "export.json", "board export.json")
     declared = _int_field(summary, "card_count", "board export.json")

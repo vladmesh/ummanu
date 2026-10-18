@@ -9,6 +9,7 @@ from unittest import mock
 from ummanu._fsutil import write_json
 from ummanu.board.po_checkpoint import PO_FILE, po_coverage
 from ummanu.board.po_notes_checkpoint import NOTES_CHECKPOINT_FILE, write_notes_capture
+from ummanu.board.po_queue_checkpoint import write_queue_capture
 from ummanu.po.store import send_fingerprint, session_fingerprint, sprint_session_fingerprint
 
 MOMENT = "2026-09-01T01:00:00.000001Z"
@@ -66,6 +67,14 @@ def write_notes(board, content):
     summary_path = board / "export.json"
     summary = json.loads(summary_path.read_text())
     summary["po_notes"] = write_notes_capture(board, content)
+    write_json(summary_path, summary)
+
+
+def write_queue(board, capture):
+    """Declare a PO queue capture bound to the board's PO SQL coverage, as `export_board` does."""
+    summary_path = board / "export.json"
+    summary = json.loads(summary_path.read_text())
+    summary["po_queue"] = write_queue_capture(board, capture, summary["po_sql"]["sha256"])
     write_json(summary_path, summary)
 
 

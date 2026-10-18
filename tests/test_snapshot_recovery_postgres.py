@@ -69,6 +69,11 @@ from ummanu.board.po_notes_checkpoint import (
     NotesCapture,
     read_checkpoint_notes,
 )
+from ummanu.board.po_queue_checkpoint import (
+    LEGACY_QUEUE_COVERAGE,
+    QUEUE_CHECKPOINT_FILE,
+    read_checkpoint_queue,
+)
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.board.store import BoardStoreConfig
@@ -88,6 +93,7 @@ from ummanu.installation.materialize import materialize_checkpoint
 from ummanu.memory import client_config
 from ummanu.memory_journal import export_memory_snapshot, verify_memory_journal
 from ummanu.po import workspace as po_workspace
+from ummanu.po.queue import PoQueue, queue_dir
 from ummanu.po.recovery_admission import PoRecoveryAdmission
 from ummanu.po.runner import PoRunner
 from ummanu.po.store import COMPLETED, INTERRUPTED, PoStore
@@ -315,6 +321,20 @@ class _SnapshotRecoveryCase(unittest.TestCase):
         seed_po(po_client, po_records())
         workspace_dir(data_dir).mkdir()
         (workspace_dir(data_dir) / NOTES_FILE).write_bytes(SOURCE_NOTES)
+        # The PO queue as its own writer leaves it: an input whose claim committed before its
+        # removal, unclaimed inputs from the dispatcher and the service, and a refused one.
+        queue = PoQueue(data_dir)
+        queue.put(session_id="open", text=po_records()["po_feed"][0]["text"], request_id="send", source="web")
+        queue.put(session_id="open", text="operate demo-1", request_id="queued-card", source="dispatcher",
+                  card={"card_ref": "ummanu-1", "kind": "operation", "input": "card"},
+                  note="Production rights: none.", metadata={"source": "dispatcher", "summary": "ummanu-1 (operation)",
+                                                             "sprint_ref": SPRINTS[1], "comment_position": 1})
+        queue.put(session_id="empty", text="Sprint context", request_id="queued-seed", source="po-service",
+                  metadata={"source": "po-service", "summary": "Sprint session context", "seed_sources": []})
+        closed = queue.put(session_id="closed", text="for a closed session", request_id="refused-input",
+                           source="web", metadata={"attachments": ["shot.png"]})
+        queue.refuse(closed, "PO session closed is closed; open a new session to continue")
+        self.source_queue = queue.capture()
         self.source_kinds = self._kinds(source, data_dir, self.source_config)
 
     def _kinds(self, instance: Path, data_dir: Path, config: BoardStoreConfig) -> dict[str, object]:
@@ -453,6 +473,21 @@ class _SnapshotRecoveryCase(unittest.TestCase):
         return po_workspace.materialize(product, data_dir).changed
 
 
+    def _assert_inert_queue(self, steps: dict[str, tuple[str, str]], data_dir: Path, po: PoStore) -> None:
+        """The source queue arrives whole as board data; nothing queued, claimed or run on the target."""
+        captured = read_checkpoint_queue(data_dir / "board")
+        self.assertEqual(captured.capture, self.source_queue)
+        self.assertEqual(captured.counts(), (3, 1))
+        self.assertEqual(steps["po-queue"], ("unchanged", captured.describe()))
+        state = restore_state(data_dir)
+        self.assertEqual((state["po_queue_coverage"], state["po_queue_pending"], state["po_queue_refused"]),
+                         ("captured", 3, 1))
+        self.assertFalse(queue_dir(data_dir).exists())
+        for request_id in ("queued-card", "queued-seed", "refused-input"):
+            self.assertIsNone(po.request(request_id))
+        self.assertEqual(PoQueue(self.fixture.source_data).capture(), self.source_queue)
+
+
 class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
     def test_legacy_recovery_and_retry_keep_coverage_descriptive_through_the_status_gate(self):
         board = self.fixture.source_data / "board"
@@ -462,6 +497,8 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         summary.pop("sprint_close")
         summary.pop("po_notes")
         (board / NOTES_CHECKPOINT_FILE).unlink()
+        summary.pop("po_queue")
+        (board / QUEUE_CHECKPOINT_FILE).unlink()
         for name in ("sprints.json", "sprints.ndjson"):
             path = board / name
             if name.endswith(".ndjson"):
@@ -478,6 +515,7 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         (board / OWNER_FILE).unlink()
         self.assertIsNone(read_checkpoint_owner_events(board))
         self.assertIsNone(read_checkpoint_notes(board))
+        self.assertIsNone(read_checkpoint_queue(board))
         canon = self.fixture.source / "heads" / "heads.toml"
         canon.write_text(
             canon.read_text().replace("fallback = []", 'fallback = ["legacy-fallback"]')
@@ -516,6 +554,11 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
                 notes_step = next(step for step in machine["steps"] if step["name"] == "po-notes")
                 self.assertEqual((notes_step["status"], notes_step["detail"]), ("unchanged", LEGACY_NOTES_COVERAGE))
                 self.assertFalse((workspace_dir(data_dir) / NOTES_FILE).exists())
+                self.assertEqual((state["po_queue_coverage"], state["po_queue_diagnostic"]),
+                                 ("unavailable", LEGACY_QUEUE_COVERAGE))
+                queue_step = next(step for step in machine["steps"] if step["name"] == "po-queue")
+                self.assertEqual((queue_step["status"], queue_step["detail"]), ("unchanged", LEGACY_QUEUE_COVERAGE))
+                self.assertIsNone(read_checkpoint_queue(data_dir / "board"))
                 self.assertEqual(state["sprint_close_coverage"], "unavailable")
                 self.assertEqual(state["sprint_close_parity"], "unavailable")
                 self.assertEqual(state["sprint_close_diagnostic"], LEGACY_CLOSE_COVERAGE)
@@ -763,6 +806,7 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertEqual((notes.stat().st_mode & 0o777, notes.stat().st_uid), (0o600, os.getuid()))
         self.assertNotIn(NOTES_FILE, self._materialize_po_workspace(data_dir.resolve()))
         self.assertEqual(notes.read_bytes(), SOURCE_NOTES)
+        self._assert_inert_queue(steps, data_dir, po)
         # The closed card on the retired id is back as the tree exported it: placement and project.
         exported = next(
             card
@@ -934,6 +978,7 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertEqual(notes.stat().st_mode & 0o777, 0o600)
         po = PoStore(self.target_config.for_role("app"))
         self.addCleanup(po.close)
+        self._assert_inert_queue(steps, data_dir, po)
         seen_notes = []
 
         def launch(session, seq, argv, files, environment, spec):
@@ -956,6 +1001,7 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         steps = {step.name: (step.status, step.detail) for step in again.steps}
         self.assertEqual(again.status, "ok", f"{again.render()}\nrefused store batches: {refused}")
         self.assertEqual(steps["po-notes"], ("unchanged", RESTORED_NOTES_COVERAGE))
+        self._assert_inert_queue(steps, data_dir, po)
         self.assertEqual(notes.read_bytes(), SOURCE_NOTES)
         self.assertEqual(notes.stat().st_mode & 0o777, 0o600)
 
@@ -988,6 +1034,50 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertEqual({path.name: path.read_bytes() for path in board.iterdir() if path.is_file()}, before)
         self.assertEqual(git(repository, "rev-parse", SNAPSHOT_REF), tip)
         self.assertEqual(git(repository, "cat-file", "blob", f"{tip}:state/board/{NOTES_CHECKPOINT_FILE}"), committed)
+
+    def test_a_secret_or_unsafe_queue_input_keeps_the_live_export_and_the_committed_cut(self) -> None:
+        """Escaped secrets in a queued input and a symlinked input both refuse before any replacement."""
+        source, source_data = self.fixture.source, self.fixture.source_data
+        board = source_data / "board"
+        before = {path.name: path.read_bytes() for path in board.iterdir() if path.is_file()}
+        repository = self.fixture.source_snapshot
+        tip = git(repository, "rev-parse", SNAPSHOT_REF)
+        committed = git(repository, "cat-file", "blob", f"{tip}:state/board/{QUEUE_CHECKPOINT_FILE}")
+        secret = 'private"known\\secret-value'
+        with (source / "runtime.env").open("a", encoding="utf-8") as runtime_env:
+            runtime_env.write(f"EXAMPLE_TOKEN={secret}\n")
+        queue = PoQueue(source_data)
+        pasted = queue.put(session_id="open", text="clean text", request_id="pasted", source="web",
+                           metadata={"attachments": [f"pasted {secret}"]})
+        outside = self.root / "outside-input.json"
+        outside.write_text(json.dumps({**pasted.document(), "text": "private outside"}), encoding="utf-8")
+
+        def unsafe() -> None:
+            queue.remove(pasted)
+            (queue_dir(source_data) / pasted.name).symlink_to(outside)
+
+        for label, damage, reason in (
+            ("secret", lambda: None, "secret detected in PO queue pending record 3 field metadata"),
+            ("symlink", unsafe, "PO queue capture refuses pending entry"),
+        ):
+            with self.subTest(source=label):
+                damage()
+                result = SnapshotExporter(
+                    source_data,
+                    source,
+                    snapshot_repo=repository,
+                    product_revision=REVISION,
+                    board_schema_head=head_revision(),
+                    state_dir=self.root / "source-pipeline-state",
+                ).write()
+                self.assertEqual(result.status, "blocked", result.reason)
+                self.assertIn(reason, result.reason)
+                self.assertNotIn("private", result.reason)
+                self.assertEqual({path.name: path.read_bytes() for path in board.iterdir() if path.is_file()}, before)
+                self.assertEqual(git(repository, "rev-parse", SNAPSHOT_REF), tip)
+                self.assertEqual(
+                    git(repository, "cat-file", "blob", f"{tip}:state/board/{QUEUE_CHECKPOINT_FILE}"), committed
+                )
 
     def test_locked_runtime_secrets_restore_board_and_po_sql_but_skip_activation(self) -> None:
         self.assertEqual(self._bootstrap()[0], 0)

@@ -195,17 +195,18 @@ def scan_po_secrets(text: str, scrub: Callable[[str], str]) -> None:
             for field, value in row.items():
                 serialized = json.dumps(value, ensure_ascii=False)
                 raw = value if isinstance(value, str) else serialized
-                if scrub(raw) != raw or scrub(serialized) != serialized or _nested_secret(value, scrub):
+                if scrub(raw) != raw or scrub(serialized) != serialized or nested_secret(value, scrub):
                     raise PoCheckpointError(f"secret detected in PO SQL {table} record {index} field {field}")
     if scrub(text) != text:
         raise PoCheckpointError("secret detected in PO SQL file structure")
 
 
-def _nested_secret(value: Any, scrub: Callable[[str], str]) -> bool:
+def nested_secret(value: Any, scrub: Callable[[str], str]) -> bool:
+    """Whether any decoded string, mapping key or nested item changes under `scrub`."""
     if isinstance(value, str):
         return scrub(value) != value
     if isinstance(value, dict):
-        return any(_nested_secret(key, scrub) or _nested_secret(item, scrub) for key, item in value.items())
+        return any(nested_secret(key, scrub) or nested_secret(item, scrub) for key, item in value.items())
     if isinstance(value, list):
-        return any(_nested_secret(item, scrub) for item in value)
+        return any(nested_secret(item, scrub) for item in value)
     return False
