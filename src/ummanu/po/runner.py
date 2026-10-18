@@ -28,6 +28,7 @@ from ummanu.head_health import HeadHealth, failure_status, failure_until, until_
 from ummanu.head_registry import HeadRegistryConfigError, installed_pair
 from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV
 from ummanu.po.models import DEFAULT_EFFORTS, EffortRefused, require_explicit_effort
+from ummanu.po.recovery_admission import PoRecoveryAdmission
 from ummanu.po.restore_context import UNCERTAIN, RestoredContexts
 from ummanu.po.store import (
     CLIS,
@@ -328,6 +329,7 @@ class PoRunner:
         # Told (session id, seq) after a waiter settled a turn: the PO service starts the next input.
         self.on_settled = on_settled
         self.data_dir = Path(data_dir)
+        self.admission = PoRecoveryAdmission(self.data_dir, store)
         self.restored_contexts = RestoredContexts(self.data_dir, store)
         self.workspace = workspace_dir(self.data_dir)
         self.runs = runs_dir(self.data_dir)
@@ -441,7 +443,7 @@ class PoRunner:
         The running-row transition is idempotent. Owner interruption overrides only uncommitted
         intent; the runner lock also serializes unscoped turns.
         """
-        with self._lock:
+        with self.admission.locked(), self._lock:
             owner = ScopedHeadLifecycle.from_run_dir(self._scope_dir(session_id, seq))
             if owner is None:
                 if not settle or proposed is None:
@@ -483,7 +485,7 @@ class PoRunner:
         self, records: dict[str, list[dict[str, Any]]], plan: PoRestorePlan,
     ) -> None:
         """Prepare imported sessions against their persisted frozen plan; never import or launch."""
-        with self._lock:
+        with self.admission.locked(), self._lock:
             self.restored_contexts.prepare(records, plan)
 
     def create_session(
@@ -534,31 +536,32 @@ class PoRunner:
         fingerprint: str | None = None,
         title: str | None = None,
     ) -> tuple[Session, bool]:
-        if cli not in CLIS:
-            raise RunnerError(f"a PO session runs {' or '.join(CLIS)}, not {cli!r}")
-        if not model.strip():
-            raise RunnerError("a PO session needs a model")
-        try:
-            effort = require_explicit_effort(cli, effort, self.efforts if efforts is None else efforts)
-        except EffortRefused as exc:
-            raise RunnerError(str(exc)) from None
-        if cli == "codex":
+        with self.admission.mutation():
+            if cli not in CLIS:
+                raise RunnerError(f"a PO session runs {' or '.join(CLIS)}, not {cli!r}")
+            if not model.strip():
+                raise RunnerError("a PO session needs a model")
             try:
-                self.codex_home()
-            except CodexHomeLoginMissing as exc:
-                raise RunnerError(f"a codex PO session cannot start: {exc}") from None
-        return self.store.claim_session(
-            session_id=str(uuid.uuid4()),
-            cli=cli,
-            model=model.strip(),
-            cwd=str(self.workspace),
-            cli_session_id=str(uuid.uuid4()) if cli == "claude" else None,
-            request_id=request_id,
-            effort=effort,
-            operation=operation,
-            fingerprint=fingerprint,
-            title=title,
-        )
+                effort = require_explicit_effort(cli, effort, self.efforts if efforts is None else efforts)
+            except EffortRefused as exc:
+                raise RunnerError(str(exc)) from None
+            if cli == "codex":
+                try:
+                    self.codex_home()
+                except CodexHomeLoginMissing as exc:
+                    raise RunnerError(f"a codex PO session cannot start: {exc}") from None
+            return self.store.claim_session(
+                session_id=str(uuid.uuid4()),
+                cli=cli,
+                model=model.strip(),
+                cwd=str(self.workspace),
+                cli_session_id=str(uuid.uuid4()) if cli == "claude" else None,
+                request_id=request_id,
+                effort=effort,
+                operation=operation,
+                fingerprint=fingerprint,
+                title=title,
+            )
 
     def files(self, session_id: str, seq: int) -> TurnFiles:
         directory = self.runs / session_id
@@ -647,7 +650,9 @@ class PoRunner:
         if not text.strip():
             raise RunnerError("an empty message starts no turn")
         prompt = f"{text.rstrip()}\n\n{note.strip()}\n" if note and note.strip() else text
-        with self._lock:
+        with self.admission.mutation(), self._lock:
+            if request_id is None or self.store.request(request_id) is None:
+                self.restored_contexts.admit(session_id)
             turn, created = self.store.claim_turn(
                 session_id,
                 text,
@@ -819,7 +824,7 @@ class PoRunner:
 
     def _interrupt(self, session_id: str, seq: int | None) -> Turn | None:
         session = self.store.session(session_id)
-        with self._lock:
+        with self.admission.mutation(), self._lock:
             running = self.store.running_turns(session_id)
             if not running or (seq is not None and running[0].seq != seq):
                 return None
@@ -830,11 +835,10 @@ class PoRunner:
                 _kill_group(live.process.pid)
             elif not scoped and turn.pid and turn.process_identity and process_identity(turn.pid) == turn.process_identity:
                 _kill_group(turn.pid)
+            self._capture_thread_id(session, Path(turn.stdout_path))
             self._finish(session_id, turn.seq, INTERRUPTED, STOPPED_REASON)
         if live is not None:
             live.thread.join(STOP_JOIN_SECONDS)
-        else:
-            self._capture_thread_id(session, Path(turn.stdout_path))
         return self.store.turn(session_id, turn.seq)
 
     def recover(self, *, rerun: bool = False) -> list[Turn]:
@@ -846,27 +850,28 @@ class PoRunner:
         failure after allowance settles failed via _abandon or the next pass. Unhandled rows remain
         visible through orphaned_turns; one bad row does not prevent handling others.
         """
-        recovered: list[Turn] = []
-        for turn in self.store.running_turns():
-            key = (turn.session_id, turn.seq)
-            with self._lock:
-                try:
-                    if key in self._live and self._pending_outcome(turn.session_id, turn.seq) is None:
+        with self.admission.mutation():
+            recovered: list[Turn] = []
+            for turn in self.store.running_turns():
+                key = (turn.session_id, turn.seq)
+                with self._lock:
+                    try:
+                        if key in self._live and self._pending_outcome(turn.session_id, turn.seq) is None:
+                            continue
+                        done = self._recover_one(turn, rerun)
+                    except Exception as exc:  # noqa: BLE001 - this row stays for the next pass
+                        print(
+                            f"ummanu po: turn {turn.session_id}/{turn.seq} not recovered yet: "
+                            f"{type(exc).__name__}: {exc}",
+                            file=sys.stderr,
+                        )
                         continue
-                    done = self._recover_one(turn, rerun)
-                except Exception as exc:  # noqa: BLE001 - this row stays for the next pass
-                    print(
-                        f"ummanu po: turn {turn.session_id}/{turn.seq} not recovered yet: "
-                        f"{type(exc).__name__}: {exc}",
-                        file=sys.stderr,
-                    )
-                    continue
-            if done:
-                try:
-                    recovered.append(self.store.turn(turn.session_id, turn.seq))
-                except PoStoreError:
-                    pass
-        return recovered
+                if done:
+                    try:
+                        recovered.append(self.store.turn(turn.session_id, turn.seq))
+                    except PoStoreError:
+                        pass
+            return recovered
 
     def _recover_one(self, turn: Turn, rerun: bool) -> bool:
         """Settle or re-run one turn this runner does not own; False when nothing changed. Holds `_lock`."""
@@ -1029,7 +1034,7 @@ class PoRunner:
             return None
         if CLAUDE_SESSION_IN_USE not in self._stderr_tail(files):
             return None
-        with self._lock:
+        with self.admission.locked(), self._lock:
             if self.store.turn(session.session_id, seq).state != RUNNING:
                 return None
             if self._pending_outcome(session.session_id, seq) is not None:
@@ -1044,41 +1049,44 @@ class PoRunner:
         self, session: Session, seq: int, code: int, files: TurnFiles,
         *, head_loss_reason: str | None = None, offset: int = 0,
     ) -> None:
-        stdout = files.stdout.read_bytes()[offset:].decode("utf-8", errors="replace")
-        self._capture_thread_id(session, files.stdout, stdout)
-        if session.cli == "claude":
-            answer, missing = claude_final_answer(stdout)
-            resolved = claude_resolved_model(stdout)
-        else:
-            answer, missing = self._codex_final_answer(files)
-            resolved = codex_resolved_model(
-                self.codex_home(), session.cli_session_id or codex_thread_id(stdout)
-            )
-        if code != 0:
-            reason = f"{head_loss_reason}: {session.cli} exited with status {code}" if head_loss_reason else f"{session.cli} exited with status {code}"
-            tail = self._stderr_tail(files)
-            if tail:
-                reason += f": {tail}"
-            self._finish(session.session_id, seq, FAILED, reason, resolved_model=resolved)
-        elif answer is None:
-            self._finish(
-                session.session_id, seq, FAILED, missing or "no final answer", resolved_model=resolved
-            )
-        else:
-            outcome: dict[str, Any] = {"state": COMPLETED, "answer": answer, "resolved_model": resolved}
-            restored = self.restored_contexts.context(session.session_id)
-            if restored is not None and restored["phase"] == "launching":
-                native = codex_thread_id(stdout) if session.cli == "codex" else next((
-                    document.get("session_id") for document in _json_documents(stdout)
-                    if isinstance(document, dict) and document.get("type") == "result"
-                ), None)
-                if (not isinstance(native, str) or not native
-                        or (session.cli == "claude" and native != session.cli_session_id)
-                        or native != self.store.session(session.session_id).cli_session_id):
-                    self._finish(session.session_id, seq, INTERRUPTED, UNCERTAIN)
-                    return
-                outcome["restore_native_id"] = native
-            self._terminal(session.session_id, seq, outcome)
+        with self.admission.locked(), self._lock:
+            if self.store.turn(session.session_id, seq).state != RUNNING:
+                return
+            stdout = files.stdout.read_bytes()[offset:].decode("utf-8", errors="replace")
+            self._capture_thread_id(session, files.stdout, stdout)
+            if session.cli == "claude":
+                answer, missing = claude_final_answer(stdout)
+                resolved = claude_resolved_model(stdout)
+            else:
+                answer, missing = self._codex_final_answer(files)
+                resolved = codex_resolved_model(
+                    self.codex_home(), session.cli_session_id or codex_thread_id(stdout)
+                )
+            if code != 0:
+                reason = f"{head_loss_reason}: {session.cli} exited with status {code}" if head_loss_reason else f"{session.cli} exited with status {code}"
+                tail = self._stderr_tail(files)
+                if tail:
+                    reason += f": {tail}"
+                self._finish(session.session_id, seq, FAILED, reason, resolved_model=resolved)
+            elif answer is None:
+                self._finish(
+                    session.session_id, seq, FAILED, missing or "no final answer", resolved_model=resolved
+                )
+            else:
+                outcome: dict[str, Any] = {"state": COMPLETED, "answer": answer, "resolved_model": resolved}
+                restored = self.restored_contexts.context(session.session_id)
+                if restored is not None and restored["phase"] == "launching":
+                    native = codex_thread_id(stdout) if session.cli == "codex" else next((
+                        document.get("session_id") for document in _json_documents(stdout)
+                        if isinstance(document, dict) and document.get("type") == "result"
+                    ), None)
+                    if (not isinstance(native, str) or not native
+                            or (session.cli == "claude" and native != session.cli_session_id)
+                            or native != self.store.session(session.session_id).cli_session_id):
+                        self._finish(session.session_id, seq, INTERRUPTED, UNCERTAIN)
+                        return
+                    outcome["restore_native_id"] = native
+                self._terminal(session.session_id, seq, outcome)
 
     # --- provider fallback (ummanu-108) -------------------------------------------------------
 
@@ -1147,7 +1155,7 @@ class PoRunner:
                 file=sys.stderr,
             )
             return None
-        with self._lock:
+        with self.admission.locked(), self._lock:
             if self.store.turn(session.session_id, seq).state != RUNNING:
                 return None
             if self._pending_outcome(session.session_id, seq) is not None:

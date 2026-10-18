@@ -582,9 +582,11 @@ def _po_entry(entry: dict[str, Any], base: str) -> str:
 
 
 def _po_queue_hold(hold: dict[str, Any] | None) -> str:
-    """Why the queue waits beyond this session's own turn: a pending restart and the turns it waits for."""
+    """Show the recovery action or pending restart holding this queue."""
     if not hold:
         return ""
+    if hold["reason"] in {"recovery_hold", "recovery_invalid", "recovery_busy"}:
+        return f' <span class="held">held: {escape(str(hold["detail"]))}</span>'
     waits = ", ".join(
         f'<a href="/po/sessions/{quote(session)}">session {escape(session[:8])}</a> turn {turn["seq"]}'
         for turn in hold["running"]
@@ -650,4 +652,3 @@ def _po_turn_mark(turn: dict[str, Any]) -> str:
 
 #: Session page blocks a turn's end changes; the session script swaps exactly these (not the composer).
 PO_SESSION_BLOCKS = ("po-head", "po-stop", "po-close", "po-feed")
-

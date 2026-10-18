@@ -64,6 +64,7 @@ from ummanu.po.queue import (
     QueuedInput,
     QueueError,
 )
+from ummanu.po.recovery_admission import PoRecoveryAdmission, RecoveryAdmissionError
 from ummanu.po.runner import PoRunner, RunnerError
 from ummanu.po.sprints import (
     BoardSprintSessions,
@@ -139,6 +140,7 @@ class PoService:
         # Where a failed turn's owner event goes: the given sink, else the PO store's own board store.
         self.owner_events = owner_events if owner_events is not None else self.store
         self.data_dir = Path(data_dir) if data_dir is not None else runner.data_dir
+        self.admission = PoRecoveryAdmission(self.data_dir, self.store)
         # What `sprint_session` needs: the installation's sprints, and the models a session opened
         # without a previous one takes its default from (read from instance.yaml when not given).
         # The efforts every new session's effort is checked against, and a sprint's session takes
@@ -321,6 +323,8 @@ class PoService:
                                      note=item.note, metadata=item.metadata)
         except TurnInProgress:
             return
+        except RecoveryAdmissionError:
+            return
         except (SessionNotFound, SessionClosed, RequestConflict) as exc:
             self._refuse(item, str(exc))
             return
@@ -369,7 +373,7 @@ class PoService:
         except EffortRefused as exc:
             raise Refused("validation", str(exc)) from None
         fingerprint = session_fingerprint(cli, model, effort)
-        with self._lock:
+        with self._lock, self.admission.mutation():
             known = self._reserve(request_id, SESSION_CREATE, fingerprint)
             if isinstance(known, PoRequest):
                 self._accepted({"session_id": known.session_id, "effort": effort, "repeated": True})
@@ -411,7 +415,7 @@ class PoService:
             raise Refused("validation", "card facts are a JSON object")
         if attachments is not None:
             self._check_attachments(session_id, text, attachments, source)
-        with self._lock:
+        with self._lock, self.admission.mutation():
             known = self._reserve(
                 request_id,
                 SEND,
@@ -595,7 +599,7 @@ class PoService:
         request_id = _required(request_id, "request_id")
         sprint_ref = _required(sprint_ref, "sprint_ref")
         fingerprint = sprint_session_fingerprint(sprint_ref)
-        with self._lock:
+        with self._lock, self.admission.mutation():
             known = self._reserve(request_id, SPRINT_SESSION, fingerprint)
             threshold = self._context_budget()
             sprints = self._sprint_sessions()
@@ -842,7 +846,7 @@ class PoService:
     def close_session(self, *, session_id: str, actor: str = STOP_ACTOR) -> dict[str, Any]:
         """Close as `actor`; a running turn or a message still queued for the session refuses it."""
         session_id = _required(session_id, "session_id")
-        with self._lock:
+        with self._lock, self.admission.mutation():
             waiting = self.queue.pending(session_id)
             if waiting:
                 raise TurnInProgress(
@@ -859,7 +863,8 @@ class PoService:
         """
         if not isinstance(title, str):
             raise Refused("validation", "title is text; an empty one clears it")
-        session = self.store.set_title(_required(session_id, "session_id"), title)
+        with self._lock, self.admission.mutation():
+            session = self.store.set_title(_required(session_id, "session_id"), title)
         return {"session_id": session.session_id, "title": session.title}
 
     def status(self) -> dict[str, Any]:
@@ -868,6 +873,7 @@ class PoService:
             "queued": len(self.queue.pending()),
             "restart_pending": self.marker.exists(),
             "recovered": self._recovered,
+            "recovery_admission": self.admission.status(),
         }
 
     def request_restart(self, *, reason: str = "") -> dict[str, Any]:
@@ -996,6 +1002,8 @@ def _known_answer(session_id: str, known: PoRequest | QueuedInput) -> dict[str, 
 
 def _refusal(exc: Exception, *, nothing_written: bool) -> dict[str, Any]:
     """One exception to one error answer; `nothing_written` marks a refusal that wrote nothing."""
+    if isinstance(exc, RecoveryAdmissionError):
+        return _error(exc.code, str(exc), nothing_written=True)
     if isinstance(exc, Refused):
         code = exc.code
     elif isinstance(exc, SessionNotFound):

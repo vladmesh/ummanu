@@ -80,7 +80,13 @@ from ummanu.dispatch.state import (
     record_attempt as _record_attempt,
     request_token,
 )
-from ummanu.po.client import OutcomeUnknown, PoServiceError, ServiceRefused, ServiceUnavailable
+from ummanu.po.client import (
+    OutcomeUnknown,
+    PoServiceError,
+    RecoveryRefused,
+    ServiceRefused,
+    ServiceUnavailable,
+)
 from ummanu.po.queue import QueuedInput
 from ummanu.po.store import (
     COMPLETED,
@@ -109,6 +115,13 @@ PO_OWNER_ANSWER_ACTION = "po-owner-answer"
 _UNANSWERED_CODES = frozenset({"unavailable", "outcome_unknown"})
 #: `PoSubmission.session_outcome` of an out-of-sprint card: the session of the PO turn that cut it.
 ORIGIN_SESSION = "origin"
+
+
+def _unanswered_refusal(exc: ServiceRefused) -> bool:
+    """Typed recovery retryability precedes the ordinary service refusal vocabulary."""
+    if isinstance(exc, RecoveryRefused):
+        return exc.retryable
+    return exc.code in _UNANSWERED_CODES
 
 
 class _SuccessorNotOpen(PoServiceError):
@@ -614,7 +627,7 @@ def _submit(
     except (ServiceUnavailable, OutcomeUnknown) as exc:
         return _unanswered(runtime, task, record, records, payload, step, exc)
     except ServiceRefused as exc:
-        if exc.code in _UNANSWERED_CODES:
+        if _unanswered_refusal(exc):
             return _unanswered(runtime, task, record, records, payload, step, exc)
         return _refused(runtime, task, record, records, payload, step, exc)
     except RequestConflict as exc:
@@ -906,7 +919,7 @@ def _await_owner(
                                                         request_id=submission.session_request_id)
                     submission.session_id = str(resolved["session_id"])
                 except ServiceRefused as exc:
-                    if exc.code in _UNANSWERED_CODES:
+                    if _unanswered_refusal(exc):
                         return _unanswered(runtime, task, record, records, payload, "owner answer session", exc)
                     return _refused(runtime, task, record, records, payload, "owner answer session", exc)
                 except (SessionClosed, SessionNotFound) as exc:
@@ -947,7 +960,7 @@ def _await_owner(
     except (ServiceUnavailable, OutcomeUnknown) as exc:
         return _unanswered(runtime, task, record, records, payload, step, exc)
     except ServiceRefused as exc:
-        if exc.code in _UNANSWERED_CODES:
+        if _unanswered_refusal(exc):
             return _unanswered(runtime, task, record, records, payload, step, exc)
         return _refused(runtime, task, record, records, payload, step, exc)
     except RequestConflict as exc:

@@ -25,6 +25,7 @@ from ummanu.po.attachments import (
 from ummanu.po.client import (
     OutcomeUnknown,
     PoServiceClient,
+    RecoveryRefused,
     ServiceRefused,
     ServiceUnavailable,
     read_restart_marker,
@@ -38,6 +39,7 @@ from ummanu.po.models import (
     require_explicit_effort,
 )
 from ummanu.po.queue import PoQueue, QueueError
+from ummanu.po.recovery_admission import PoRecoveryAdmission
 from ummanu.po.store import (
     OWNER,
     RUNNING,
@@ -178,10 +180,10 @@ class PoLayer(ProtocolBoundary):
         return {"kind": "po_session_titles", "sessions": sessions}
 
     def _queue_hold(self, store: PoStore) -> dict[str, Any] | None:
-        """A pending PO service restart, which holds every session's queue until no turn of any session runs.
-
-        `running` names the turns it waits for; None when no restart is pending.
-        """
+        """Describe a recovery hold or pending service restart without changing the queue."""
+        recovery = PoRecoveryAdmission(self._resolved_data_dir(), store).status()
+        if recovery is not None:
+            return recovery
         try:
             marker = read_restart_marker(self._resolved_data_dir())
         except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -427,6 +429,10 @@ class PoLayer(ProtocolBoundary):
             raise PoOutcomeUnknown(
                 f"{unknown or 'the PO service may have carried this out'} ({exc})"
             ) from None
+        except RecoveryRefused as exc:
+            raise RuntimeUnavailable(str(exc), data={
+                **(_definite(exc) or {}), "recovery": exc.code, "retryable": exc.retryable,
+            }) from None
         except ServiceRefused as exc:
             if exc.code == "validation":
                 raise ValidationRefused(str(exc), data=_definite(exc)) from None

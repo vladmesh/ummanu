@@ -16,6 +16,7 @@ from tests.po_checkpoint_fixtures import po_records
 from tests.po_fake_store import FakeBoard, FakePoStore
 from ummanu.board.po_restore import normalized_po_records, prepare_po_restore
 from ummanu.board.sql_rows import parse_rfc3339
+from ummanu.po.recovery_admission import PoRecoveryAdmission
 from ummanu.po.restore_context import RestoreContextError
 from ummanu.po.runner import PoRunner, RunnerError
 from ummanu.po.store import (
@@ -64,10 +65,12 @@ class RestoredContextTests(unittest.TestCase):
         (self.data / "po").mkdir()
         self.records = po_records(feed_count=feed_count)
         self.records["po_sessions"][-1]["cli"] = cli
+        self.board = FakeBoard()
+        self.admission = PoRecoveryAdmission(self.data, FakePoStore(self.board))
+        self.admission.begin(self.records)
         self.plan = prepare_po_restore(self.records, self.data,
                                        interrupted_at=datetime(2026, 10, 1, tzinfo=UTC))
         normalized = normalized_po_records(self.records, self.plan)
-        self.board = FakeBoard()
         self.board.sessions = {row["session_id"]: imported(row, Session) for row in normalized["po_sessions"]}
         self.board.turns = {(row["session_id"], row["seq"]): imported(row, Turn)
                             for row in normalized["po_turns"]}
@@ -78,6 +81,7 @@ class RestoredContextTests(unittest.TestCase):
         self.runner = self.new_runner()
         if prepare:
             self.runner.prepare_restored_context(self.records, self.plan)
+            self.admission.finish(self.records, self.plan, import_committed=True, parity_verified=True)
 
     def new_runner(self):
         runner = PoRunner(FakePoStore(self.board), self.data, head_specs={}, env={}, turn_launcher=self.launch)
@@ -182,8 +186,12 @@ class RestoredContextTests(unittest.TestCase):
 
     def test_missing_preparation_refuses_imported_session_before_spawn(self):
         self.setup_provider(prepare=False)
+        before = copy.deepcopy(self.board.turns)
         self.assert_no_new_launch()
-        self.assertEqual(self.store.turn("open", 5).state, FAILED)
+        self.assertEqual(self.board.turns, before)
+        self.runner.prepare_restored_context(self.records, self.plan)
+        self.admission.finish(self.records, self.plan, import_committed=True, parity_verified=True)
+        self.assertEqual(self.send()[0].state, COMPLETED)
 
     def test_foreign_source_target_plan_binding_and_live_import_are_refused(self):
         self.setup_provider(prepare=False)
@@ -408,6 +416,7 @@ class RestoredContextTests(unittest.TestCase):
         with mock.patch("uuid.uuid4", side_effect=AssertionError("regenerated binding")):
             self.new_runner().prepare_restored_context(self.records, self.plan)
         self.assertEqual(self.path.read_bytes(), before)
+        self.admission.finish(self.records, self.plan, import_committed=True, parity_verified=True)
         first, _ = self.send()
         self.assertEqual(first.state, COMPLETED)
 
