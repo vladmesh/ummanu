@@ -15,7 +15,10 @@ from ummanu.po.store import REQUEST_OPERATIONS
 
 PO_FILE = "po_sql.json"
 LEGACY_PO_COVERAGE = "checkpoint has no PO SQL coverage; sessions, turns, feed and request bindings are unavailable"
-CAPTURED_PO_COVERAGE = "PO SQL captured as inert files; SQL import/rebind, queue and attachments are not restored"
+RESTORED_PO_COVERAGE = (
+    "PO SQL imported at parity, restored contexts prepared and recovery admission finished; "
+    "queue, attachments and provider readiness are not restored"
+)
 
 # Explicit SQL columns, including nullable values; no display projections or read limits.
 PO_COLUMNS = {

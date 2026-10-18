@@ -34,9 +34,11 @@ from unittest import mock
 
 from tests.fakes.installation import PRODUCT_ROOT
 from tests.fakes.snapshot_remote import HEAD, exporter_remote, git
+from tests.po_checkpoint_fixtures import po_records, seed_po
 from tests.sql_backend_fixtures import PostgresBoard, insert_card_row
 from ummanu import bootstrap as bootstrap_module, upgrade
 from ummanu.board import store
+from ummanu.board.po_checkpoint import RESTORED_PO_COVERAGE
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.board.store import BoardStoreConfig
@@ -46,6 +48,9 @@ from ummanu.head_registry import installed_heads, installed_pair
 from ummanu.installation import commands as installation_commands, materialize as installation_materialize
 from ummanu.installation.upgrade import workspaces as upgrade_workspaces
 from ummanu.memory_journal import export_memory_snapshot, verify_memory_journal
+from ummanu.po.recovery_admission import PoRecoveryAdmission
+from ummanu.po.store import INTERRUPTED, PoStore
+from ummanu.po.workspace import workspace_dir
 from ummanu.product_issues import ProductIssueStore
 from ummanu.restore import DEFAULT_MEMORY_DIM, restore_state
 from ummanu.sprint_observer import none_choice
@@ -261,6 +266,10 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
             body="open sprint comment",
             request_id="comment-snapshot-open-sprint",
         )
+        # The PO history production holds: closed, empty and open sessions, a captured running turn.
+        po_client = SqlCardClient(self.source_config.for_role("app"), source)
+        self.addCleanup(po_client.close)
+        seed_po(po_client, po_records())
         self.source_kinds = self._kinds(source, data_dir, self.source_config)
 
     def _kinds(self, instance: Path, data_dir: Path, config: BoardStoreConfig) -> dict[str, object]:
@@ -420,6 +429,21 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
         self.assertEqual(state["board_count"], summary["card_count"])
         self.assertEqual(state["sprint_parity"], "complete")
         self.assertEqual(state["sprint_count"], summary["sprint_count"])
+        # The PO dialogue is back in SQL through the app role, rebound to this host, before the host
+        # step, and admission is open for new owner input.
+        self.assertEqual(steps["po-sql"], ("changed", RESTORED_PO_COVERAGE))
+        self.assertEqual((state["po_sql_coverage"], state["po_sql_restore"]), ("captured", "finished"))
+        po = PoStore(self.target_config.for_role("app"))
+        self.addCleanup(po.close)
+        self.assertEqual(
+            {session.session_id for status in ("open", "closed") for session in po.sessions(status)},
+            {"closed", "empty", "open"},
+        )
+        self.assertEqual(po.session("open").cwd, str(workspace_dir(data_dir.resolve())))
+        self.assertEqual([turn.state for turn in po.turns("open")][-1], INTERRUPTED)
+        self.assertEqual(len(po.feed("open")), len(po_records()["po_feed"]))
+        self.assertIsNotNone(po.request("send"))
+        self.assertIsNone(PoRecoveryAdmission(data_dir.resolve(), po).status())
         # The closed card on the retired id is back as the tree exported it: placement and project.
         exported = next(
             card

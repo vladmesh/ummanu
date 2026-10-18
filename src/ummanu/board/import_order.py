@@ -19,7 +19,9 @@ How the import follows it:
   (`task_restore.restore_cards_batched`) runs them in two sweeps, one creating rows and one
   initializing them, and each sweep is sorted by `record_rank`, the position of the record's phase
   here. That is the Product-before-Issue order ummanu-27 needed, taken from this table.
-* Every later phase is a step of `restore._import_normalized_board` in this order.
+* Every later phase up to ``origin_returns`` is a step of `restore._import_normalized_board` in
+  this order. ``po_sql`` runs after that transaction commits, in `restore.restore_po`'s own
+  transaction under PO recovery admission; no board table references a PO table.
 
 Two kinds of write are deliberately not phases of their own:
 
@@ -77,20 +79,11 @@ IMPORT_PHASES: tuple[ImportPhase, ...] = (
     ),
     ImportPhase("sprint_comments", ("sprint_comments",)),
     ImportPhase("origin_returns", ("origin_returns",)),
+    ImportPhase("po_sql", ("po_sessions", "po_turns", "po_feed", "po_requests")),
 )
 
-#: The normalized board import does not wire the separate PO SQL capture/restore primitive.
 #: Owner events and sprint close decisions are outside board export content.
-NOT_IMPORTED: frozenset[str] = frozenset(
-    {
-        "owner_events",
-        "po_feed",
-        "po_requests",
-        "po_sessions",
-        "po_turns",
-        "sprint_decisions",
-    }
-)
+NOT_IMPORTED: frozenset[str] = frozenset({"owner_events", "sprint_decisions"})
 
 
 def phase_rank(name: str) -> int:

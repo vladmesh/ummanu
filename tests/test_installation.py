@@ -31,8 +31,10 @@ from tests.fakes.installation import (
     split_board,
     write_memory_metadata,
 )
+from tests.po_checkpoint_fixtures import po_records, write_po
 from tests.retired_board import RETIRED_STORE, STALE_FILE, legacy_runtime_lines, write_stale_leftovers
 from ummanu import _proc, restore_commands, secret_store, state_repo
+from ummanu.board.po_checkpoint import LEGACY_PO_COVERAGE
 from ummanu.checkpoint import CheckpointPusher
 from ummanu.cli import main
 from ummanu.config import InstanceReport
@@ -1926,6 +1928,7 @@ class InstallationTests(unittest.TestCase):
             data = root / "data"
             source.mkdir()
             _checkpoint(source, data)
+            write_po(source / "state" / "board", po_records())
             materialize_checkpoint(source, data)
             before = {path.relative_to(data): path.read_bytes() for path in data.rglob("*") if path.is_file()}
             _git(source, "init")
@@ -1965,10 +1968,12 @@ class InstallationTests(unittest.TestCase):
 
             self.assertEqual(code, 0, output)
             self.assertIn("would-change checkpoint", output)
+            self.assertIn("would-change po-sql", output)
             self.assertIn("preview made no recovery changes", output)
             self.assertEqual(Path(prerequisites.call_args.args[0]).resolve(), target.resolve())
             after = {path.relative_to(data): path.read_bytes() for path in data.rglob("*") if path.is_file()}
             self.assertEqual(after, before)
+            self.assertEqual([path.name for path in data.iterdir() if path.name.startswith(".po-")], [])
             board.assert_not_called()
             memory.assert_not_called()
             host.assert_not_called()
@@ -2087,6 +2092,7 @@ class BootstrapCheckoutRecoveryTests(unittest.TestCase):
     ) -> tuple[installation_models.InstallResult, mock.Mock]:
         steps = mock.Mock()
         steps.import_normalized_board.return_value = 1
+        steps.attach_mock(mock.Mock(wraps=installation_commands.restore_po), "restore_po")
         steps.rebuild_memory_index.return_value = 1
         steps.rebuild_memory_index.side_effect = rebuild
         args = SimpleNamespace(
@@ -2114,6 +2120,7 @@ class BootstrapCheckoutRecoveryTests(unittest.TestCase):
             mock.patch("ummanu.installation.commands._open_secret_store", return_value=store),
             mock.patch("ummanu.installation.commands.check_prerequisites", steps.check_prerequisites),
             mock.patch("ummanu.installation.commands.import_normalized_board", steps.import_normalized_board),
+            mock.patch("ummanu.installation.commands.restore_po", steps.restore_po),
             mock.patch("ummanu.installation.commands.rebuild_memory_index", steps.rebuild_memory_index),
             mock.patch("ummanu.installation.commands.provision_project_checkouts", return_value=[]),
             mock.patch("ummanu.installation.commands.provision_codex_home", return_value=0),
@@ -2247,13 +2254,14 @@ class BootstrapCheckoutRecoveryTests(unittest.TestCase):
         result, steps = self._install()
 
         self.assertEqual(result.status, "ok", result.steps)
-        # The board-side sequence is the store's prerequisite read, then the restore into it:
-        # no transport is materialized and no Pipeline board is made first.
+        # The board-side sequence is the store's prerequisite read, then the restore into it and
+        # the PO phase: no transport is materialized and no Pipeline board is made first.
         self.assertEqual(
             steps.mock_calls,
             [
                 mock.call.check_prerequisites(self.target),
                 mock.call.import_normalized_board(self.data, instance=self.target),
+                mock.call.restore_po(self.data, instance=self.target, runtime_user=getpass.getuser()),
                 mock.call.rebuild_memory_index(
                     self.data,
                     self.target,
@@ -2267,6 +2275,7 @@ class BootstrapCheckoutRecoveryTests(unittest.TestCase):
         board = {step.name: (step.status, step.detail) for step in result.steps}
         self.assertFalse([name for name in board if "transport" in name], board)
         self.assertEqual(board["board"], ("changed", "1 card(s) at parity"))
+        self.assertEqual(board["po-sql"], ("unchanged", LEGACY_PO_COVERAGE))
         self.assertFalse((self.target / STALE_FILE).exists())
 
     def test_recovery_leaves_stale_transport_leftovers_unread_and_unreported(self) -> None:

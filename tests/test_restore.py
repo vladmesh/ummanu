@@ -27,7 +27,7 @@ from tests.sql_backend_fixtures import card_store
 from ummanu._fsutil import write_json, write_ndjson
 from ummanu.board.origin_checkpoint import read_checkpoint_outbox, require_outbox_parity
 from ummanu.board.origin_outbox import OriginOutboxStore
-from ummanu.board.po_checkpoint import CAPTURED_PO_COVERAGE, LEGACY_PO_COVERAGE, export_po_records
+from ummanu.board.po_checkpoint import LEGACY_PO_COVERAGE, export_po_records
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.checkpoint import _validate_board
 from ummanu.cli import main as cli_main
@@ -52,6 +52,7 @@ from ummanu.restore import (
     mark_reconcile_applied,
     rebuild_memory_index,
     restore_findings,
+    restore_po,
     restore_state,
 )
 from ummanu.tasks import TaskReader, TaskWriter, task_audit_for
@@ -72,7 +73,7 @@ def _seed_legacy_facts(data_dir: Path) -> Path:
 
 
 class RestoreTests(unittest.TestCase):
-    def test_board_restore_reports_po_capture_without_importing_or_altering_live_po_rows(self):
+    def test_board_import_leaves_live_po_rows_to_the_po_phase(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             self._portable_origin_board(data_dir)
@@ -84,17 +85,26 @@ class RestoreTests(unittest.TestCase):
             for _ in range(2):
                 self.assertEqual(import_normalized_board(data_dir, client=client), 1)
                 self.assertEqual(export_po_records(client), existing)
-                state = restore_state(data_dir)
-                self.assertEqual(state["po_sql_coverage"], "captured")
-                self.assertEqual(state["po_sql_diagnostic"], CAPTURED_PO_COVERAGE)
-                self.assertEqual(state["origin_outbox_coverage"], "complete")
+                self.assertEqual(restore_state(data_dir)["origin_outbox_coverage"], "complete")
 
-    def test_board_restore_reports_legacy_po_absence_without_synthesizing_sessions(self):
+    def test_board_import_refuses_a_damaged_po_capture_before_board_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self._portable_origin_board(data_dir)
+            write_po(data_dir / "board", po_records())
+            (data_dir / "board" / "po_sql.json").write_text("{}", encoding="utf-8")
+            client = card_store(self, empty_seed())
+            with self.assertRaisesRegex(RestoreError, "PO SQL"):
+                import_normalized_board(data_dir, client=client)
+            self.assertEqual(client.card_count(), 0)
+
+    def test_legacy_po_absence_synthesizes_no_sessions(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             self._portable_origin_board(data_dir)
             client = card_store(self, empty_seed())
             self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+            self.assertFalse(restore_po(data_dir, instance=Path(tmp) / "unread-instance"))
             self.assertEqual(export_po_records(client), {table: [] for table in po_records()})
             state = restore_state(data_dir)
             self.assertEqual(state["po_sql_coverage"], "unavailable")

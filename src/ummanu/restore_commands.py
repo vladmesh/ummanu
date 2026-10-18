@@ -118,16 +118,18 @@ def run_restore_postgres(args: argparse.Namespace) -> int:
 
 @_restore_command("restore-board")
 def run_restore_board(args: argparse.Namespace) -> int:
-    from ummanu.restore import _target, import_normalized_board, restore_state
+    from ummanu.restore import _target, import_normalized_board, restore_po, restore_state
 
     instance_path, data_dir, _ = _target(Path(args.instance))
     count = import_normalized_board(data_dir, instance=instance_path.parent)
+    restore_po(data_dir, instance=instance_path.parent)
     state = restore_state(data_dir)
     return {
         "ok": True, "action": "restore-board", "cards": count, "sprints": state["sprint_count"],
         "origin_outbox_coverage": state["origin_outbox_coverage"],
         "origin_outbox_diagnostic": state["origin_outbox_diagnostic"],
         "po_sql_coverage": state["po_sql_coverage"],
+        "po_sql_restore": state["po_sql_restore"],
         "po_sql_diagnostic": state["po_sql_diagnostic"],
     }
 

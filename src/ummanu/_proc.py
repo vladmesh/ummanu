@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import pwd
 import select
 import selectors
 import signal
@@ -10,7 +12,7 @@ import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import IO, TextIO, cast
+from typing import IO, Any, TextIO, cast
 
 
 def run(
@@ -103,6 +105,62 @@ def run_isolated(
         expired.killed = killed  # type: ignore[attr-defined]
         raise expired
     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
+class RuntimeUserError(RuntimeError):
+    """The runtime-user child could not be entered or its callback failed."""
+
+
+def _drop_to_user(user: str) -> None:
+    try:
+        account = pwd.getpwnam(user)
+    except KeyError:
+        raise RuntimeUserError(f"runtime user {user!r} does not exist") from None
+    try:
+        os.initgroups(account.pw_name, account.pw_gid)
+        os.setgid(account.pw_gid)
+        os.setuid(account.pw_uid)
+    except OSError as exc:
+        raise RuntimeUserError(f"could not enter runtime user {user!r}: {exc}") from None
+
+
+def run_as_user(user: str | None, callback: Callable[[], Any]) -> Any:
+    """Return `callback()` run as `user`: in a forked child that dropped root, else in this process.
+
+    Only the callback's JSON result or its error text crosses back from the child.
+    """
+    if not user or os.geteuid() != 0:
+        return callback()
+    read_fd, write_fd = os.pipe()
+    child = os.fork()
+    if child == 0:
+        try:
+            os.close(read_fd)
+            try:
+                _drop_to_user(user)
+                payload = json.dumps({"ok": True, "value": callback()})
+            except Exception as exc:  # noqa: BLE001 - the child reports every failure as text
+                payload = json.dumps({"ok": False, "error": str(exc)})
+            os.write(write_fd, payload.encode("utf-8"))
+        finally:
+            # Never return into the parent's stack from the child, whatever was raised.
+            os._exit(0)
+    os.close(write_fd)
+    chunks: list[bytes] = []
+    try:
+        while chunk := os.read(read_fd, 65_536):
+            chunks.append(chunk)
+    finally:
+        os.close(read_fd)
+        _, status = os.waitpid(child, 0)
+    result: Any
+    try:
+        result = json.loads(b"".join(chunks))
+    except ValueError:
+        result = None
+    if status != 0 or not isinstance(result, dict) or not result.get("ok"):
+        raise RuntimeUserError(str(result.get("error") if isinstance(result, dict) else "runtime-user helper failed"))
+    return result["value"]
 
 
 # How long the output of a killed group may keep flowing, and then how long its leader may take to

@@ -163,7 +163,7 @@ class MemoryHealthIdentityTests(unittest.TestCase):
             handed_off: list[Path] = []
             with (
                 mock.patch("ummanu.memory.health._authenticated_list", return_value=[{"scope": "product:ummanu"}]),
-                mock.patch("ummanu.memory.health.os.geteuid", return_value=1000),
+                mock.patch("ummanu._proc.os.geteuid", return_value=1000),
             ):
                 health.probe_memory(
                     data_dir,
@@ -298,7 +298,7 @@ class MemoryHealthDaemonIntegrationTests(unittest.TestCase):
     def test_unprivileged_probe_uses_the_real_streamable_http_session_and_read_guard(self) -> None:
         # This is the ordinary runner path exercised in CI.  The root-only test
         # above covers the distinct privilege-drop handoff.
-        with mock.patch("ummanu.memory.health.os.geteuid", return_value=1000):
+        with mock.patch("ummanu._proc.os.geteuid", return_value=1000):
             health.probe_memory(self.data_dir, port=self.port, timeout_seconds=10, retry_seconds=0.05)
         deadline = time.monotonic() + 2
         while not self.audit.exists() and time.monotonic() < deadline:

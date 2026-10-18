@@ -70,6 +70,7 @@ from ummanu.restore import (
     mark_reconcile_applied,
     rebuild_memory_index,
     restore_findings,
+    restore_po,
     restore_state,
 )
 from ummanu.runtime.cli_composition import add_command_parser
@@ -384,21 +385,22 @@ def install(args: argparse.Namespace) -> InstallResult:
                 "origin-outbox", "unchanged",
                 LEGACY_COVERAGE if outbox is None else f"complete checkpoint coverage: {len(outbox)} obligation(s)",
             )
-            from ummanu.board.po_checkpoint import (
-                CAPTURED_PO_COVERAGE,
-                LEGACY_PO_COVERAGE,
-                read_checkpoint_po,
-            )
-
-            po = read_checkpoint_po(checkpoint_root / "state" / "board")
-            result.add("po-sql", "unchanged", LEGACY_PO_COVERAGE if po is None else CAPTURED_PO_COVERAGE)
             if args.dry_run:
+                from ummanu.board.po_checkpoint import LEGACY_PO_COVERAGE, read_checkpoint_po
+
                 result.add(
                     "checkpoint",
                     "would-change",
                     f"would materialize {cards} board card(s), {runs} run record(s)",
                 )
                 result.add("board", "would-change", f"would restore {cards} card(s) and verify parity")
+                if read_checkpoint_po(checkpoint_root / "state" / "board") is None:
+                    result.add("po-sql", "unchanged", LEGACY_PO_COVERAGE)
+                else:
+                    result.add(
+                        "po-sql", "would-change",
+                        "would import captured PO SQL at parity, prepare restored contexts and finish admission",
+                    )
                 result.add("memory", "would-change", "would rebuild the index from checkpoint facts")
                 result.add("host", "would-change", "would run the host materializer")
                 result.add("status", "skipped", "preview made no recovery changes")
@@ -431,6 +433,12 @@ def install(args: argparse.Namespace) -> InstallResult:
                 restored = import_normalized_board(data_dir, instance=target)
                 result.add("board", "changed", f"{restored} card(s) at parity")
                 _write_recovery_progress(progress_path, identity, board="complete")
+            # Board progress never skips this: admission authority decides, and it must finish
+            # before the host step starts the PO service.
+            po_changed = restore_po(data_dir, instance=target, runtime_user=args.installation_user)
+            result.add(
+                "po-sql", "changed" if po_changed else "unchanged", restore_state(data_dir)["po_sql_diagnostic"]
+            )
             host = report.host if isinstance(report.host, dict) else {}
             memory = memory_config(host)
             compatible_index = index_matches(data_dir / "memory" / "index.sqlite", memory)
