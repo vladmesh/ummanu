@@ -7,7 +7,9 @@ import fcntl
 import io
 import json
 import multiprocessing
+import os
 import tempfile
+import threading
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,7 +21,7 @@ from ummanu import checkpoint, cli, data, status
 from ummanu._fsutil import try_file_lock, write_json
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.checkpoint import CheckpointResult
-from ummanu.dispatch import production
+from ummanu.dispatch import ownership, production
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.host import (
     SHIPPED_PACKAGING_ROOT,
@@ -34,6 +36,9 @@ from ummanu.host import (
 )
 from ummanu.host_apply import ApplyInputs, apply_host
 from ummanu.infra import checkpoint_run
+from ummanu.po import recovery_admission
+from ummanu.po.queue import PoQueue, QueueCapture
+from ummanu.po.recovery_admission import PoRecoveryAdmission
 from ummanu.tasks import TaskError
 
 NOW = 2_000_000_000.0
@@ -543,12 +548,21 @@ class BoardCutTests(unittest.TestCase):
             reader = SimpleNamespace(client=client)
             reading = []
             audit = mock.Mock()
+            ordered = []
 
             @contextlib.contextmanager
             def snapshot():
                 reading.append("transaction")
                 yield
                 reading.clear()
+
+            real_bulk_lane = ownership.bulk_lane
+
+            @contextlib.contextmanager
+            def bulk_lane(data_dir):
+                ordered.append(("bulk", _target_held(root)))
+                with real_bulk_lane(data_dir):
+                    yield
 
             def read(value):
                 self.assertEqual(reading, ["transaction"])
@@ -565,6 +579,7 @@ class BoardCutTests(unittest.TestCase):
             def query(sql):
                 table = sql.split(" FROM ", 1)[1].split()[0]
                 queried.append(table)
+                ordered.append((table, _target_held(root)))
                 return read([
                     (1, "demo-1", "transition", "audit-request", "done", datetime(2026, 1, 1, tzinfo=UTC),
                      None, None, None, None, None),
@@ -579,8 +594,9 @@ class BoardCutTests(unittest.TestCase):
                     side_effect=lambda instance, actual: read([{"client": actual}]),
                 ),
                 mock.patch("ummanu.sprints.sprint_client") as sprint_factory,
+                mock.patch.object(ownership, "bulk_lane", side_effect=bulk_lane),
             ):
-                cards, history, sprints, outbox, po, owner_events = data._read_board_cut(
+                cards, history, sprints, outbox, po, owner_events, queue = data._read_board_cut(
                     root, root, reader, None
                 )
             self.assertEqual(cards, [{"reference": "demo-1"}])
@@ -589,16 +605,104 @@ class BoardCutTests(unittest.TestCase):
             self.assertEqual(owner_events, [])
             self.assertEqual(len(outbox), 1)
             self.assertEqual(outbox[0]["event_id"], "transition")
-            self.assertEqual(po, {table: [] for table in ("po_sessions", "po_turns", "po_feed", "po_requests")})
-            self.assertCountEqual(
-                queried,
-                ["origin_returns", "owner_events", "po_sessions", "po_turns", "po_feed", "po_requests"],
-            )
+            self.assertEqual(po, {table: [] for table in PO_TABLES})
+            self.assertEqual(queue, QueueCapture(present=False, inputs=()))
+            self.assertCountEqual(queried, ["origin_returns", "owner_events", *PO_TABLES])
+            # The queue boundary precedes the bulk lane; the PO rows pin the snapshot inside it and
+            # every later read runs after it is released.
+            self.assertEqual(ordered[: len(PO_TABLES) + 1], [("bulk", True), *((table, True) for table in PO_TABLES)])
+            self.assertTrue(all(not held for _, held in ordered[len(PO_TABLES) + 1 :]))
+            self.assertFalse(_target_held(root))
             sprint_factory.assert_not_called()
             client.read_snapshot.assert_called_once_with()
             with try_file_lock(root / "dispatcher" / "board-bulk.lock") as acquired:
                 self.assertTrue(acquired)
 
+    def test_queue_writers_wait_for_the_capture_window_and_lose_no_input(self):
+        """Submit, claim then dequeue, and refuse all block at the boundary while the cut is read."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            queue = PoQueue(root)
+            claimed = queue.put(session_id="s", text="claimed", request_id="r-claim", source="web")
+            refused = queue.put(session_id="s", text="refused", request_id="r-refuse", source="dispatcher",
+                                card={"card_ref": "demo-1"}, note="frozen rights")
+            before = queue.capture()
+            committed: list[str] = []
+            admission = PoRecoveryAdmission(root, mock.Mock())
+
+            def claim_then_dequeue() -> None:
+                with admission.mutation():
+                    committed.append("r-claim")
+                queue.remove(claimed)
+
+            writers = {
+                "submit": lambda: queue.put(session_id="s", text="after the cut", request_id="r-new", source="web"),
+                "claim": claim_then_dequeue,
+                "refuse": lambda: queue.refuse(refused, "the session is closed"),
+            }
+            arrived = {name: threading.Event() for name in writers}
+            threads = [threading.Thread(target=writer, name=name) for name, writer in writers.items()]
+            real_lock = recovery_admission.directory_lock
+
+            def lock(path):
+                if threading.current_thread().name in arrived:
+                    arrived[threading.current_thread().name].set()
+                return real_lock(path)
+
+            seen_claims = []
+
+            def query(sql):
+                if not seen_claims:
+                    for thread in threads:
+                        thread.start()
+                    for event in arrived.values():
+                        self.assertTrue(event.wait(30))
+                seen_claims.append(list(committed))
+                return []
+
+            client = mock.Mock(spec=SqlCardClient)
+            client.credentials = mock.sentinel.credentials
+            client.read_snapshot.side_effect = contextlib.nullcontext
+            client._query.side_effect = query
+            reader = SimpleNamespace(client=client, export=lambda: [])
+            audit = mock.Mock()
+            audit.status.return_value = {"ok": True}
+            audit.events.return_value = []
+            with (
+                mock.patch.object(recovery_admission, "directory_lock", side_effect=lock),
+                mock.patch.object(data, "task_audit_for", return_value=audit),
+                mock.patch.object(data, "export_sprint_entities", return_value=[]),
+            ):
+                cut = data._read_board_cut(root, root, reader, None)
+            for thread in threads:
+                thread.join(30)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual(seen_claims[: len(PO_TABLES)], [[]] * len(PO_TABLES))
+            self.assertEqual(cut[6], before)
+            after = queue.capture()
+            self.assertEqual(committed, ["r-claim"])
+            self.assertEqual(
+                [(item.section, item.document["request_id"]) for item in after.inputs],
+                [("pending", "r-new"), ("refused", "r-refuse")],
+            )
+            self.assertEqual(after.inputs[1].document["reason"], "the session is closed")
+
+
+PO_TABLES = ("po_sessions", "po_turns", "po_feed", "po_requests")
+
+
+def _target_held(root: Path) -> bool:
+    """Whether some holder has the PO recovery target lock on `root`, probed without waiting."""
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    else:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(descriptor)
 
 if __name__ == "__main__":
     unittest.main()

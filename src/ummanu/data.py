@@ -9,7 +9,7 @@ import stat as stat_module
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ummanu._fsutil import (
     cleanup_staging_dir as _cleanup_staging_dir,
@@ -38,6 +38,9 @@ from ummanu.kernel.errors import TaskError
 from ummanu.memory_journal import export_memory_snapshot
 from ummanu.runtime.paths import PIPELINE_STATE_DIR
 from ummanu.tasks import TaskReader, task_audit_for
+
+if TYPE_CHECKING:
+    from ummanu.po.queue import QueueCapture
 
 LAYOUT_DIRS = ("board", "memory", "runs", "transcripts", "artifacts", "backups")
 ORCA_WORKSPACES_ROOT = Path.home() / "orca" / "workspaces"
@@ -112,7 +115,7 @@ def export_board(
     data_dir = data_dir.expanduser().resolve()
     board_dir = data_dir / "board"
     _ensure_dir(board_dir, "board data dir")
-    cards, history, sprints, outbox, po, owner_events = _read_board_cut(
+    cards, history, sprints, outbox, po, owner_events, queue = _read_board_cut(
         data_dir, instance_dir, reader, sprint_client
     )
     from ummanu.board.po_notes_checkpoint import (
@@ -121,6 +124,12 @@ def export_board(
         capture_notes,
         read_checkpoint_notes,
         write_notes_capture,
+    )
+    from ummanu.board.po_queue_checkpoint import (
+        QUEUE_CHECKPOINT_FILE,
+        PoQueueCheckpointError,
+        read_checkpoint_queue,
+        write_queue_capture,
     )
 
     # The notes are the PO's file beside the PO SQL capture; they travel with it.
@@ -172,6 +181,8 @@ def export_board(
             _write_json(staging / PO_FILE, po)
             summary["po_sql"] = po_coverage(po, (staging / PO_FILE).read_bytes())
             summary["po_notes"] = write_notes_capture(staging, notes)
+            assert queue is not None  # captured with every PO SQL cut
+            summary["po_queue"] = write_queue_capture(staging, queue, summary["po_sql"]["sha256"])
         _write_json(staging / "export.json", summary)
         # Validate the exact pair restore consumes before replacing the last good live export.
         from ummanu.board.close_checkpoint import CloseCheckpointError, read_checkpoint_close_facts
@@ -186,6 +197,7 @@ def export_board(
             read_checkpoint_close_facts(staging)
             read_checkpoint_po(staging)
             read_checkpoint_notes(staging)
+            read_checkpoint_queue(staging)
         except (
             NormalizedBoardError,
             OriginCheckpointError,
@@ -193,10 +205,11 @@ def export_board(
             PoCheckpointError,
             CloseCheckpointError,
             PoNotesError,
+            PoQueueCheckpointError,
         ) as exc:
             raise RuntimeError(f"board export is not restorable: {exc}") from None
-        if notes is not None:
-            _refuse_secret_notes(staging, instance_dir)
+        if po is not None:
+            _refuse_staged_secrets(staging, instance_dir, notes=notes is not None)
         _publish_component_entries(
             staging,
             board_dir,
@@ -211,7 +224,7 @@ def export_board(
                 *(["origin_returns.ndjson"] if outbox is not None else []),
                 *(["owner_events.ndjson"] if owner_events is not None else []),
                 # Listed for a captured absence too, so a payload from an earlier export leaves.
-                *([PO_FILE, NOTES_CHECKPOINT_FILE] if po is not None else []),
+                *([PO_FILE, NOTES_CHECKPOINT_FILE, QUEUE_CHECKPOINT_FILE] if po is not None else []),
             ],
             "board export",
         )
@@ -221,9 +234,14 @@ def export_board(
     return DataExport(path=board_dir / "cards.json", count=len(normalized), source=summary["source"])
 
 
-def _refuse_secret_notes(staging: Path, instance_dir: Path) -> None:
-    """Refuse staged notes whose decoded text holds a known secret, before they replace the live export."""
+def _refuse_staged_secrets(staging: Path, instance_dir: Path, *, notes: bool) -> None:
+    """Refuse staged PO notes or queue inputs holding a known secret before they replace the live export."""
     from ummanu.board.po_notes_checkpoint import NOTES_CHECKPOINT_FILE, PoNotesError, scan_notes_secrets
+    from ummanu.board.po_queue_checkpoint import (
+        QUEUE_CHECKPOINT_FILE,
+        PoQueueCheckpointError,
+        scan_queue_secrets,
+    )
     from ummanu.runtime.redact import redact
     from ummanu.secret_store import SecretStoreError, redaction_values
 
@@ -232,12 +250,17 @@ def _refuse_secret_notes(staging: Path, instance_dir: Path) -> None:
     except SecretStoreError as exc:
         raise RuntimeError(f"could not load board export redaction values: {exc}") from None
     runtime_env = Path(instance_dir) / "runtime.env"
+
+    def scrub(value: str) -> str:
+        return redact(value, env_files=[runtime_env], secret_values=secret_values)
+
+    scans = [(QUEUE_CHECKPOINT_FILE, scan_queue_secrets)]
+    if notes:
+        scans.insert(0, (NOTES_CHECKPOINT_FILE, scan_notes_secrets))
     try:
-        scan_notes_secrets(
-            (staging / NOTES_CHECKPOINT_FILE).read_text(encoding="utf-8"),
-            lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values),
-        )
-    except (OSError, PoNotesError) as exc:
+        for name, scan in scans:
+            scan((staging / name).read_text(encoding="utf-8"), scrub)
+    except (OSError, PoNotesError, PoQueueCheckpointError) as exc:
         raise RuntimeError(f"board export blocked: {exc}") from None
 
 
@@ -297,13 +320,17 @@ def _read_board_cut(
     list[dict[str, Any]] | None,
     dict[str, list[dict[str, Any]]] | None,
     list[dict[str, Any]] | None,
+    QueueCapture | None,
 ]:
-    """Read cards, audit, sprints, origin obligations, PO SQL and owner events under one snapshot.
+    """Read cards, audit, sprints, origin obligations, PO SQL, the PO queue and owner events as one cut.
 
-    The shared bulk lane covers reads only; publication and Git occur after releasing it.
+    The PO queue's mutation boundary is taken before the bulk lane and the snapshot, held while the
+    PO rows pin the snapshot and the queue is captured, and released before the remaining reads. The
+    shared bulk lane covers reads only; publication and Git occur after releasing it.
     """
     from ummanu.board.sql_cards import SqlCardClient
     from ummanu.dispatch.ownership import bulk_lane
+    from ummanu.po.queue import PoQueue, QueueError
 
     owned = reader is None
     client = None
@@ -312,9 +339,19 @@ def _read_board_cut(
         client = getattr(task_reader, "client", None)
         if isinstance(client, SqlCardClient) and sprint_client is not None and sprint_client is not client:
             raise RuntimeError("sprint export requires the coherent board snapshot connection")
-        with bulk_lane(data_dir), (
+        capture_window = contextlib.ExitStack()
+        if isinstance(client, SqlCardClient):
+            capture_window.enter_context(PoQueue(data_dir).mutation())
+        with capture_window, bulk_lane(data_dir), (
             client.read_snapshot() if isinstance(client, SqlCardClient) else contextlib.nullcontext()
         ):
+            po = queue = None
+            if isinstance(client, SqlCardClient):
+                # The first statement pins the snapshot, so a claim is in these rows exactly when
+                # its queue writes are in the capture.
+                po = export_po_records(client)
+                queue = PoQueue(data_dir).capture()
+            capture_window.close()
             audit_owner = task_audit_for(client, data_dir)
             audit = audit_owner.status()
             if not audit["ok"]:
@@ -331,7 +368,6 @@ def _read_board_cut(
                 if isinstance(client, SqlCardClient)
                 else None
             )
-            po = export_po_records(client) if isinstance(client, SqlCardClient) else None
             if not isinstance(cards, list):
                 raise RuntimeError("ummanu task export did not return a card list")  # noqa: TRY004 - export refusals share RuntimeError
             if sprint_client is None and isinstance(client, SqlCardClient):
@@ -346,7 +382,9 @@ def _read_board_cut(
                     sprints = export_sprint_entities(instance_dir, sprint_board)
                 finally:
                     sprint_board.connection.close()
-            return cards, history, sprints, outbox, po, owner_events
+            return cards, history, sprints, outbox, po, owner_events, queue
+    except QueueError as exc:
+        raise RuntimeError(f"board export is not restorable: {exc}") from None
     except TaskError as exc:
         raise RuntimeError(f"ummanu task export failed: {exc.message}") from None
     finally:

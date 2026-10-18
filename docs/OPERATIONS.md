@@ -491,7 +491,8 @@ on the next hand-over and creates nothing. An input that can never become a turn
 request id taken by something else) moves to `DATA_DIR/po-queue/refused/` with its `reason`. A session
 with queued messages refuses a close (409). Queued messages survive any restart of either service. A
 `backup create` archive, core and full, carries `po-queue/` with `refused/` (the in-flight temporary dot
-files stay out), and `restore` puts them back.
+files stay out), and `restore` puts them back. Every queue write takes the PO recovery target lock, and
+the board checkpoint carries the queue as inert data only ([PO queue capture](RECOVERY.md#po-queue-capture)).
 
 **Request ids.** One check, `PoService._reserve`, decides every request id, for `submit` and
 `create_session` alike (and any later operation that takes one), under the lock that serializes them. An

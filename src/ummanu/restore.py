@@ -78,6 +78,12 @@ from ummanu.board.po_notes_checkpoint import (
     publish_notes,
     read_checkpoint_notes,
 )
+from ummanu.board.po_queue_checkpoint import (
+    LEGACY_QUEUE_COVERAGE,
+    CheckpointQueue,
+    PoQueueCheckpointError,
+    read_checkpoint_queue,
+)
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.task_routing import TaskMetadata
 from ummanu.config import DataDirError, instance_data_dir, validate_instance
@@ -310,11 +316,19 @@ def _checkpoint_notes(board: Path) -> NotesCapture | None:
         raise RestoreError(str(exc)) from None
 
 
+def _checkpoint_queue(board: Path) -> CheckpointQueue | None:
+    """The validated PO queue capture of a board directory, None only for legacy absence."""
+    try:
+        return read_checkpoint_queue(board)
+    except PoQueueCheckpointError as exc:
+        raise RestoreError(str(exc)) from None
+
+
 def restore_po(data_dir: Path, *, source: Path, instance: Path, runtime_user: str | None = None,
                board: Callable[[], None] | None = None) -> bool:
-    """Hold PO admission, run `board`, publish the notes, then import the captured PO SQL.
+    """Hold PO admission, run `board`, publish the notes, describe the queue, then import the PO SQL.
 
-    True when this call advanced the PO SQL phases. `source` is the selected checkpoint's board
+    True when this call advanced the PO SQL phases. The captured queue stays inert board data. `source` is the selected checkpoint's board
     directory, never a live export rewritten later. The hold is durable before `board` publishes
     restored obligations. Root runs the PO protocol as `runtime_user`; restore state records the
     last phase reached and a refusal raises after it.
@@ -326,6 +340,7 @@ def restore_po(data_dir: Path, *, source: Path, instance: Path, runtime_user: st
     with file_lock(lock):
         records = _checkpoint_po(source)
         notes = _checkpoint_notes(source)
+        queue = _checkpoint_queue(source)
         if records is not None:
             try:
                 credentials = resolve_role(instance, "app")
@@ -338,6 +353,7 @@ def restore_po(data_dir: Path, *, source: Path, instance: Path, runtime_user: st
         board()
     with file_lock(lock):
         _restore_notes(data_dir, notes, runtime_user)
+        _record_queue(data_dir, queue)
     if records is None:
         _update_restore_state(data_dir, po_sql_coverage="unavailable", po_sql_restore="unavailable",
                               po_sql_diagnostic=LEGACY_PO_COVERAGE)
@@ -374,6 +390,17 @@ def _restore_notes(data_dir: Path, notes: NotesCapture | None, runtime_user: str
                           po_notes_diagnostic=error or RESTORED_NOTES_COVERAGE)
     if error:
         raise RestoreError(error)
+
+
+def _record_queue(data_dir: Path, queue: CheckpointQueue | None) -> None:
+    """Describe the captured PO queue; restore writes no `<data>/po-queue` file and claims no input."""
+    if queue is None:
+        _update_restore_state(data_dir, po_queue_coverage="unavailable", po_queue_pending=None, po_queue_refused=None,
+                              po_queue_diagnostic=LEGACY_QUEUE_COVERAGE)
+        return
+    pending, refused = queue.counts()
+    _update_restore_state(data_dir, po_queue_coverage="captured" if queue.capture.present else "absent",
+                          po_queue_pending=pending, po_queue_refused=refused, po_queue_diagnostic=queue.describe())
 
 
 def _po_phase(data_dir: Path, runtime_user: str | None, step: Callable[[], dict[str, Any]]) -> dict[str, Any]:

@@ -12,7 +12,8 @@ Two layouts are readable:
   file (`cards/0000/00000000.json`, ...), so changing one card rewrites one small blob; the
   append-only `audit.ndjson` and `events.ndjson` are stored as immutable segments
   (`audit/0000/00000000.ndjson`, ...), and a checkpoint that appended lines adds one segment.
-  `export.json` and the analytics manifest stay single files.
+  `export.json` and the analytics manifest stay single files. The optional `po_queue.ndjson` is
+  stored as bounded parts (`po_queue/0000/00000000.ndjson`, ...) rewritten where they changed.
 
 In both layouts a logical file's bytes are the concatenation of its parts in index order, so every
 consumer of a committed checkpoint reads through :func:`open_checkpoint_board` and sees the same
@@ -47,11 +48,16 @@ LOGICAL_FILES = (
     "po_sql.json",
     "owner_events.ndjson",
     "po_notes.json",
+    "po_queue.ndjson",
 )
 #: Logical files stored one record per file in the split layout: records change in place.
 RECORD_FILES = {"cards.ndjson": ("cards", ".json"), "sprints.ndjson": ("sprints", ".json")}
 #: Logical files stored as immutable segments in the split layout: they only ever grow.
 SEGMENT_FILES = {"audit.ndjson": ("audit", ".ndjson"), "events.ndjson": ("events", ".ndjson")}
+#: Optional logical files stored as parts of at most `MAX_SEGMENT_BYTES` in the split layout, cut
+#: inside a longer line too: they change in place. No parts reads as no file; the export summary's
+#: coverage tells a declared empty file from an absent one.
+CHUNKED_FILES = {"po_queue.ndjson": ("po_queue", ".ndjson")}
 #: Logical files that stay single files in the split layout.
 SINGLE_FILES = ("export.json", "origin_returns.ndjson", "po_sql.json", "owner_events.ndjson", "po_notes.json")
 
@@ -118,11 +124,18 @@ class CheckpointBoard:
             return self.directory / RECORD_FILES[name][0]
         if self.layout == SPLIT and name in SEGMENT_FILES:
             return self.directory / SEGMENT_FILES[name][0]
+        if self.layout == SPLIT and name in CHUNKED_FILES:
+            return self.directory / CHUNKED_FILES[name][0]
         return self.directory / name
 
     def has(self, name: str) -> bool:
         """Whether the logical file exists; split record and log files may have no parts."""
         self._check_name(name)
+        if self.layout == SPLIT and name in CHUNKED_FILES:
+            root = self.path(name)
+            if root.is_symlink():
+                raise CheckpointLayoutError(f"{root}: split checkpoint part directory is a symlink")
+            return root.exists()
         if self.layout == SPLIT and name not in SINGLE_FILES:
             return True
         path = self.directory / name
@@ -139,6 +152,11 @@ class CheckpointBoard:
                 return b"".join(part.read_bytes() for part in _parts(self.directory / directory, suffix))
             if self.layout == SPLIT and name in SEGMENT_FILES:
                 directory, suffix = SEGMENT_FILES[name]
+                return b"".join(part.read_bytes() for part in _parts(self.directory / directory, suffix))
+            if self.layout == SPLIT and name in CHUNKED_FILES:
+                if not self.has(name):
+                    raise FileNotFoundError(self.path(name))
+                directory, suffix = CHUNKED_FILES[name]
                 return b"".join(part.read_bytes() for part in _parts(self.directory / directory, suffix))
             path = self.directory / name
             if path.is_symlink():
@@ -167,6 +185,7 @@ class CheckpointBoard:
                 *SINGLE_FILES,
                 *(directory for directory, _ in RECORD_FILES.values()),
                 *(directory for directory, _ in SEGMENT_FILES.values()),
+                *(directory for directory, _ in CHUNKED_FILES.values()),
             }
         )
 
@@ -240,7 +259,13 @@ def publish_split_board(staging: Path, destination: Path) -> None:
                 _remove(stale)
         else:
             _write_bytes_if_changed(destination / name, _read_staged(staging, name))
-    for name in (*RECORD_FILES, *SEGMENT_FILES):
+    for name, (directory, suffix) in CHUNKED_FILES.items():
+        root = destination / directory
+        if (staging / name).exists():
+            _sync_chunks(_read_staged(staging, name), root, suffix)
+        elif root.exists() or root.is_symlink():
+            _remove(root)
+    for name in (*RECORD_FILES, *SEGMENT_FILES, *CHUNKED_FILES):
         legacy = destination / name
         if legacy.exists() or legacy.is_symlink():
             _remove(legacy)
@@ -308,15 +333,31 @@ def _sync_segments(payload: bytes, committed: bytes | None, root: Path, suffix: 
         _write_bytes_if_changed(root / part_name(index, suffix), segment)
 
 
-def segment_chunks(payload: bytes, limit: int) -> list[bytes]:
-    """Cut NDJSON bytes at line ends into segments of at most `limit` bytes, unless one line is longer."""
+def _sync_chunks(payload: bytes, root: Path, suffix: str) -> None:
+    """Rewrite only the parts whose bytes changed, then drop the parts past the new end."""
+    if root.is_symlink() or (root.exists() and not root.is_dir()):
+        _remove(root)
+    chunks = segment_chunks(payload, MAX_SEGMENT_BYTES, split_lines=True)
+    for index, chunk in enumerate(chunks):
+        _write_bytes_if_changed(root / part_name(index, suffix), chunk)
+    _prune(root, suffix, keep=len(chunks))
+
+
+def segment_chunks(payload: bytes, limit: int, *, split_lines: bool = False) -> list[bytes]:
+    """Cut NDJSON bytes at line ends into segments of at most `limit` bytes.
+
+    A longer line is a segment of its own, or with `split_lines` is cut into `limit`-byte pieces, so
+    no segment exceeds `limit`; the segments joined are `payload` again.
+    """
     segments: list[bytes] = []
     current = bytearray()
-    for record in split_records(payload):
-        if current and len(current) + len(record) > limit:
-            segments.append(bytes(current))
-            current.clear()
-        current += record
+    for line in split_records(payload):
+        pieces = [line[start : start + limit] for start in range(0, len(line), limit)] if split_lines else [line]
+        for record in pieces:
+            if current and len(current) + len(record) > limit:
+                segments.append(bytes(current))
+                current.clear()
+            current += record
     if current:
         segments.append(bytes(current))
     return segments

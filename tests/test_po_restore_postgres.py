@@ -28,6 +28,7 @@ from ummanu.board.po_checkpoint import (
     read_checkpoint_po,
 )
 from ummanu.board.po_notes_checkpoint import RESTORED_NOTES_COVERAGE
+from ummanu.board.po_queue_checkpoint import read_checkpoint_queue
 from ummanu.board.po_restore import (
     PoRestoreStore,
     normalized_po_records,
@@ -40,6 +41,7 @@ from ummanu.cli import main
 from ummanu.data import export_board, init_layout
 from ummanu.dispatch.po_delivery import deliver
 from ummanu.po.client import PoServiceClient
+from ummanu.po.queue import PoQueue, queue_dir
 from ummanu.po.recovery_admission import PoRecoveryAdmission, RecoveryAdmissionError
 from ummanu.po.restore_context import NOTICE, RestoreContextError, RestoredContexts
 from ummanu.po.runner import PoRunner
@@ -334,9 +336,13 @@ class PoRecoveryWiringPostgresTests(unittest.TestCase):
         return instance, data, client, po
 
     def capture(self, records, name, notes=None):
-        """The board export a source installation whose PO tables hold `records` publishes."""
+        """The board export a source installation whose PO tables hold `records` and whose queue holds
+        one pending and one refused input publishes."""
         instance, data, client, _ = self.installation(name)
         seed_po(client, records)
+        queue = PoQueue(data)
+        queue.put(session_id="open", text="queued at the cut", request_id="queued-input", source="web")
+        queue.refuse(queue.put(session_id="closed", text="gone", request_id="refused-input", source="web"), "closed")
         if notes is not None:
             workspace_dir(data).mkdir()
             (workspace_dir(data) / NOTES_FILE).write_bytes(notes)
@@ -401,6 +407,12 @@ class PoRecoveryWiringPostgresTests(unittest.TestCase):
                     ("captured", "complete", RESTORED_NOTES_COVERAGE),
                 )
                 self.assertEqual((workspace_dir(data) / NOTES_FILE).read_bytes(), NOTES)
+                self.assertEqual(
+                    (result["po_queue_coverage"], result["po_queue_pending"], result["po_queue_refused"],
+                     result["po_queue_diagnostic"]),
+                    ("captured", 1, 1, read_checkpoint_queue(data / "board").describe()),
+                )
+                self.assertFalse(queue_dir(data).exists())
                 plan = prepare_po_restore(records, data, interrupted_at=datetime.now(UTC))
                 expected = normalized_po_records(records, plan)
                 require_po_parity(expected, self.readback(client))

@@ -10,7 +10,13 @@ from pathlib import Path
 from unittest import mock
 
 from tests.fakes.installation import _checkpoint
-from tests.po_checkpoint_fixtures import failing_workspace_sync, po_records, write_notes, write_po
+from tests.po_checkpoint_fixtures import (
+    failing_workspace_sync,
+    po_records,
+    write_notes,
+    write_po,
+    write_queue,
+)
 from tests.po_fake_store import FakeBoard, FakePoStore
 from ummanu import _proc
 from ummanu._fsutil import write_json
@@ -20,9 +26,11 @@ from ummanu.board.po_notes_checkpoint import (
     LEGACY_NOTES_COVERAGE,
     RESTORED_NOTES_COVERAGE,
 )
+from ummanu.board.po_queue_checkpoint import LEGACY_QUEUE_COVERAGE, read_checkpoint_queue
 from ummanu.data import init_layout
 from ummanu.installation.materialize import materialize_checkpoint
 from ummanu.installation.models import InstallError
+from ummanu.po.queue import PoQueue, queue_dir
 from ummanu.po.recovery_admission import PoRecoveryAdmission
 from ummanu.po.workspace import NOTES_FILE, NOTES_SEED, workspace_dir
 from ummanu.restore import RestoreError, restore_findings, restore_po, restore_state
@@ -92,6 +100,7 @@ class RestorePoBoundaryTests(unittest.TestCase):
             (state["po_notes_coverage"], state["po_notes_parity"], state["po_notes_diagnostic"]),
             ("unavailable", "unavailable", LEGACY_NOTES_COVERAGE),
         )
+        self.assertEqual((state["po_queue_coverage"], state["po_queue_diagnostic"]), ("unavailable", LEGACY_QUEUE_COVERAGE))
         self.assertEqual(self.artifacts(), [])
         self.assertFalse(workspace_dir(self.data).exists())
 
@@ -256,6 +265,46 @@ class RestorePoBoundaryTests(unittest.TestCase):
         self.assertEqual(restore_state(self.data), {})
         self.assertEqual(self.artifacts(), [])
         self.assertFalse(workspace_dir(self.data).exists())
+
+    def test_a_captured_queue_is_described_inert_and_a_damaged_one_refused_before_any_write(self):
+        source = PoQueue(self.root / "source")
+        source.put(session_id="open", text="claimed", request_id="send", source="web")
+        source.refuse(source.put(session_id="closed", text="gone", request_id="gone", source="web"), "closed")
+        write_json(self.data / "board" / "export.json", {"version": 1})
+        write_po(self.data / "board", po_records())
+        write_queue(self.data / "board", source.capture())
+        board = FakeBoard()
+        with (
+            mock.patch("ummanu.board.store.resolve_role", return_value=object()),
+            mock.patch("ummanu.po.store.PoStore", side_effect=lambda _credentials: _ClosingStore(board)),
+            mock.patch("ummanu.board.po_restore.prepare_po_restore", side_effect=PoCheckpointError("stopped")),
+            self.assertRaisesRegex(RestoreError, "failed at plan: stopped"),
+        ):
+            restore_po(self.data, source=self.data / "board", instance=self.root / "instance")
+        state = restore_state(self.data)
+        self.assertEqual(
+            (state["po_queue_coverage"], state["po_queue_pending"], state["po_queue_refused"], state["po_queue_diagnostic"]),
+            ("captured", 1, 1, read_checkpoint_queue(self.data / "board").describe()),
+        )
+        self.assertFalse(queue_dir(self.data).exists())
+        self.assertEqual(board.requests, {})
+        damaged = self.root / "damaged"
+        init_layout(damaged)
+        write_json(damaged / "board" / "export.json", {"version": 1})
+        write_po(damaged / "board", po_records())
+        write_queue(damaged / "board", source.capture())
+        summary = json.loads((damaged / "board" / "export.json").read_text())
+        summary["po_queue"]["pending"] = 2
+        write_json(damaged / "board" / "export.json", summary)
+        publish = mock.Mock()
+        with (
+            mock.patch("ummanu.board.store.resolve_role", side_effect=AssertionError("credentials read")),
+            self.assertRaisesRegex(RestoreError, "PO queue count/digest mismatch"),
+        ):
+            restore_po(damaged, source=damaged / "board", instance=self.root / "instance", board=publish)
+        publish.assert_not_called()
+        self.assertEqual(restore_state(damaged), {})
+        self.assertFalse(queue_dir(damaged).exists())
 
     def test_doctor_names_an_unfinished_po_phase_and_not_a_finished_or_legacy_one(self):
         complete = {"board": "complete", "sprints": "complete", "memory_index": "complete",
