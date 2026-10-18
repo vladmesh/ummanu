@@ -199,11 +199,12 @@ class RestoredContexts:
                          "phase": "prepared", "attempt": None,
                          "native_id": saved["cli_session_id"], "reason": None}
                 live = self.store.session(identity)
-                if state is None or require_prepared:
-                    if (_row(live, PO_COLUMNS["po_sessions"]) != saved
-                            or len(self.store.turns(identity)) != len(turns)
-                            or len(self.store.feed(identity)) != len(feed)):
-                        raise RestoreContextError("restored context live imported session differs")
+                if (state is None or require_prepared) and (
+                    _row(live, PO_COLUMNS["po_sessions"]) != saved
+                    or len(self.store.turns(identity)) != len(turns)
+                    or len(self.store.feed(identity)) != len(feed)
+                ):
+                    raise RestoreContextError("restored context live imported session differs")
                 if state is not None:
                     known = state["sessions"][identity]
                     if any(known[key] != entry[key] for key in ("session", "boundary", "history_sha256")):
