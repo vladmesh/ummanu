@@ -23,7 +23,6 @@ live root, `snapshot-manifest.json`) committed into a bare snapshot repository w
 
 from __future__ import annotations
 
-import errno
 import fnmatch
 import hashlib
 import json
@@ -42,9 +41,11 @@ from typing import Any
 
 from ummanu import state_repo
 from ummanu._fsutil import (
+    BeneathRefused,
     cleanup_staging_dir as _cleanup_staging_dir,
     ensure_dir as _ensure_dir,
     ndjson_lines,
+    open_beneath,
     publish_component_entries as _publish_component_entries,
     remove_path as _remove_path,
     write_text_atomic as _write_text_atomic,
@@ -1458,6 +1459,15 @@ def _allowlisted_entries(root: int) -> list[str]:
     return sorted(found)
 
 
+# The exporter's wording for each `open_beneath` refusal; an operating-system error keeps its text.
+_BENEATH_REFUSALS = {
+    "missing": "it vanished during the window",
+    "symlink": "symlink at an allowlisted path",
+    "directory": "not a plain directory",
+    "regular": "not a regular file",
+}
+
+
 def _open_beneath(
     directory: int,
     names: list[str],
@@ -1466,49 +1476,17 @@ def _open_beneath(
     prefix: list[str] | None = None,
     missing_ok: bool = False,
 ) -> int | None:
-    """Open `names` beneath the descriptor `directory` without following any symlink.
+    """The one way the exporter opens live-root content (`_fsutil.open_beneath`).
 
-    The one way the exporter opens live-root content: each component is opened relative to the
-    descriptor of its parent, `O_DIRECTORY | O_NOFOLLOW` for every directory and `O_NOFOLLOW` for a
-    file leaf (`O_NONBLOCK`, so a FIFO swapped in cannot hang the window), and every descriptor is
-    checked with `fstat`. Returns a new descriptor the caller closes; None only for a missing
-    component when `missing_ok`. Anything else blocks the window by the path it reached.
+    A refusal blocks the window by the path it reached, shown under `prefix`.
     """
-    current = os.dup(directory)
     try:
-        for index, name in enumerate(names):
-            as_directory = want_directory or index < len(names) - 1
-            shown = "/".join([*(prefix or []), *names[: index + 1]])
-            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
-            flags |= os.O_DIRECTORY if as_directory else os.O_NONBLOCK
-            try:
-                opened = os.open(name, flags, dir_fd=current)
-            except FileNotFoundError:
-                if missing_ok:
-                    return None
-                raise CheckpointBlocked(f"snapshot refuses {shown}: it vanished during the window") from None
-            except OSError as exc:
-                # A refused symlink reads as ELOOP or, under O_DIRECTORY, ENOTDIR; name what is there.
-                status = _entry_status(current, name)
-                if status is not None and stat.S_ISLNK(status.st_mode):
-                    reason = "symlink at an allowlisted path"
-                elif exc.errno in {errno.ELOOP, errno.ENOTDIR}:
-                    reason = "not a plain directory" if as_directory else "not a regular file"
-                else:
-                    reason = exc.strerror or str(exc)
-                raise CheckpointBlocked(f"snapshot refuses {shown}: {reason}") from None
-            os.close(current)
-            current = opened
-            mode = os.fstat(current).st_mode
-            if as_directory and not stat.S_ISDIR(mode):
-                raise CheckpointBlocked(f"snapshot refuses {shown}: not a plain directory")
-            if not as_directory and not stat.S_ISREG(mode):
-                raise CheckpointBlocked(f"snapshot refuses {shown}: not a regular file")
-        opened, current = current, -1
-        return opened
-    finally:
-        if current >= 0:
-            os.close(current)
+        return open_beneath(directory, names, want_directory=want_directory, missing_ok=missing_ok)
+    except BeneathRefused as exc:
+        shown = "/".join([*(prefix or []), *names[: exc.depth]])
+        raise CheckpointBlocked(
+            f"snapshot refuses {shown}: {_BENEATH_REFUSALS.get(exc.reason, exc.reason)}"
+        ) from None
 
 
 def _regular_files_below(directory: int, parts: list[str]) -> list[str]:

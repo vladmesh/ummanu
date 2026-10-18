@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.fakes.installation import _checkpoint
-from tests.po_checkpoint_fixtures import po_records, write_notes, write_po
+from tests.po_checkpoint_fixtures import failing_workspace_sync, po_records, write_notes, write_po
 from tests.po_fake_store import FakeBoard, FakePoStore
 from ummanu import _proc
 from ummanu._fsutil import write_json
@@ -186,6 +186,44 @@ class RestorePoBoundaryTests(unittest.TestCase):
         )
         self.assertNotIn("PO notes restore parity is incomplete", restore_findings(self.data))
         self.assertEqual(PoRecoveryAdmission(self.data, FakePoStore(board)).status()["reason"], "recovery_hold")
+
+    def test_a_failed_workspace_sync_keeps_admission_held_until_a_retry_syncs_it(self):
+        write_json(self.data / "board" / "export.json", {"version": 1})
+        write_po(self.data / "board", po_records())
+        write_notes(self.data / "board", NOTES)
+        board = FakeBoard()
+        self.notes().parent.mkdir()
+        synced: list[bool] = []
+        failing = [True]
+        at_plan = []
+
+        def plan(*_args, **_kwargs):
+            at_plan.append(self.notes().read_bytes())
+            raise PoCheckpointError("stopped at the plan")
+
+        with (
+            mock.patch("ummanu.board.store.resolve_role", return_value=object()),
+            mock.patch("ummanu.po.store.PoStore", side_effect=lambda _credentials: _ClosingStore(board)),
+            mock.patch("ummanu.board.po_restore.prepare_po_restore", side_effect=plan),
+            failing_workspace_sync(self.notes().parent, synced, failing),
+        ):
+            for _ in range(2):
+                with self.assertRaisesRegex(RestoreError, "PO notes restore failed: .*Input/output error"):
+                    restore_po(self.data, source=self.data / "board", instance=self.root / "instance")
+                state = restore_state(self.data)
+                self.assertEqual((state["po_notes_coverage"], state["po_notes_parity"]), ("captured", "failed"))
+                self.assertEqual(
+                    PoRecoveryAdmission(self.data, FakePoStore(board)).status()["reason"], "recovery_hold"
+                )
+                self.assertEqual(self.notes().read_bytes(), NOTES)
+            self.assertEqual(at_plan, [])
+            failing[0] = False
+            with self.assertRaisesRegex(RestoreError, "failed at plan: stopped at the plan"):
+                restore_po(self.data, source=self.data / "board", instance=self.root / "instance")
+        self.assertEqual(synced, [True, True, False])
+        self.assertEqual(at_plan, [NOTES])
+        self.assertEqual(restore_state(self.data)["po_notes_parity"], "complete")
+        self.assertEqual(self.notes().stat().st_mode & 0o777, 0o600)
 
     def test_captured_absence_leaves_an_existing_notes_file_and_claims_no_parity(self):
         write_json(self.data / "board" / "export.json", {"version": 1})

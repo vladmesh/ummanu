@@ -1112,9 +1112,11 @@ unreadable file, content that is not UTF-8 or a file whose size, times or identi
 was read refuses the export, and the previous local export and committed checkpoint stay as they
 were. There is no lock against concurrent PO writes and no promise of an atomic snapshot of other
 filesystem state. Staging, snapshot verification and materialization check the declaration against
-the decoded bytes; a declared missing, changed or malformed payload is fatal. The secret scan reads
-the decoded notes as well as the escaped file before commit/push; a hit blocks the window with
-`secret detected in PO notes` and names no content.
+the decoded bytes; a declared missing, changed or malformed payload is fatal. The board export
+scans the decoded notes with the instance's redaction values and `runtime.env` before it replaces
+the last good local export, and the checkpoint scans the decoded notes and the escaped file again
+before commit/push. A hit names no content (`secret detected in PO notes`) and leaves the local
+export and the committed checkpoint as they were; notes are never published redacted.
 
 Restore publishes the selected capture after the board import and before PO admission finishes
 ([PO SQL restore](#po-sql-restore), step 4), so the install step's workspace materialize later
@@ -1123,7 +1125,9 @@ and links a synced mode-0600 staged file to `po/NOTES.md`, as the runtime user w
 another account. It never replaces or removes a file there:
 
 - a target holding exactly the captured bytes is parity, so a retry, or a retry after an
-  interruption before or after the link, finishes with the same bytes;
+  interruption before or after the link, finishes with the same bytes. Every successful
+  publication, a parity retry included, ends with a sync of `po/`; a failed sync is a refusal that
+  keeps admission held until a retry completes it;
 - any other target file, the installation's seed included, is `PO notes target conflict` and keeps
   its bytes; a symlink at `po/` or at the file is refused. Notes the PO edited after an earlier
   recovery are its work: a later retry refuses the same conflict rather than replace them.

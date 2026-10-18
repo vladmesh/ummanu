@@ -7,17 +7,15 @@ the file from the selected capture and never replaces or removes what a target a
 
 from __future__ import annotations
 
-import errno
 import hashlib
 import json
 import os
-import stat
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ummanu._fsutil import write_json
+from ummanu._fsutil import BeneathRefused, open_beneath, write_json
 from ummanu.board.checkpoint_layout import open_checkpoint_board, read_export_summary, unique_json_fields
 from ummanu.po.workspace import NOTES_FILE, WORKSPACE_NAME
 
@@ -31,6 +29,7 @@ RESTORED_NOTES_COVERAGE = "PO notes restored at byte parity into the PO workspac
 # A crash between staging and linking leaves this name; only this module writes it.
 _STAGED_NAME = f".{NOTES_FILE}.restore.tmp"
 _SHOWN = f"{WORKSPACE_NAME}/{NOTES_FILE}"
+_UNSUPPORTED = {"symlink", "directory", "regular"}
 
 
 class PoNotesError(ValueError):
@@ -51,26 +50,15 @@ def notes_coverage(content: bytes | None) -> dict[str, Any]:
     return {"version": 1, "state": "present", "bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
 
 
-def _open_beneath(directory: int, name: str, *, as_directory: bool) -> int | None:
+def _open_entry(directory: int, name: str, *, as_directory: bool) -> int | None:
     """Open one entry beneath a descriptor without following it; None when it does not exist."""
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_DIRECTORY if as_directory else os.O_NONBLOCK)
     try:
-        opened = os.open(name, flags, dir_fd=directory)
-    except FileNotFoundError:
-        return None
+        return open_beneath(directory, [name], want_directory=as_directory, missing_ok=True)
+    except BeneathRefused as exc:
+        reason = "a symlink or unsupported file type" if exc.reason in _UNSUPPORTED else exc.reason
+        raise PoNotesError(f"PO notes refuse {_SHOWN}: {reason}") from None
     except OSError as exc:
-        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
-            raise PoNotesError(f"PO notes refuse {_SHOWN}: a symlink or unsupported file type") from None
         raise PoNotesError(f"PO notes refuse {_SHOWN}: {exc.strerror or type(exc).__name__}") from None
-    try:
-        mode = os.fstat(opened).st_mode
-    except OSError as exc:
-        os.close(opened)
-        raise PoNotesError(f"PO notes refuse {_SHOWN}: {exc.strerror or type(exc).__name__}") from None
-    if not (stat.S_ISDIR(mode) if as_directory else stat.S_ISREG(mode)):
-        os.close(opened)
-        raise PoNotesError(f"PO notes refuse {_SHOWN}: a symlink or unsupported file type")
-    return opened
 
 
 def _open_data_dir(data_dir: Path) -> int:
@@ -93,7 +81,7 @@ def _identity(info: os.stat_result) -> tuple[int, ...]:
 
 def _read_notes(workspace: int, *, stable: bool) -> bytes | None:
     """The bytes of the notes file beneath `workspace`; `stable` refuses a file that changed while read."""
-    handle = _open_beneath(workspace, NOTES_FILE, as_directory=False)
+    handle = _open_entry(workspace, NOTES_FILE, as_directory=False)
     if handle is None:
         return None
     try:
@@ -123,7 +111,7 @@ def capture_notes(data_dir: Path) -> bytes | None:
     """Read `<data>/po/NOTES.md` once as a UTF-8 regular file; None when the file or `po/` is absent."""
     root = _open_data_dir(data_dir)
     try:
-        workspace = _open_beneath(root, WORKSPACE_NAME, as_directory=True)
+        workspace = _open_entry(root, WORKSPACE_NAME, as_directory=True)
         if workspace is None:
             return None
         try:
@@ -209,11 +197,11 @@ def publish_notes(data_dir: Path, content: bytes) -> bool:
 
     A target file with exactly these bytes is parity; any other file there is a conflict, never
     replaced. Publication is one hard link of a synced staged file, so a crash leaves either no
-    notes file or the whole one.
+    notes file or the whole one, and success always ends with a sync of `po/`.
     """
     root = _open_data_dir(data_dir)
     try:
-        workspace = _open_beneath(root, WORKSPACE_NAME, as_directory=True)
+        workspace = _open_entry(root, WORKSPACE_NAME, as_directory=True)
         if workspace is None:
             try:
                 os.mkdir(WORKSPACE_NAME, 0o700, dir_fd=root)
@@ -221,7 +209,7 @@ def publish_notes(data_dir: Path, content: bytes) -> bool:
                 pass
             except OSError as exc:
                 raise PoNotesError(f"PO notes cannot create {WORKSPACE_NAME}/: {exc.strerror}") from None
-            workspace = _open_beneath(root, WORKSPACE_NAME, as_directory=True)
+            workspace = _open_entry(root, WORKSPACE_NAME, as_directory=True)
             if workspace is None:
                 raise PoNotesError(f"PO notes refuse {WORKSPACE_NAME}/: it vanished during publication")
         try:
@@ -236,29 +224,32 @@ def publish_notes(data_dir: Path, content: bytes) -> bool:
 
 def _publish_beneath(workspace: int, content: bytes) -> bool:
     existing = _read_notes(workspace, stable=False)
-    if existing is not None:
-        if existing != content:
-            raise _conflict()
+    if existing is not None and existing != content:
+        raise _conflict()
+    _discard_staged(workspace)
+    created = False
+    if existing is None:
+        staged = os.open(
+            _STAGED_NAME,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+            dir_fd=workspace,
+        )
+        try:
+            view = memoryview(content)
+            while view:
+                view = view[os.write(staged, view) :]
+            os.fchmod(staged, 0o600)
+            os.fsync(staged)
+        finally:
+            os.close(staged)
+        try:
+            os.link(_STAGED_NAME, NOTES_FILE, src_dir_fd=workspace, dst_dir_fd=workspace, follow_symlinks=False)
+            created = True
+        except FileExistsError:
+            pass
         _discard_staged(workspace)
-        return False
-    _discard_staged(workspace)
-    staged = os.open(
-        _STAGED_NAME, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=workspace
-    )
-    try:
-        view = memoryview(content)
-        while view:
-            view = view[os.write(staged, view) :]
-        os.fchmod(staged, 0o600)
-        os.fsync(staged)
-    finally:
-        os.close(staged)
-    try:
-        os.link(_STAGED_NAME, NOTES_FILE, src_dir_fd=workspace, dst_dir_fd=workspace, follow_symlinks=False)
-        created = True
-    except FileExistsError:
-        created = False
-    _discard_staged(workspace)
+    # A retry that finds the name an interrupted run linked still owes that run's directory sync.
     os.fsync(workspace)
     if _read_notes(workspace, stable=False) != content:
         raise _conflict() if not created else PoNotesError("PO notes target parity mismatch after publication")

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.po_checkpoint_fixtures import write_notes
+from tests.po_checkpoint_fixtures import failing_workspace_sync, write_notes
 from ummanu._fsutil import write_json
 from ummanu.board.checkpoint_layout import publish_split_board
 from ummanu.board.po_notes_checkpoint import (
@@ -242,6 +242,23 @@ class PublishTests(_Case):
         self.assertFalse(self.staged().exists())
         os.link(self.notes, self.staged())
         self.assertFalse(publish_notes(self.data, NOTES))
+        self.assertEqual(self.notes.read_bytes(), NOTES)
+        self.assertFalse(self.staged().exists())
+
+    def test_a_retry_after_a_failed_directory_sync_syncs_the_workspace_before_reporting_parity(self) -> None:
+        self.notes.parent.mkdir()
+        synced: list[bool] = []
+        failing = [True]
+        with failing_workspace_sync(self.notes.parent, synced, failing):
+            for _ in range(2):
+                with self.assertRaisesRegex(PoNotesError, "publication failed: Input/output error"):
+                    publish_notes(self.data, NOTES)
+                self.assertEqual(self.notes.read_bytes(), NOTES)
+            failing[0] = False
+            self.assertFalse(publish_notes(self.data, NOTES))
+        self.assertEqual(synced, [True, True, False])
+        info = self.notes.stat()
+        self.assertEqual((info.st_mode & 0o777, info.st_uid), (0o600, os.geteuid()))
         self.assertEqual(self.notes.read_bytes(), NOTES)
         self.assertFalse(self.staged().exists())
 

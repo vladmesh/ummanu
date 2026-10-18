@@ -195,6 +195,8 @@ def export_board(
             PoNotesError,
         ) as exc:
             raise RuntimeError(f"board export is not restorable: {exc}") from None
+        if notes is not None:
+            _refuse_secret_notes(staging, instance_dir)
         _publish_component_entries(
             staging,
             board_dir,
@@ -217,6 +219,26 @@ def export_board(
         _cleanup_staging_dir(staging)
         raise
     return DataExport(path=board_dir / "cards.json", count=len(normalized), source=summary["source"])
+
+
+def _refuse_secret_notes(staging: Path, instance_dir: Path) -> None:
+    """Refuse staged notes whose decoded text holds a known secret, before they replace the live export."""
+    from ummanu.board.po_notes_checkpoint import NOTES_CHECKPOINT_FILE, PoNotesError, scan_notes_secrets
+    from ummanu.runtime.redact import redact
+    from ummanu.secret_store import SecretStoreError, redaction_values
+
+    try:
+        secret_values = redaction_values(instance_dir)
+    except SecretStoreError as exc:
+        raise RuntimeError(f"could not load board export redaction values: {exc}") from None
+    runtime_env = Path(instance_dir) / "runtime.env"
+    try:
+        scan_notes_secrets(
+            (staging / NOTES_CHECKPOINT_FILE).read_text(encoding="utf-8"),
+            lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values),
+        )
+    except (OSError, PoNotesError) as exc:
+        raise RuntimeError(f"board export blocked: {exc}") from None
 
 
 def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) -> dict[str, Any]:
