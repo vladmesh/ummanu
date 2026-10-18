@@ -6,9 +6,11 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ummanu._fsutil import write_json
-from ummanu.board.checkpoint_layout import publish_split_board
+from ummanu.board import checkpoint_layout
+from ummanu.board.checkpoint_layout import open_checkpoint_board, publish_split_board
 from ummanu.board.po_queue_checkpoint import (
     QUEUE_CHECKPOINT_FILE,
     PoQueueCheckpointError,
@@ -147,6 +149,7 @@ class CheckpointTests(_Case):
         self.assertIsNone(read_checkpoint_queue(legacy))
         self.assertIsNone(read_checkpoint_queue(split))
         self.assertFalse((split / QUEUE_CHECKPOINT_FILE).exists())
+        self.assertFalse((split / "po_queue").exists())
 
     def test_damaged_coverage_or_payload_is_refused_without_content(self) -> None:
         capture = self.seed()
@@ -188,6 +191,111 @@ class CheckpointTests(_Case):
                     read_checkpoint_queue(board)
                 self.assertNotIn("private", str(refused.exception))
                 self.assertNotIn("operate", str(refused.exception))
+
+    def test_split_parts_stay_within_the_budget_and_follow_growth_rewrite_and_shrink(self) -> None:
+        budget = 256
+        self.enterContext(mock.patch.object(checkpoint_layout, "MAX_SEGMENT_BYTES", budget))
+        split = self.root / "split"
+
+        def parts() -> list[Path]:
+            return sorted((split / "po_queue").rglob("*.ndjson"))
+
+        long_text = "я" * 400 + SECRET
+        stages = {
+            "grown": lambda: [self.queue.put(session_id="a", text=f"input {index} " + "x" * 90, request_id=f"r{index}",
+                                             source="web") for index in range(8)],
+            "one line over the budget": lambda: self.queue.put(session_id="a", text=long_text, request_id="long",
+                                                               source="web"),
+            "rewritten at the front": lambda: self.queue.remove(self.queue.pending()[0]),
+            "shrunk": lambda: [self.queue.remove(item) for item in self.queue.pending()[1:]],
+            "emptied": lambda: [self.queue.remove(item) for item in self.queue.pending()],
+        }
+        for label, change in stages.items():
+            with self.subTest(stage=label):
+                change()
+                capture = self.queue.capture()
+                board = self.board(capture, f"flat-{label.replace(' ', '-')}")
+                publish_split_board(board, split)
+                logical = (board / QUEUE_CHECKPOINT_FILE).read_bytes()
+                self.assertEqual(open_checkpoint_board(split).read_bytes(QUEUE_CHECKPOINT_FILE) if logical else b"",
+                                 logical)
+                self.assertEqual(read_checkpoint_queue(split).capture, capture)
+                self.assertTrue(all(0 < part.stat().st_size <= budget for part in parts()))
+                self.assertEqual(b"".join(part.read_bytes() for part in parts()), logical)
+                self.assertEqual(len(parts()) > 1, len(logical) > budget)
+                self.assertEqual((split / "po_queue").exists(), bool(logical))
+                self.assertFalse((split / QUEUE_CHECKPOINT_FILE).exists())
+
+    def test_split_absence_zero_and_damaged_parts_are_told_apart(self) -> None:
+        self.enterContext(mock.patch.object(checkpoint_layout, "MAX_SEGMENT_BYTES", 128))
+        for index in range(4):
+            self.queue.put(session_id="a", text=f"input {index} " + "x" * 100, request_id=f"r{index}", source="web")
+        capture = self.queue.capture()
+
+        def split(name: str, value: QueueCapture) -> Path:
+            target = self.root / name
+            publish_split_board(self.board(value, f"flat-{name}"), target)
+            return target
+
+        zero = split("zero", QueueCapture(True, ()))
+        absent = split("absent", QueueCapture(False, ()))
+        self.assertFalse((zero / "po_queue").exists())
+        self.assertEqual(read_checkpoint_queue(zero).capture, QueueCapture(True, ()))
+        self.assertEqual(read_checkpoint_queue(absent).capture, QueueCapture(False, ()))
+
+        def missing(board: Path) -> None:
+            sorted((board / "po_queue").rglob("*.ndjson"))[-1].unlink()
+
+        def gap(board: Path) -> None:
+            sorted((board / "po_queue").rglob("*.ndjson"))[1].unlink()
+
+        def reordered(board: Path) -> None:
+            first, second = sorted((board / "po_queue").rglob("*.ndjson"))[:2]
+            payload = first.read_bytes()
+            first.write_bytes(second.read_bytes())
+            second.write_bytes(payload)
+
+        def stray(board: Path) -> None:
+            (board / "po_queue" / "0000" / "private.ndjson").write_text("private")
+
+        def linked(board: Path) -> None:
+            shutil.move(board / "po_queue", self.root / f"moved-{board.name}")
+            (board / "po_queue").symlink_to(self.root / f"moved-{board.name}", target_is_directory=True)
+
+        def undeclared(board: Path) -> None:
+            summary = json.loads((board / "export.json").read_text())
+            summary.pop("po_queue")
+            write_json(board / "export.json", summary)
+
+        for damage in (missing, gap, reordered, stray, linked, undeclared):
+            with self.subTest(damage=damage.__name__):
+                board = split(damage.__name__, capture)
+                damage(board)
+                with self.assertRaises(PoQueueCheckpointError) as refused:
+                    read_checkpoint_queue(board)
+                self.assertNotIn("private", str(refused.exception))
+
+    def test_a_secret_cut_by_a_part_boundary_is_found_in_the_logical_file(self) -> None:
+        self.enterContext(mock.patch.object(checkpoint_layout, "MAX_SEGMENT_BYTES", 64))
+        escaped = json.dumps(SECRET)[1:-1]
+
+        def scrub(value: str) -> str:
+            return redact(value, secret_values=(SECRET,))
+
+        # Padding moves the escaped secret until a part boundary cuts it.
+        for padding in range(64):
+            shutil.rmtree(self.data)
+            self.data.mkdir()
+            self.queue.put(session_id="a", text="p" * padding + SECRET, request_id="r", source="web")
+            board = self.root / f"split-{padding}"
+            publish_split_board(self.board(self.queue.capture(), f"flat-{padding}"), board)
+            parts = [part.read_text(encoding="utf-8", errors="replace")
+                     for part in sorted((board / "po_queue").rglob("*.ndjson"))]
+            if not any(escaped in part for part in parts):
+                break
+        self.assertFalse(any(escaped in part or scrub(part) != part for part in parts))
+        with self.assertRaisesRegex(PoQueueCheckpointError, "secret detected in PO queue pending record 0 field text"):
+            scan_queue_secrets(open_checkpoint_board(board).read_text(QUEUE_CHECKPOINT_FILE), scrub)
 
     def test_secret_scan_reads_decoded_fields_through_json_escapes(self) -> None:
         def scrub(value: str) -> str:

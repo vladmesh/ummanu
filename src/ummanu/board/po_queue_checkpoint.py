@@ -129,9 +129,8 @@ def read_checkpoint_queue(directory: Path) -> CheckpointQueue | None:
         po_sql = summary.get("po_sql")
         if not isinstance(po_sql, dict) or coverage.get("po_sql_sha256") != po_sql.get("sha256"):
             raise PoQueueCheckpointError("PO queue coverage is not bound to this checkpoint's PO SQL cut")
-        if not board.has(QUEUE_CHECKPOINT_FILE):
-            raise PoQueueCheckpointError("declared PO queue payload is missing")
-        payload = board.read_bytes(QUEUE_CHECKPOINT_FILE)
+        # A split checkpoint stores an empty payload as no parts; the digest proves which was declared.
+        payload = board.read_bytes(QUEUE_CHECKPOINT_FILE) if board.has(QUEUE_CHECKPOINT_FILE) else b""
         capture = QueueCapture(present=coverage["directory"] == "present", inputs=_records(payload))
         if not capture.present and capture.inputs:
             raise PoQueueCheckpointError("PO queue payload contradicts the captured absence")

@@ -40,14 +40,20 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.fakes.installation import PRODUCT_ROOT
-from tests.fakes.snapshot_remote import HEAD, REVISION, exporter_remote, git
+from tests.fakes.snapshot_remote import HEAD, REVISION, exporter_producers, exporter_remote, git
 from tests.owner_checkpoint_fixtures import bell_rows
-from tests.po_checkpoint_fixtures import po_records, seed_po, write_notes
+from tests.po_checkpoint_fixtures import po_records, seed_po, write_notes, write_queue
 from tests.sql_backend_fixtures import PostgresBoard, insert_card_row
 from tests.support.snapshot_recovery import recover_patches
 from ummanu import bootstrap as bootstrap_module
-from ummanu.board import store
-from ummanu.board.checkpoint_layout import FLAT, LOGICAL_FILES, open_checkpoint_board
+from ummanu.board import checkpoint_layout, store
+from ummanu.board.checkpoint_layout import (
+    FLAT,
+    LOGICAL_FILES,
+    open_checkpoint_board,
+    part_name,
+    segment_chunks,
+)
 from ummanu.board.close_checkpoint import (
     LEGACY_CLOSE_COVERAGE,
     read_checkpoint_close_facts,
@@ -72,6 +78,7 @@ from ummanu.board.po_notes_checkpoint import (
 from ummanu.board.po_queue_checkpoint import (
     LEGACY_QUEUE_COVERAGE,
     QUEUE_CHECKPOINT_FILE,
+    queue_payload,
     read_checkpoint_queue,
 )
 from ummanu.board.sql_audit import SqlTaskAudit
@@ -1042,7 +1049,8 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         before = {path.name: path.read_bytes() for path in board.iterdir() if path.is_file()}
         repository = self.fixture.source_snapshot
         tip = git(repository, "rev-parse", SNAPSHOT_REF)
-        committed = git(repository, "cat-file", "blob", f"{tip}:state/board/{QUEUE_CHECKPOINT_FILE}")
+        committed = git(repository, "ls-tree", "-r", tip, "--", "state/board/po_queue")
+        self.assertTrue(committed)
         secret = 'private"known\\secret-value'
         with (source / "runtime.env").open("a", encoding="utf-8") as runtime_env:
             runtime_env.write(f"EXAMPLE_TOKEN={secret}\n")
@@ -1075,9 +1083,98 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
                 self.assertNotIn("private", result.reason)
                 self.assertEqual({path.name: path.read_bytes() for path in board.iterdir() if path.is_file()}, before)
                 self.assertEqual(git(repository, "rev-parse", SNAPSHOT_REF), tip)
+                self.assertEqual(git(repository, "ls-tree", "-r", tip, "--", "state/board/po_queue"), committed)
+
+    def test_a_queue_over_the_part_budget_commits_bounded_blobs_that_recover_whole(self) -> None:
+        """A backlog and one long refused input exceed the part budget: every committed blob stays
+        within it, recovery materializes the whole queue, a shrink leaves no stale part, and a
+        secret a part boundary cuts is still refused before the commit."""
+        budget = 1024
+        self.enterContext(mock.patch.object(checkpoint_layout, "MAX_SEGMENT_BYTES", budget))
+        fixture = self.fixture
+        queue = PoQueue(fixture.source_data)
+        backlog = [
+            queue.put(session_id="open", text=f"backlog {index} " + "я" * 200, request_id=f"backlog-{index}",
+                      source="web")
+            for index in range(12)
+        ]
+        queue.refuse(queue.put(session_id="closed", text="long " + "я" * 1500, request_id="long-refused",
+                               source="web"), "PO session closed is closed")
+        state_dir = self.root / "source-pipeline-state"
+
+        def committed(tip: str) -> tuple[list[tuple[str, int]], bytes]:
+            listing = git(fixture.remote, "ls-tree", "-r", "-l", "--full-tree", tip, "--", "state/board/po_queue")
+            parts = [(line.split("\t")[1], int(line.split()[3])) for line in listing.splitlines()]
+            payload = b"".join(
+                subprocess.run(["git", "-C", str(fixture.remote), "cat-file", "blob", f"{tip}:{path}"],
+                               capture_output=True, check=True).stdout
+                for path, _ in parts
+            )
+            return parts, payload
+
+        for stage in ("grown", "shrunk"):
+            with self.subTest(stage=stage):
+                if stage == "shrunk":
+                    for item in backlog:
+                        queue.remove(item)
+                tip = fixture.cut(stand_in=False, state_dir=state_dir)
+                parts, payload = committed(tip)
+                logical = (fixture.source_data / "board" / QUEUE_CHECKPOINT_FILE).read_bytes()
+                self.assertEqual(payload, logical)
+                self.assertGreater(len(parts), 1)
+                self.assertTrue(all(0 < size <= budget for _, size in parts))
                 self.assertEqual(
-                    git(repository, "cat-file", "blob", f"{tip}:state/board/{QUEUE_CHECKPOINT_FILE}"), committed
+                    [path for path, _ in parts],
+                    [f"state/board/po_queue/{part_name(index, '.ndjson').as_posix()}" for index in range(len(parts))],
                 )
+                self.assertEqual(git(fixture.remote, "ls-tree", "--name-only", tip, "--",
+                                     f"state/board/{QUEUE_CHECKPOINT_FILE}"), "")
+                if stage == "grown":
+                    self.assertGreater(len(logical), 6 * budget)
+                    source_queue = queue.capture()
+                    self.assertEqual(self._bootstrap()[0], 0)
+                    result, refused = self._recover()
+                    self.assertEqual(result.status, "ok", f"{result.render()}\nrefused store batches: {refused}")
+                    captured = read_checkpoint_queue(fixture.data_dir / "board")
+                    self.assertEqual(captured.capture, source_queue)
+                    self.assertEqual(captured.counts(), (15, 2))
+                    self.assertEqual((fixture.data_dir / "board" / QUEUE_CHECKPOINT_FILE).read_bytes(), logical)
+                    self.assertFalse(queue_dir(fixture.data_dir).exists())
+
+        secret = 'private"known\\secret-value'
+        with (fixture.source / "runtime.env").open("a", encoding="utf-8") as runtime_env:
+            runtime_env.write(f"EXAMPLE_TOKEN={secret}\n")
+        escaped = json.dumps(secret)[1:-1]
+        board = fixture.source_data / "board"
+        # A line longer than the budget is cut every `budget` bytes from its start; padding places the
+        # escaped secret across the first cut, so no physical part holds it whole.
+        probe = queue.put(session_id="open", text=secret, request_id="pasted", source="web")
+        line = next(line for line in queue_payload(queue.capture()).splitlines() if b'"pasted"' in line)
+        queue.remove(probe)
+        offset = line.index(escaped.encode())
+        queue.put(session_id="open", text="p" * (budget - offset - 5) + secret + "q" * budget, request_id="pasted",
+                  source="web")
+        chunks = segment_chunks(queue_payload(queue.capture()), budget, split_lines=True)
+        self.assertFalse(any(escaped.encode() in chunk for chunk in chunks))
+        # The stand-in producers stage this live export as it is, so only the cut's own scan can refuse.
+        write_queue(board, queue.capture())
+        repository = fixture.source_snapshot
+        tip = git(repository, "rev-parse", SNAPSHOT_REF)
+        before = committed(git(fixture.remote, "rev-parse", SNAPSHOT_REF))
+        with exporter_producers():
+            result = SnapshotExporter(
+                fixture.source_data,
+                fixture.source,
+                snapshot_repo=repository,
+                product_revision=REVISION,
+                board_schema_head=head_revision(),
+                state_dir=state_dir,
+            ).write()
+        self.assertEqual(result.status, "blocked", result.reason)
+        self.assertIn("secret detected in PO queue pending record", result.reason)
+        self.assertNotIn("private", result.reason)
+        self.assertEqual(git(repository, "rev-parse", SNAPSHOT_REF), tip)
+        self.assertEqual(committed(tip), before)
 
     def test_locked_runtime_secrets_restore_board_and_po_sql_but_skip_activation(self) -> None:
         self.assertEqual(self._bootstrap()[0], 0)

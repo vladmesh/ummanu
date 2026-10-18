@@ -1395,7 +1395,13 @@ class SnapshotExporter(CheckpointWriter):
                     board.read_text("sprints.ndjson"),
                     lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values),
                 )
-        except (CloseCheckpointError, CheckpointLayoutError) as exc:
+            # Queue parts may cut a line, a token or a UTF-8 sequence, so the whole logical file is scanned.
+            if board.has(QUEUE_CHECKPOINT_FILE):
+                scan_queue_secrets(
+                    board.read_text(QUEUE_CHECKPOINT_FILE),
+                    lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values),
+                )
+        except (CloseCheckpointError, CheckpointLayoutError, PoQueueCheckpointError) as exc:
             raise CheckpointBlocked(str(exc)) from None
         for path in paths:
             text = (cut / path).read_bytes().decode("utf-8", errors="replace")
@@ -1418,13 +1424,6 @@ class SnapshotExporter(CheckpointWriter):
                         text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values)
                     )
                 except PoNotesError as exc:
-                    raise CheckpointBlocked(str(exc)) from None
-            if path == f"state/board/{QUEUE_CHECKPOINT_FILE}":
-                try:
-                    scan_queue_secrets(
-                        text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values)
-                    )
-                except PoQueueCheckpointError as exc:
                     raise CheckpointBlocked(str(exc)) from None
             if redact(text, env_files=[runtime_env], secret_values=secret_values) != text:
                 hits.append(path)

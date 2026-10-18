@@ -151,6 +151,8 @@ def run_restore_board(args: argparse.Namespace) -> int:
         "po_notes_parity": state["po_notes_parity"],
         "po_notes_diagnostic": state["po_notes_diagnostic"],
         "po_queue_coverage": state["po_queue_coverage"],
+        "po_queue_pending": state["po_queue_pending"],
+        "po_queue_refused": state["po_queue_refused"],
         "po_queue_diagnostic": state["po_queue_diagnostic"],
     }
 

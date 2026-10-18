@@ -395,7 +395,8 @@ def _restore_notes(data_dir: Path, notes: NotesCapture | None, runtime_user: str
 def _record_queue(data_dir: Path, queue: CheckpointQueue | None) -> None:
     """Describe the captured PO queue; restore writes no `<data>/po-queue` file and claims no input."""
     if queue is None:
-        _update_restore_state(data_dir, po_queue_coverage="unavailable", po_queue_diagnostic=LEGACY_QUEUE_COVERAGE)
+        _update_restore_state(data_dir, po_queue_coverage="unavailable", po_queue_pending=None, po_queue_refused=None,
+                              po_queue_diagnostic=LEGACY_QUEUE_COVERAGE)
         return
     pending, refused = queue.counts()
     _update_restore_state(data_dir, po_queue_coverage="captured" if queue.capture.present else "absent",
