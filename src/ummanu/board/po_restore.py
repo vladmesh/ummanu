@@ -5,12 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import stat
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ummanu._fsutil import directory_lock, fsync_directory, write_bytes_atomic
 from ummanu.board.po_checkpoint import PO_COLUMNS, PoCheckpointError, export_po_records, validate_po_records
 from ummanu.board.sql_rows import parse_rfc3339, rfc3339
 from ummanu.po.runner import runs_dir
@@ -37,6 +40,95 @@ class PoRestorePlan:
     data_dir: str
     interrupted_at: str
     native_bindings: tuple[tuple[str, str | None], ...]
+
+
+def _plan_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    if len(dict(pairs)) != len(pairs):
+        raise PoCheckpointError("PO restore plan JSON has duplicate fields")
+    return dict(pairs)
+
+
+def _plan_constant(value: str) -> None:
+    raise PoCheckpointError("PO restore plan JSON has a nonfinite number")
+
+
+def _load_plan(payload: bytes, records: dict[str, list[dict[str, Any]]], data_dir: Path) -> PoRestorePlan:
+    try:
+        saved = json.loads(payload.decode("utf-8"), object_pairs_hook=_plan_object,
+                           parse_constant=_plan_constant)
+    except (UnicodeError, ValueError, RecursionError):
+        raise PoCheckpointError("PO restore plan JSON is invalid") from None
+    fields = {"version", "source_sha256", "data_dir", "interrupted_at", "native_bindings"}
+    if type(saved) is not dict or set(saved) != fields:
+        raise PoCheckpointError("PO restore plan fields are invalid")
+    if type(saved["version"]) is not int or saved["version"] != 1:
+        raise PoCheckpointError("PO restore plan version is unsupported")
+    for field in ("source_sha256", "data_dir", "interrupted_at"):
+        if type(saved[field]) is not str:
+            raise PoCheckpointError(f"PO restore plan field {field} must be a string")
+    if not re.fullmatch(r"[0-9a-f]{64}", saved["source_sha256"]):
+        raise PoCheckpointError("PO restore plan field source_sha256 is invalid")
+    if saved["data_dir"] != str(data_dir):
+        raise PoCheckpointError("PO restore plan field data_dir differs from target")
+    bindings = saved["native_bindings"]
+    if type(bindings) is not list or any(
+        type(binding) is not list or len(binding) != 2 or type(binding[0]) is not str
+        or (binding[1] is not None and type(binding[1]) is not str) for binding in bindings
+    ):
+        raise PoCheckpointError("PO restore plan field native_bindings is invalid")
+    plan = PoRestorePlan(saved["source_sha256"], saved["data_dir"], saved["interrupted_at"],
+                         tuple(tuple(binding) for binding in bindings))
+    normalized_po_records(records, plan)
+    return plan
+
+
+def _check_plan_path(info: os.stat_result, *, directory: bool, private: bool) -> None:
+    kind = stat.S_ISDIR if directory else stat.S_ISREG
+    mode = 0o700 if directory else 0o600
+    if (not kind(info.st_mode) or info.st_uid != os.geteuid()
+            or (private and stat.S_IMODE(info.st_mode) != mode)
+            or (not private and info.st_mode & 0o022)
+            or (not directory and info.st_nlink != 1)):
+        raise PoCheckpointError("PO restore plan path type, owner or permissions are unsafe")
+
+
+def prepare_po_restore(records: dict[str, list[dict[str, Any]]], data_dir: Path,
+                       *, interrupted_at: datetime) -> PoRestorePlan:
+    """Persist or strictly reload one frozen plan under an existing canonical, owned target.
+
+    Only a missing plan permits creation; callers import in a later SQL transaction.
+    """
+    validate_po_records(records)
+    if interrupted_at.tzinfo is None or interrupted_at.utcoffset() is None:
+        raise PoCheckpointError("PO restore plan requires an aware interruption time")
+    try:
+        if not data_dir.is_absolute() or data_dir.resolve(strict=True) != data_dir:
+            raise PoCheckpointError("PO restore plan target must be canonical without symlinks")
+        _check_plan_path(data_dir.lstat(), directory=True, private=False)
+        state = data_dir / ".po-restore"
+        state.mkdir(mode=0o700, exist_ok=True)
+        _check_plan_path(state.lstat(), directory=True, private=True)
+        with directory_lock(state):
+            fsync_directory(data_dir)
+            path = state / "plan.json"
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                plan = plan_po_restore(records, data_dir, interrupted_at=interrupted_at)
+                payload = {"version": 1, **asdict(plan)}
+                write_bytes_atomic(path, (json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                                                     allow_nan=False) + "\n").encode("utf-8"), mode=0o600)
+            else:
+                _check_plan_path(info, directory=False, private=True)
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(descriptor, "rb") as handle:
+                    _check_plan_path(os.fstat(handle.fileno()), directory=False, private=True)
+                    plan = _load_plan(handle.read(), records, data_dir)
+            # A failed directory sync after rename must be completed by the next retry too.
+            fsync_directory(state)
+            return plan
+    except (OSError, RuntimeError) as exc:
+        raise PoCheckpointError(f"PO restore plan storage failed ({type(exc).__name__})") from None
 
 
 def plan_po_restore(records: dict[str, list[dict[str, Any]]], data_dir: Path,

@@ -1021,12 +1021,37 @@ tables untouched. Recovery's `po-sql` result and `restore-board`'s `po_sql_cover
 `po_sql_diagnostic` distinguish captured source data from imported state. These flows do not invoke
 the library primitive `board.po_restore.PoRestoreStore` or establish PO readiness.
 
-The library accepts validated captured records and an explicit `PoRestorePlan`. Create the plan
-with `plan_po_restore(records, target_data_dir, interrupted_at=aware_time)` and persist its fields
-before any import. The plan binds the complete source by canonical JSON SHA-256, an absolute
-canonical target data directory, a fixed interruption time and per-session native bindings. Retain
-the immutable tuple pairs in `native_bindings` when reloading a serialized plan. The pure
-`normalized_po_records(records, plan)` preview names the exact target rows. Allowed differences are:
+The library ordering is: validate captured source with `read_checkpoint_po`/`validate_po_records`,
+prepare/load and persist the plan, open the caller's SQL transaction and import, prove parity, then
+consider activation separately. Legacy unavailable coverage cannot be passed as empty records.
+`board.po_restore.prepare_po_restore(records, target_data_dir, interrupted_at=aware_time)` owns
+preparation and loading. The target must already exist, be absolute and canonical with no symlink
+components, belong to the effective user and deny group/other writes. Its private `.po-restore`
+directory must belong to that user with mode 0700; `plan.json` must be a single-link regular file
+owned by that user with mode 0600. Preparation holds the native directory lock, publishes a synced
+temporary file by atomic replacement and syncs the directories before returning. A same-source,
+same-target retry reloads the frozen time and UUIDs even when its explicit aware caller time differs;
+it never rewrites the plan. Pure `plan_po_restore` alone does not persist anything.
+
+The version 1 JSON object allows exactly `version` (integer 1, not boolean), `source_sha256`
+(64 lowercase hex characters), `data_dir` (the exact target string), `interrupted_at` (canonical
+aware RFC3339 string) and `native_bindings` (ordered arrays of two values: session id string and
+Claude UUID string or Codex null). No other fields, duplicate JSON keys, nonfinite numbers or
+implicit type conversions are allowed. Loading reconstructs tuple pairs and runs
+`normalized_po_records` validation, including exact source digest, binding coverage/order,
+unique fresh canonical UUIDs and interruption time at or after every running turn's start.
+The source digest contract is SHA-256 of UTF-8 bytes from Python
+`json.dumps(records, sort_keys=True, ensure_ascii=False, allow_nan=False)` with default separators
+and no trailing newline. Object key order is irrelevant; array order, Unicode spelling and JSON
+value types remain significant. It is distinct from the checkpoint's exact-file-byte digest.
+
+Only a genuinely missing `plan.json` permits generation. Corruption, unsupported versions,
+source/target mismatch, unsafe paths and read/publication errors fail with safe plan/field/class
+diagnostics, without fallback or overwriting existing bytes. An interrupted unpublished temporary
+is not an accepted plan; after publication, retry reloads that plan, including after a failed
+directory sync or caller SQL rollback. A frozen plan is neither SQL parity nor service readiness.
+The pure `normalized_po_records(records, plan)` preview names the exact target rows. Allowed
+differences are:
 
 - Every session cwd becomes `<data>/po` and every turn stdout path becomes
   `<data>/po-runs/<session_id>/turn-<seq:04d>.stdout`. No old files are accessed or copied.
