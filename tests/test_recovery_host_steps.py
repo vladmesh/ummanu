@@ -1,7 +1,7 @@
 """Recovery host steps the infra drill (ummanu-48) found broken on a fresh host.
 
 One test class per defect: a role worktree whose registration outlived its directory (P1b), the
-fastembed cache layout (P2), Caddy for the web front (P4), a drained tick with an open sprint (P5),
+Caddy for the web front (P4), a drained tick with an open sprint (P5),
 disabled project bindings (P6) and root-created directories handed to the runtime user (P11). The
 memory export after recover (P3) runs through the snapshot recovery in `tests/test_snapshot_recover.py`.
 
@@ -23,7 +23,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-import textwrap
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -145,111 +144,6 @@ class RoleWorktreeRegistrationTests(unittest.TestCase):
             upgrade_checkout._git_failure_reason("hint: try\nfatal: the cause\nhint: more\n"), "fatal: the cause"
         )
         self.assertEqual(upgrade_checkout._git_failure_reason(""), "failed")
-
-
-class EmbedderEnvironmentTests(unittest.TestCase):
-    """P2: shared hub blobs split `model.onnx` from `model.onnx_data`, which onnxruntime refuses."""
-
-    VARIABLE = "HF_HUB_DISABLE_SHARED_BLOBS"
-    HUB_MODULES = ("fastembed", "huggingface_hub")
-
-    def test_memory_service_sets_the_variable_before_its_first_third_party_import(self) -> None:
-        tree = source_trees.parse((SOURCE / "memory_service.py").read_text(encoding="utf-8"))
-        setting = next(
-            index
-            for index, node in enumerate(tree.body)
-            if isinstance(node, ast.Assign)
-            and ast.unparse(node.targets[0]) == f"os.environ['{self.VARIABLE}']"
-            and ast.literal_eval(node.value) == "1"
-        )
-        imported_before = [
-            name.split(".")[0]
-            for node in tree.body[:setting]
-            if isinstance(node, ast.Import | ast.ImportFrom)
-            for name in (
-                [alias.name for alias in node.names] if isinstance(node, ast.Import) else [node.module or ""]
-            )
-        ]
-        self.assertTrue(imported_before)
-        self.assertTrue(
-            all(name == "__future__" or name in sys.stdlib_module_names for name in imported_before),
-            imported_before,
-        )
-        fastembed = next(
-            index
-            for index, node in enumerate(tree.body)
-            if isinstance(node, ast.ImportFrom) and node.module == "fastembed"
-        )
-        self.assertGreater(fastembed, setting)
-
-    def test_no_other_module_imports_the_embedding_stack(self) -> None:
-        """One place sets it: every embedder (service, reindex, recover) is built through `memory_service`."""
-        importers = set()
-        # An import of the stack spells its top-level name, so no other file can import it.
-        for path, tree in source_trees.modules(SOURCE, naming=self.HUB_MODULES):
-            for node in source_trees.imports(tree):
-                names = (
-                    [alias.name for alias in node.names]
-                    if isinstance(node, ast.Import)
-                    else [node.module or ""]
-                    if isinstance(node, ast.ImportFrom)
-                    else []
-                )
-                if any(name.split(".")[0] in self.HUB_MODULES for name in names):
-                    importers.add(path.relative_to(SOURCE).as_posix())
-        self.assertEqual(importers, {"memory_service.py"})
-        reindex = source_trees.parse((SOURCE / "memory_reindex.py").read_text(encoding="utf-8"))
-        self.assertIn(
-            "memory_service",
-            [alias.name for node in reindex.body if isinstance(node, ast.ImportFrom) for alias in node.names],
-        )
-
-    def test_the_hub_sees_the_variable_when_the_service_module_imports_it(self) -> None:
-        """The import order itself, with the third-party modules stood in so no model is needed."""
-        script = textwrap.dedent(
-            """
-            import importlib.abc, importlib.machinery, json, os, sys, types
-            from unittest import mock
-
-            STUBBED = {"numpy", "sqlite_vec", "fastembed", "huggingface_hub", "mcp"}
-            seen = {}
-
-            class Stub(types.ModuleType):
-                def __getattr__(self, attr):
-                    if attr.startswith("__"):
-                        raise AttributeError(attr)
-                    value = mock.MagicMock(name=f"{self.__name__}.{attr}")
-                    setattr(self, attr, value)
-                    return value
-
-            class Finder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
-                def find_spec(self, name, path=None, target=None):
-                    if name.split(".")[0] in STUBBED:
-                        return importlib.machinery.ModuleSpec(name, self, is_package=True)
-                    return None
-
-                def create_module(self, spec):
-                    return Stub(spec.name)
-
-                def exec_module(self, module):
-                    seen[module.__name__] = os.environ.get("HF_HUB_DISABLE_SHARED_BLOBS")
-
-            sys.meta_path.insert(0, Finder())
-            import ummanu.memory_service
-            print(json.dumps(seen))
-            """
-        )
-        environment = {key: value for key, value in os.environ.items() if key != self.VARIABLE}
-        environment["PYTHONPATH"] = str(ROOT / "src")
-        completed = subprocess.run(
-            [sys.executable, "-c", script], capture_output=True, text=True, env=environment, check=False
-        )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        import json
-
-        seen = json.loads(completed.stdout.strip().splitlines()[-1])
-        self.assertIn("fastembed", seen)
-        self.assertEqual(seen["fastembed"], "1")
 
 
 #: `host.web_front.sites`, as a line of a `host:` block.

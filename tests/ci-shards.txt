@@ -187,6 +187,8 @@ unit tests/test_shipped_memory_pack.py
 integration-memory tests/test_memory_po_bridge.py
 integration-memory tests/test_memory_permissions.py
 integration-memory tests/test_memory_service.py
+integration-memory tests/test_memory_model_loader.py
+unit tests/test_memory_model.py
 integration-heads tests/test_observer_metadata.py
 packaging tests/test_onboarding.py
 integration-board tests/test_pipeline_paths.py

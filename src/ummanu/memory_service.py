@@ -1,6 +1,6 @@
 """Memory MCP server, shared semantic memory for any MCP-speaking agent.
 
-SQLite + sqlite-vec for storage/ANN, fastembed (bge-m3, multilingual) for embeddings,
+SQLite + sqlite-vec for storage/ANN, fastembed for multilingual embeddings,
 exposed over streamable-HTTP so Claude / Codex / Hermes all share ONE warm instance.
 """
 
@@ -14,13 +14,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-# Every process that builds the embedder imports this module first: the memory service, the reindex
-# and recover's memory step. huggingface_hub reads this once, when it is imported (`constants.py`),
-# so it is set before fastembed pulls the hub in. Shared blobs put `model.onnx` and
-# `model.onnx_data` in different directories, and onnxruntime refuses that on a fresh cache
-# ("External data path escapes model directory").
-os.environ["HF_HUB_DISABLE_SHARED_BLOBS"] = "1"
-
 import numpy as np
 import sqlite_vec
 from fastembed import TextEmbedding
@@ -29,8 +22,7 @@ from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 
-from ummanu.memory import DEFAULT_MODEL
-from ummanu.memory import access as memory_access
+from ummanu.memory import DEFAULT_MODEL, access as memory_access
 from ummanu.memory.canon import (  # noqa: F401  # Service-level names of the canon parsing.
     fact_content_hash,
     fact_files,
@@ -38,6 +30,7 @@ from ummanu.memory.canon import (  # noqa: F401  # Service-level names of the ca
     parse_frontmatter,
     scope_for_relative,
 )
+from ummanu.memory.model import load_text_embedding
 from ummanu.runtime.paths import default_instance_path
 
 DEFAULT_MEMORY_DIR = Path.home() / "ummanu-data" / "memory"
@@ -74,11 +67,7 @@ def embedder() -> TextEmbedding:
     if _embedder is None:
         with _lock:
             if _embedder is None:
-                _embedder = TextEmbedding(
-                    model_name=MODEL,
-                    cache_dir=str(MODEL_CACHE_DIR),
-                    threads=THREADS,
-                )
+                _embedder = load_text_embedding(MODEL, MODEL_CACHE_DIR, THREADS)
     return _embedder
 
 
@@ -88,11 +77,11 @@ def _unit(vec) -> np.ndarray:
 
 
 def embed_doc(text: str) -> np.ndarray:
-    return _unit(list(embedder().embed([text]))[0])
+    return _unit(next(iter(embedder().embed([text]))))
 
 
 def embed_query(text: str) -> np.ndarray:
-    return _unit(list(embedder().query_embed(text))[0])
+    return _unit(next(iter(embedder().query_embed(text))))
 
 
 def db(path: str | Path | None = None) -> sqlite3.Connection:
@@ -233,7 +222,7 @@ def log_read(
         with _search_log_lock, open(SEARCH_LOG, "a", encoding="utf-8") as f:
             f.write(line + "\n")
             f.flush()
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - Audit telemetry failure cannot block memory reads.
         pass
 
 
@@ -369,11 +358,7 @@ def canon_signature() -> tuple:
 
 def build_document_embedder(model: str, cache_dir: str | Path, threads: int):
     """Return a normalized document embedder for an explicit model."""
-    embedding_model = TextEmbedding(
-        model_name=model,
-        cache_dir=str(cache_dir),
-        threads=threads,
-    )
+    embedding_model = load_text_embedding(model, cache_dir, threads)
 
     class DocumentEmbedder:
         def __call__(self, text: str) -> np.ndarray:
@@ -696,7 +681,7 @@ def bootstrap_index() -> int | None:
     try:
         result = update_index()
         n = result["parity"]["indexed"]
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - Any reconciliation failure must retain a compatible index.
         has_index = index_exists()
         status, detail = index_compatibility(DB_PATH, MODEL, DIM) if has_index else ("missing", None)
         if has_index and status in {"compatible", "legacy"}:
@@ -759,7 +744,7 @@ def start_canon_watcher() -> None:
                         f"deleted={result['deleted']} reused={result['reused']}",
                         flush=True,
                     )
-            except Exception as e:  # never let the watcher kill the daemon
+            except Exception as e:  # noqa: BLE001 - Reconciliation failures must leave the watcher running.
                 print(f"memory-mcp: watcher error: {e}", flush=True)
 
     threading.Thread(target=loop, name="canon-watcher", daemon=True).start()

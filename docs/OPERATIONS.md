@@ -183,6 +183,29 @@ The model cache is `DATA_DIR/memory/fastembed-cache`, never `/tmp`. `host.memory
 ONNX Runtime inference limit (default `1`). `ummanu doctor` prints the cache path and warns when
 `data_dir` puts it under a temporary directory.
 
+The default model uses `qdrant/multilingual-e5-large-onnx` revision
+`66076b8dc6e367337e3e90e6fb309fb0f3addaf6`. The memory extra pins fastembed `0.8.0`,
+ONNX Runtime `1.30.0`, huggingface-hub `1.33.0`, tokenizers `0.23.2` and NumPy `2.4.6`.
+`ummanu.memory.model.MODEL_FILES` fixes SHA-256 for the graph, external weights, tokenizer and
+three JSON configuration files. Tokenization truncates at 512 tokens and uses the pinned padding
+and special tokens. Documents and queries use attention-masked mean pooling, followed by the
+service's float32 L2 normalization; neither path adds a query or passage prefix.
+
+Service initialization, explicit reindex and recovery prepare the same verified model directory
+under `fastembed-cache/ummanu-models/multilingual-e5-large/REVISION`. Preparation first uses the
+cached pinned snapshot, downloading that revision only when it is unavailable. It copies through
+flat or shared-blob symlinks into independent regular files and publishes the complete directory
+atomically. ONNX Runtime requires external weights to resolve within the graph's directory;
+shared-blob shards do not satisfy that constraint. Preparation needs about 2.26 GB of additional
+disk space, leaves hub blobs intact and validates checksums on every initialization. A lock
+serializes preparation; retries discard an interrupted private staging directory.
+
+Retry the ordinary service start or `ummanu memory reindex --instance INSTANCE`; recovery uses
+the same loader on retry. An existing verified prepared directory needs no hub access. On a
+checksum or missing-file error, repair the named cache file from the pinned revision and retry.
+The loader refuses the damaged model before publishing an index; the previous index and canon
+remain available on disk. No cache clearing or dependency overrides are required.
+
 `host.memory_model` and `host.memory_dim` select the embedding model and its matching dimension
 (defaults `intfloat/multilingual-e5-large` and `1024`). Install, recover, explicit memory reindex and
 the memory service resolve the same settings. A recovery retry rebuilds an incompatible, legacy or
