@@ -105,7 +105,7 @@ from ummanu.installation.materialize import materialize_checkpoint
 from ummanu.memory import client_config
 from ummanu.memory_journal import export_memory_snapshot, verify_memory_journal
 from ummanu.po import workspace as po_workspace
-from ummanu.po.attachments import attachments_dir, store_image
+from ummanu.po.attachments import attachment_path, attachments_dir, store_image
 from ummanu.po.queue import PoQueue, queue_dir
 from ummanu.po.recovery_admission import PoRecoveryAdmission
 from ummanu.po.runner import PoRunner
@@ -509,23 +509,33 @@ class _SnapshotRecoveryCase(unittest.TestCase):
         self.assertEqual(PoQueue(self.fixture.source_data).capture(), self.source_queue)
 
 
-    def _assert_inert_attachments(self, steps: dict[str, tuple[str, str]], data_dir: Path) -> None:
-        """The source images arrive as exact board bytes; no session attachments directory is written."""
+    def _assert_native_attachments(self, steps: dict[str, tuple[str, str]], data_dir: Path) -> None:
+        """Ordinary native readers return every captured image without changing the source."""
         board = data_dir / "board"
         lines = (board / ATTACHMENTS_CHECKPOINT_FILE).read_text(encoding="utf-8").splitlines()
         self.assertEqual({(record["session_id"], record["name"]): bytes.fromhex(record["data"])
                           for record in map(json.loads, lines)}, self.source_images)
         captured = read_checkpoint_attachments(board)
-        self.assertEqual(steps["po-attachments"], ("unchanged", captured.describe()))
+        self.assertEqual(steps["po-attachments"], ("unchanged", captured.describe() + "; native runtime parity complete"))
         state = restore_state(data_dir)
         self.assertEqual(
             (state["po_attachments_coverage"], state["po_attachments_files"], state["po_attachments_bytes"]),
             ("captured", 3, sum(len(image) for image in self.source_images.values())),
         )
-        for session in ("closed", "empty", "open"):
-            self.assertFalse(attachments_dir(data_dir, session).exists())
+        self.assertEqual(state["po_attachments_parity"], "complete")
+        self.assertFalse(attachments_dir(data_dir, "empty").exists())
         for (session, name), image in self.source_images.items():
+            self.assertEqual(attachment_path(data_dir, session, name).read_bytes(), image)
             self.assertEqual((attachments_dir(self.fixture.source_data, session) / name).read_bytes(), image)
+
+    def _restore_board_images(self, instance: Path, data_dir: Path) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli_main(["restore-board", "--instance", str(instance)])
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertEqual(json.loads(output.getvalue())["po_attachments_parity"], "complete")
+        for (session, name), image in self.source_images.items():
+            self.assertEqual(attachment_path(data_dir, session, name).read_bytes(), image)
 
 
 class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
@@ -855,7 +865,8 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertNotIn(NOTES_FILE, self._materialize_po_workspace(data_dir.resolve()))
         self.assertEqual(notes.read_bytes(), SOURCE_NOTES)
         self._assert_inert_queue(steps, data_dir, po)
-        self._assert_inert_attachments(steps, data_dir)
+        self._assert_native_attachments(steps, data_dir)
+        self._restore_board_images(target, data_dir)
         # The closed card on the retired id is back as the tree exported it: placement and project.
         exported = next(
             card
@@ -950,6 +961,7 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertEqual(runner.wait("open", turn.seq, 2).state, COMPLETED)
         self.assertEqual(po.session("open").cli_session_id, "new-thread")
         self.assertEqual(seen_notes, [SOURCE_NOTES])
+        later_image = store_image(data_dir, "open", b"\x89PNG\r\n\x1a\nlater native upload")
         # The installation's ordinary export rewrites `<data>/board` with the new history; a capture
         # there holding other notes is not what the retry restores.
         export_board(data_dir, instance_dir=self.fixture.target)
@@ -966,6 +978,10 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertEqual(steps["po-sql"], ("unchanged", RESTORED_PO_COVERAGE))
         self.assertEqual(self._readback(client), live)
         self.assertEqual((data_dir / ".po-restore" / "plan.json").read_bytes(), plan)
+        self.assertEqual(restore_state(data_dir)["po_attachments_files"], len(self.source_images))
+        self.assertEqual(later_image.read_bytes(), b"\x89PNG\r\n\x1a\nlater native upload")
+        for (session, name), image in self.source_images.items():
+            self.assertEqual(attachment_path(data_dir, session, name).read_bytes(), image)
         self.assertIsNone(PoRecoveryAdmission(data_dir, po).status())
         replay, created = runner.send_request("open", "input after recovery", "after-recovery")
         self.assertEqual((replay.seq, created), (turn.seq, False))
@@ -1028,7 +1044,8 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         po = PoStore(self.target_config.for_role("app"))
         self.addCleanup(po.close)
         self._assert_inert_queue(steps, data_dir, po)
-        self._assert_inert_attachments(steps, data_dir)
+        self._assert_native_attachments(steps, data_dir)
+        self._restore_board_images(target, data_dir)
         seen_notes = []
 
         def launch(session, seq, argv, files, environment, spec):
@@ -1052,7 +1069,7 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertEqual(again.status, "ok", f"{again.render()}\nrefused store batches: {refused}")
         self.assertEqual(steps["po-notes"], ("unchanged", RESTORED_NOTES_COVERAGE))
         self._assert_inert_queue(steps, data_dir, po)
-        self._assert_inert_attachments(steps, data_dir)
+        self._assert_native_attachments(steps, data_dir)
         self.assertEqual(notes.read_bytes(), SOURCE_NOTES)
         self.assertEqual(notes.stat().st_mode & 0o777, 0o600)
 
@@ -1262,6 +1279,38 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
                 self.assertEqual(git(repository, "rev-parse", SNAPSHOT_REF), tip)
                 self.assertEqual(git(repository, "ls-tree", "-r", tip, "--", "state/board/po_attachments"), committed)
 
+    def test_image_publication_failure_holds_recover_before_activation_and_retry_finishes(self) -> None:
+        from ummanu.po import attachments
+
+        self.assertEqual(self._bootstrap()[0], 0)
+        data_dir = self.fixture.data_dir.resolve()
+        selected = sorted(self.source_images)
+        first = selected[0]
+        real_publish = attachments.publish_image
+
+        def publish(data, item, content):
+            if (item.session_id, item.name) != first:
+                raise attachments.AttachmentPublicationError(
+                    f"session {item.session_id} attachment {item.name}: injected image failure")
+            real_publish(data, item, content)
+
+        result, refused = self._recover(mock.patch.object(attachments, "publish_image", side_effect=publish))
+        self.assertEqual(result.status, "failed", f"{result.render()}\n{refused}")
+        self.assertIn("injected image failure", result.render())
+        state = restore_state(data_dir)
+        self.assertEqual((state["board"], state["po_sql_restore"], state["po_attachments_parity"]),
+                         ("complete", "holding", "failed"))
+        po, client = self._target_po()
+        self.assertEqual(PoRecoveryAdmission(data_dir, po).status()["reason"], "recovery_hold")
+        self.assertEqual(self._readback(client)["po_sessions"], [])
+        self.assertEqual(attachment_path(data_dir, *first).read_bytes(), self.source_images[first])
+        self.assertFalse(any(step.name == "host" for step in result.steps))
+        for _ in range(2):
+            result, refused = self._recover()
+            self.assertEqual(result.status, "ok", f"{result.render()}\n{refused}")
+            self._assert_native_attachments({step.name: (step.status, step.detail) for step in result.steps}, data_dir)
+            self.assertIsNone(PoRecoveryAdmission(data_dir, po).status())
+
     def test_images_over_the_part_budget_commit_bounded_blobs_that_recover_whole_and_shrink(self) -> None:
         """Images larger than the part budget commit as bounded blobs, recover with exact bytes, and
         a removal leaves no stale part."""
@@ -1305,7 +1354,8 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
                     self.assertEqual(result.status, "ok", f"{result.render()}\nrefused store batches: {refused}")
                     self.assertEqual((fixture.data_dir / "board" / ATTACHMENTS_CHECKPOINT_FILE).read_bytes(), logical)
                     self.assertEqual(len(read_checkpoint_attachments(fixture.data_dir / "board").files), 4)
-                    self.assertFalse(attachments_dir(fixture.data_dir, "closed").exists())
+                    for item, image in read_checkpoint_attachments(fixture.data_dir / "board").images():
+                        self.assertEqual(attachment_path(fixture.data_dir, item.session_id, item.name).read_bytes(), image)
         self.assertLess(counts[1], counts[0])
 
     def test_locked_runtime_secrets_restore_board_and_po_sql_but_skip_activation(self) -> None:
@@ -1420,6 +1470,13 @@ class RootHandoffSnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
             self.assertEqual(facts["artifacts"]["po"], {"uid": uid, "mode": 0o700})
             self.assertEqual(facts["artifacts"]["po/NOTES.md"], {"uid": uid, "mode": 0o600})
             self.assertEqual(facts["notes_sha256"], hashlib.sha256(SOURCE_NOTES).hexdigest())
+            expected_images = {
+                f"po/sessions/{session}/attachments/{name}": {
+                    "uid": uid, "mode": 0o600, "sha256": hashlib.sha256(image).hexdigest(),
+                    "directories": [{"uid": uid, "mode": 0o700}] * 3,
+                } for (session, name), image in self.source_images.items()
+            }
+            self.assertEqual(facts["images"], expected_images)
         self.assertIn(["po-notes", "unchanged", RESTORED_NOTES_COVERAGE], retried["steps"])
         _, client = self._target_po()
         self.assertEqual(len(self._readback(client)["po_sessions"]), len(po_records()["po_sessions"]))

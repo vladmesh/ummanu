@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +22,9 @@ from ummanu.po.attachments import (
     ATTACHMENT_NAME,
     AttachmentCaptureError,
     AttachmentInventory,
+    AttachmentRefused,
     StoredAttachment,
+    attachments_dir,
     read_inventoried,
     stored_image_matches,
 )
@@ -30,9 +32,6 @@ from ummanu.po.attachments import (
 ATTACHMENTS_CHECKPOINT_FILE = "po_attachments.ndjson"
 COVERAGE_FIELD = "po_attachments"
 LEGACY_ATTACHMENTS_COVERAGE = "checkpoint has no PO attachment coverage; PO session images are unavailable"
-ATTACHMENTS_NOT_RESTORED = (
-    "inert data in board/po_attachments.ndjson; session attachments and their paths are not restored"
-)
 _RECORD_FIELDS = {"session_id", "name", "size", "sha256", "data"}
 _COUNTS = ("sessions", "directories", "files", "image_bytes", "bytes")
 _HEX = re.compile(r"[0-9a-f]*")
@@ -44,12 +43,16 @@ class PoAttachmentsCheckpointError(ValueError):
 
 @dataclass(frozen=True)
 class CheckpointAttachments:
-    """A declared capture without its bytes: the images, sessions and directories it covers."""
+    """A fully validated, SQL-bound capture retaining the selected source's immutable payload."""
 
     files: tuple[StoredAttachment, ...]
     sessions: int
     directories: int
     po_sql_sha256: str
+    payload: bytes = field(repr=False)
+
+    def images(self) -> Iterator[tuple[StoredAttachment, bytes]]:
+        return _records(self.payload)
 
     def coverage(self) -> str:
         if self.files:
@@ -62,10 +65,10 @@ class CheckpointAttachments:
     def describe(self) -> str:
         if self.files:
             return (f"{len(self.files)} PO image(s), {self.image_bytes()} byte(s) of "
-                    f"{len({item.session_id for item in self.files})} session(s) captured as {ATTACHMENTS_NOT_RESTORED}")
+                    f"{len({item.session_id for item in self.files})} session(s) captured")
         if self.directories:
-            return f"the attachments directories of {self.directories} PO session(s) held no image; {ATTACHMENTS_NOT_RESTORED}"
-        return f"no PO session of the captured cut had an attachments directory; {ATTACHMENTS_NOT_RESTORED}"
+            return f"the attachments directories of {self.directories} PO session(s) held no image"
+        return "no PO session of the captured cut had an attachments directory"
 
 
 def attachments_coverage(inventory: AttachmentInventory, payload_bytes: int, sha256: str,
@@ -124,6 +127,10 @@ def _records(payload: bytes) -> Iterator[tuple[StoredAttachment, bytes]]:
         ):
             raise PoAttachmentsCheckpointError(f"PO attachment record {index} is not a captured image")
         data = bytes.fromhex(record["data"])
+        try:
+            attachments_dir(Path("/"), record["session_id"])
+        except AttachmentRefused:
+            raise PoAttachmentsCheckpointError(f"PO attachment record {index} names an unsafe session") from None
         if record["sha256"] != hashlib.sha256(data).hexdigest() or not stored_image_matches(record["name"], data):
             raise PoAttachmentsCheckpointError(f"PO attachment record {index} bytes do not match its name or digest")
         item = StoredAttachment(record["session_id"], record["name"], record["size"])
@@ -170,7 +177,7 @@ def read_checkpoint_attachments(directory: Path) -> CheckpointAttachments | None
             or len({item.session_id for item in files}) > coverage["directories"]
         ):
             raise PoAttachmentsCheckpointError("PO attachment count/digest mismatch")
-        return CheckpointAttachments(files, len(sessions), coverage["directories"], po_sql["sha256"])
+        return CheckpointAttachments(files, len(sessions), coverage["directories"], po_sql["sha256"], payload)
     except PoAttachmentsCheckpointError:
         raise
     except (OSError, UnicodeError, ValueError, KeyError, TypeError):

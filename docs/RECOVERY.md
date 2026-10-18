@@ -1234,12 +1234,34 @@ unavailable`.
 
 Materialization writes the selected point's payload to `<data>/board/po_attachments.ndjson` as inert
 data and removes one an earlier point left when the selected point has none.
-Restore validates it and writes no `<data>/po/sessions/` file; the absolute paths in restored
-message text still name the source host. `restore-state.json` and `restore-board` expose
+`recover` and `restore-board` validate the whole selected capture and its actual PO SQL binding
+before runtime writes. The coordinator retains those validated bytes across board import, then
+publishes every captured image, including uploads without a submitted message, into the native
+target `<data>/po/sessions/<session>/attachments/<sha256>.<ext>` before finishing PO admission.
+The ordinary attachment reader returns the exact captured bytes there. Source paths quoted in
+messages are never opened; historical absolute paths still name the source host and are not remapped.
+
+Publication runs as the runtime user under the recovery target lock. Each target component is opened
+relative to its parent descriptor without following links. All directory ancestors must be owned by
+that user and deny group/other writes, including existing native directories with mode `0755`.
+Restore creates missing native directories with mode `0700`; staged and final images require mode
+`0600`. Unsafe types, owners, permissions, links or differing bytes refuse without
+overwriting or changing target ownership or modes. A synced staged file is linked without overwrite,
+read back, and the file and every ancestor directory are synced, including on an identical-file retry.
+An interrupted publication may leave a correct immutable prefix; retry checks it and completes the
+same capture. Repeated sync failures keep the initial admission held. Existing later uploads stay.
+Empty and absent captures create no images; released checkpoints without coverage remain recoverable
+and report images unavailable. No queue input, request, turn, provider call or notification is created.
+
+`restore-state.json` and `restore-board` expose
 `po_attachments_coverage` (`captured`, `empty` when directories held no image, `absent` when no
-captured session had one, or `unavailable`), `po_attachments_files`, `po_attachments_bytes` and
-`po_attachments_diagnostic`; recovery reports the diagnostic as `po-attachments`. Doctor and the
-final status gate raise no finding for it.
+captured session had one, or `unavailable`), `po_attachments_files`, `po_attachments_bytes`,
+`po_attachments_parity` (`complete`, `failed` or legacy `unavailable`) and
+`po_attachments_diagnostic`. Complete parity covers every expected image, including the empty set,
+without deleting extra target files. Recovery reports the diagnostic as `po-attachments`; failures
+name the publication phase, session, image name and safe reason, without image bytes. Doctor and the
+final status gate flag incomplete captured-image parity. Preview validates and describes publication
+without writing runtime files or claiming parity.
 
 ### PO SQL restore
 
@@ -1248,11 +1270,11 @@ runtime_user=..., board=...)`, before any host activation. `source` is the board
 selected source: `recover` reads the checkpoint it selected (`state/board` of the extracted snapshot
 or checkout), never `<data>/board`, which the running installation's export rewrites; `restore-board`
 reads the materialized `<data>/board` it imports. `board` is the caller's board import. Steps 1 to 3,
-the notes publication of step 4 and steps 5 to 8 each hold `board/.restore.lock`; the board import
+the filesystem publication of step 4 and steps 5 to 8 each hold `board/.restore.lock`; the board import
 takes that lock itself.
 
 1. **Capture.** `export.json` must be present in the source (its absence is named before any outbox
-   or PO reader runs); `read_checkpoint_po` and `read_checkpoint_notes` validate the declared
+   or PO reader runs); the PO SQL, notes, queue and attachment readers validate the declared
    captures. Legacy absence runs the
    board import and records `unavailable`, without credentials, admission or SQL; it is never empty
    history.
@@ -1263,11 +1285,11 @@ takes that lock itself.
    metadata are neither reimported nor reported as source corruption. Running turns refuse with
    retryable `recovery_busy` and nothing is killed. A refusal here stops before the board import, so
    no restored obligation is published without the hold.
-4. **Board and notes.** The caller's board and outbox import runs only after the hold is durable. A
+4. **Board and runtime assets.** The caller's board and outbox import runs only after the hold is durable. A
    dispatcher delivery or queued owner input meanwhile stays pending and retryable (`recovery_hold`);
    no successor session is opened, nothing is refused permanently and nothing launches. Then, under
-   `board/.restore.lock`, the captured notes are published ([PO notes](#po-notes)); a refusal stops
-   here with the admission held.
+   `board/.restore.lock`, the captured notes and native images are published ([PO notes](#po-notes),
+   [PO attachments](#po-attachment-capture)); a refusal stops here with the initial admission held.
 5. **Plan.** `prepare_po_restore` publishes or reloads the frozen plan; a retry keeps its time and
    UUIDs.
 6. **Import.** `PoRestoreStore.restore` runs in its own app-role SQL transaction with full readback
@@ -1278,11 +1300,12 @@ takes that lock itself.
 8. **Finish.** `finish(..., import_committed=True, parity_verified=True)` follows only the commit
    and readback of step 6 in the same call, never a progress flag.
 
-When the process is root and `--installation-user` names another account, steps 2 and 3, the notes
+When the process is root and `--installation-user` names another account, steps 2 and 3, the runtime asset
 publication and steps 5 to 8 run in a child that drops to that account (`_proc.run_as_user`), so admission, plan
 and contexts belong to the runtime user under the same strict checks; root reads the capture,
 resolves the store credential, holds the lock and runs the board import. The final ownership
-barrier is unchanged.
+barrier hands off coordinator-created paths and preserves the PO workspace, whose runtime publisher
+validates existing ownership without repair.
 
 `restore-state.json` records `po_sql_coverage` (`captured` or `unavailable`), `po_sql_restore`, the
 last phase reached (`captured`, `holding`, `imported`, `contexts_prepared`, `finished` or
@@ -1462,11 +1485,10 @@ their existing resume, recovery and fallback behavior. Automatic provider switch
 explicitly restored sessions so it cannot discard the recorded native binding.
 
 Reconciliation of uncertain external effects is not automated. Pending/refused inputs travel only
-as the inert [PO queue capture](#po-queue-capture) and images under
-`<data>/po/sessions/<id>/attachments/` only as the inert [PO attachment
-capture](#po-attachment-capture); neither is restored as runtime context. SQL parity, prepared
-contexts, restored notes, the captured queue and the captured images do not establish full PO
-recovery readiness.
+as the inert [PO queue capture](#po-queue-capture). Captured images are restored to native target
+paths ([PO attachments](#po-attachment-capture)); historical source-host absolute text paths and a
+prompt catalogue remain unresolved. SQL parity, prepared contexts, restored notes and native image
+parity do not establish full PO context readiness or executable queue recovery.
 
 Released v1/v2 checkpoints lacking both declaration and file remain supported and report
 `checkpoint has no PO SQL coverage; sessions, turns, feed and request bindings are unavailable`.

@@ -493,7 +493,7 @@ def desired_role_worktrees(product_root: Path, home: Path | None = None) -> list
     return [root / name for name in names]
 
 
-def _set_runtime_owner(path: Path, runtime_user: str | None) -> None:
+def _set_runtime_owner(path: Path, runtime_user: str | None, *, preserve: tuple[Path, ...] = ()) -> None:
     """Repair root-created runtime files without traversing links or hardlinks."""
     if not runtime_user or os.geteuid() != 0 or not path.exists():
         return
@@ -503,6 +503,8 @@ def _set_runtime_owner(path: Path, runtime_user: str | None) -> None:
         raise GitError(f"runtime user {runtime_user!r} does not exist") from None
 
     def assign(candidate: Path) -> None:
+        if candidate in preserve:
+            return
         info = candidate.lstat()
         if stat.S_ISLNK(info.st_mode) or (stat.S_ISREG(info.st_mode) and info.st_nlink > 1):
             return

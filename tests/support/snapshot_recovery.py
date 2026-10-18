@@ -95,6 +95,16 @@ def ownership_facts(data_dir: Path, instance_dir: Path, uid: int) -> dict[str, A
     plan = data_dir / ".po-restore" / "plan.json"
     admission = data_dir / ".po-recovery-admission.json"
     notes = data_dir / "po" / "NOTES.md"
+    from ummanu.po.attachments import ATTACHMENT_NAME, attachment_path
+
+    images = {}
+    for path in (data_dir / "po" / "sessions").glob("*/attachments/*"):
+        if ATTACHMENT_NAME.fullmatch(path.name):
+            native = attachment_path(data_dir, path.parent.parent.name, path.name)
+            images[str(path.relative_to(data_dir))] = {
+                **entry(path), "sha256": hashlib.sha256(native.read_bytes()).hexdigest(),
+                "directories": [entry(parent) for parent in list(path.parents)[:3]],
+            }
     return {
         "data_dir": entry(data_dir),
         "artifacts": {name: entry(data_dir / name) for name in PO_ARTIFACTS},
@@ -102,6 +112,7 @@ def ownership_facts(data_dir: Path, instance_dir: Path, uid: int) -> dict[str, A
         "notes_sha256": hashlib.sha256(notes.read_bytes()).hexdigest() if notes.exists() else None,
         "admission_phase": json.loads(admission.read_text())["phase"] if admission.exists() else None,
         "foreign": sorted(foreign)[:20],
+        "images": images,
     }
 
 

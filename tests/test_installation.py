@@ -1350,7 +1350,7 @@ class InstallationTests(unittest.TestCase):
                 owner.call_args_list[-3:],
                 [
                     mock.call(target, getpass.getuser()),
-                    mock.call(data, getpass.getuser()),
+                    mock.call(data, getpass.getuser(), preserve=(data / "po",)),
                     mock.call(run_state.parent, getpass.getuser()),
                 ],
             )

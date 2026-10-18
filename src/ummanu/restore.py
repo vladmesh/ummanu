@@ -340,13 +340,9 @@ def _checkpoint_attachments(board: Path) -> CheckpointAttachments | None:
 
 def restore_po(data_dir: Path, *, source: Path, instance: Path, runtime_user: str | None = None,
                board: Callable[[], None] | None = None) -> bool:
-    """Hold PO admission, run `board`, publish the notes, describe the queue and images, then import the PO SQL.
+    """Hold admission before `board`, publish selected notes/images as `runtime_user`, then restore PO SQL.
 
-    True when this call advanced the PO SQL phases. The captured queue and images stay inert board
-    data. `source` is the selected checkpoint's board
-    directory, never a live export rewritten later. The hold is durable before `board` publishes
-    restored obligations. Root runs the PO protocol as `runtime_user`; restore state records the
-    last phase reached and a refusal raises after it.
+    True when SQL phases advanced; the queue stays inert. All captures are validated before the hold.
     """
     from ummanu.board.store import BoardStoreError, resolve_role
 
@@ -370,7 +366,7 @@ def restore_po(data_dir: Path, *, source: Path, instance: Path, runtime_user: st
     with file_lock(lock):
         _restore_notes(data_dir, notes, runtime_user)
         _record_queue(data_dir, queue)
-        _record_attachments(data_dir, attachments)
+        _restore_attachments(data_dir, attachments, runtime_user)
     if records is None:
         _update_restore_state(data_dir, po_sql_coverage="unavailable", po_sql_restore="unavailable",
                               po_sql_diagnostic=LEGACY_PO_COVERAGE)
@@ -420,15 +416,32 @@ def _record_queue(data_dir: Path, queue: CheckpointQueue | None) -> None:
                           po_queue_pending=pending, po_queue_refused=refused, po_queue_diagnostic=queue.describe())
 
 
-def _record_attachments(data_dir: Path, attachments: CheckpointAttachments | None) -> None:
-    """Describe the captured PO images; restore writes no session attachments directory."""
+def _restore_attachments(data_dir: Path, attachments: CheckpointAttachments | None, runtime_user: str | None) -> None:
+    """Publish every selected image before admission finish; a failed immutable prefix is safe to retry."""
+    from ummanu.po.attachments import AttachmentPublicationError, publish_image
+
     if attachments is None:
         _update_restore_state(data_dir, po_attachments_coverage="unavailable", po_attachments_files=None,
-                              po_attachments_bytes=None, po_attachments_diagnostic=LEGACY_ATTACHMENTS_COVERAGE)
+                              po_attachments_bytes=None, po_attachments_parity="unavailable",
+                              po_attachments_diagnostic=LEGACY_ATTACHMENTS_COVERAGE)
         return
+    error = None
+
+    def publish() -> None:
+        for item, content in attachments.images():
+            publish_image(data_dir, item, content)
+
+    try:
+        if attachments.files:
+            _proc.run_as_user(runtime_user, publish)
+    except (AttachmentPublicationError, _proc.RuntimeUserError) as exc:
+        error = f"PO images restore failed: {exc}"
     _update_restore_state(data_dir, po_attachments_coverage=attachments.coverage(),
                           po_attachments_files=len(attachments.files), po_attachments_bytes=attachments.image_bytes(),
-                          po_attachments_diagnostic=attachments.describe())
+                          po_attachments_parity="failed" if error else "complete",
+                          po_attachments_diagnostic=error or attachments.describe() + "; native runtime parity complete")
+    if error:
+        raise RestoreError(error)
 
 
 def _po_phase(data_dir: Path, runtime_user: str | None, step: Callable[[], dict[str, Any]]) -> dict[str, Any]:
@@ -1148,6 +1161,8 @@ def restore_findings(data_dir: Path) -> list[str]:
         findings.append("owner events restore parity is incomplete")
     if state.get("po_notes_coverage") == "captured" and state.get("po_notes_parity") != "complete":
         findings.append("PO notes restore parity is incomplete")
+    if state.get("po_attachments_coverage") == "captured" and state.get("po_attachments_parity") != "complete":
+        findings.append("PO images restore parity is incomplete")
     if state.get("memory_index") != "complete":
         findings.append("memory index has not been rebuilt")
     if state.get("reconcile") != "complete":

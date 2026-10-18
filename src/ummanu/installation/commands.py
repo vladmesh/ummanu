@@ -191,7 +191,7 @@ def _restore_without_credentials(
             f"would materialize {cards} board card(s), {runs} run record(s)",
         )
         return
-    _set_installation_owner(data_dir, args.installation_user)
+    _set_installation_owner(data_dir, args.installation_user, preserve=(data_dir / "po",))
     result.add(
         "checkpoint",
         "unchanged" if checkpoint_complete else "changed",
@@ -494,13 +494,14 @@ def install(args: argparse.Namespace) -> InstallResult:
                 )
 
                 attachments = read_checkpoint_attachments(checkpoint_root / "state" / "board")
-                result.add("po-attachments", "unchanged",
-                           LEGACY_ATTACHMENTS_COVERAGE if attachments is None else attachments.describe())
+                result.add("po-attachments", "unchanged" if attachments is None or not attachments.files else "would-change",
+                           LEGACY_ATTACHMENTS_COVERAGE if attachments is None else
+                           attachments.describe() + "; would verify and publish native images before admission")
                 result.add("memory", "would-change", "would rebuild the index from checkpoint facts")
                 result.add("host", "would-change", "would run the host materializer")
                 result.add("status", "skipped", "preview made no recovery changes")
                 return result
-            _set_installation_owner(data_dir, args.installation_user)
+            _set_installation_owner(data_dir, args.installation_user, preserve=(data_dir / "po",))
             result.add(
                 "checkpoint",
                 "unchanged" if checkpoint_complete else "changed",
