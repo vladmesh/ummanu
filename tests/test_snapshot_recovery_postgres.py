@@ -25,6 +25,7 @@ import getpass
 import json
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -101,9 +102,15 @@ class _FinishedProcess:
         return 0
 
 
-class SnapshotRecoveryPostgresTests(unittest.TestCase):
+class _SnapshotRecoveryCase(unittest.TestCase):
+    """A seeded source installation cut into a snapshot remote, and an empty target store."""
+
+    def _temporary_base(self) -> str | None:
+        """Where the fixture tree lives: by default the suite's private temporary root."""
+        return None
+
     def setUp(self) -> None:
-        temporary = tempfile.TemporaryDirectory(prefix="snapshot-recovery-postgres-")
+        temporary = tempfile.TemporaryDirectory(prefix="snapshot-recovery-postgres-", dir=self._temporary_base())
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         board = PostgresBoard.shared()
@@ -392,6 +399,8 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
         with client.transaction():
             return export_po_records(client)
 
+
+class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
     def test_a_snapshot_remote_recovers_into_an_empty_store_at_parity(self) -> None:
         fixture = self.fixture
         target, data_dir = fixture.target, fixture.data_dir
@@ -577,6 +586,32 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
                 self.assertEqual(len(self._readback(client)["po_sessions"]), len(po_records()["po_sessions"]))
                 self.assertIsNone(PoRecoveryAdmission(data_dir, po).status())
 
+
+class RootHandoffSnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
+    """Recovery as real root for a distinct runtime account; CI only (the runner has `sudo -n`)."""
+
+    def _temporary_base(self) -> str:
+        # The suite's temporary root is private to the test account, so a runtime account could not
+        # reach anything under it; this case owns its own traversable root and its removal.
+        base = Path(tempfile.mkdtemp(prefix="ummanu-cross-uid-", dir="/tmp"))
+        base.chmod(0o755)
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        return str(base)
+
+    @staticmethod
+    def _runtime_view(user: str, repository: Path) -> str:
+        """Which ancestors of the snapshot repository the runtime account can traverse, and its probe."""
+        lines = []
+        for path in (*reversed(repository.parents), repository):
+            entered = subprocess.run(["sudo", "-n", "-u", user, "test", "-x", str(path)], check=False)
+            lines.append(f"{path}: traversable={entered.returncode == 0}")
+        probe = subprocess.run(
+            ["sudo", "-n", "-u", user, "git", "--git-dir", str(repository), "rev-parse", "--is-bare-repository"],
+            capture_output=True, text=True, cwd="/", check=False,
+        )
+        lines.append(f"probe rc={probe.returncode} stdout={probe.stdout.strip()!r} stderr={probe.stderr.strip()[-2000:]!r}")
+        return "\n".join(lines)
+
     def test_root_recovery_hands_po_recovery_to_a_distinct_runtime_user_and_retries(self) -> None:
         """Real root, a real distinct runtime account and real ownership changes, through `recover`.
 
@@ -612,8 +647,9 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
             runs.append(json.loads(completed.stdout.splitlines()[-1]))
         failed, retried = runs
         self.assertEqual(failed["status"], "failed", failed["steps"])
-        self.assertIn("PO SQL restore failed at import: injected root recovery import failure",
-                      " ".join(step[2] for step in failed["steps"]), failed["steps"])
+        detail = " ".join(step[2] for step in failed["steps"])
+        if "PO SQL restore failed at import: injected root recovery import failure" not in detail:
+            self.fail(f"{failed['steps']}\n{self._runtime_view(user, data_dir / 'backup' / 'instance.git')}")
         self.assertEqual(retried["status"], "ok", retried["steps"])
         self.assertEqual(retried["po_sql_restore"], "finished")
         for run, phase in ((failed, "holding"), (retried, "finished")):
