@@ -115,6 +115,19 @@ def export_board(
     cards, history, sprints, outbox, po, owner_events = _read_board_cut(
         data_dir, instance_dir, reader, sprint_client
     )
+    from ummanu.board.po_notes_checkpoint import (
+        NOTES_CHECKPOINT_FILE,
+        PoNotesError,
+        capture_notes,
+        read_checkpoint_notes,
+        write_notes_capture,
+    )
+
+    # The notes are the PO's file beside the PO SQL capture; they travel with it.
+    try:
+        notes = capture_notes(data_dir) if po is not None else None
+    except PoNotesError as exc:
+        raise RuntimeError(f"board export is not restorable: {exc}") from None
     normalized = []
     for card in sorted(cards, key=lambda item: str(item.get("reference", ""))):
         if not isinstance(card, dict):
@@ -158,6 +171,7 @@ def export_board(
         if po is not None:
             _write_json(staging / PO_FILE, po)
             summary["po_sql"] = po_coverage(po, (staging / PO_FILE).read_bytes())
+            summary["po_notes"] = write_notes_capture(staging, notes)
         _write_json(staging / "export.json", summary)
         # Validate the exact pair restore consumes before replacing the last good live export.
         from ummanu.board.close_checkpoint import CloseCheckpointError, read_checkpoint_close_facts
@@ -171,8 +185,18 @@ def export_board(
             read_checkpoint_owner_events(staging)
             read_checkpoint_close_facts(staging)
             read_checkpoint_po(staging)
-        except (NormalizedBoardError, OriginCheckpointError, OwnerCheckpointError, PoCheckpointError, CloseCheckpointError) as exc:
+            read_checkpoint_notes(staging)
+        except (
+            NormalizedBoardError,
+            OriginCheckpointError,
+            OwnerCheckpointError,
+            PoCheckpointError,
+            CloseCheckpointError,
+            PoNotesError,
+        ) as exc:
             raise RuntimeError(f"board export is not restorable: {exc}") from None
+        if notes is not None:
+            _refuse_secret_notes(staging, instance_dir)
         _publish_component_entries(
             staging,
             board_dir,
@@ -186,7 +210,8 @@ def export_board(
                 "export.json",
                 *(["origin_returns.ndjson"] if outbox is not None else []),
                 *(["owner_events.ndjson"] if owner_events is not None else []),
-                *([PO_FILE] if po is not None else []),
+                # Listed for a captured absence too, so a payload from an earlier export leaves.
+                *([PO_FILE, NOTES_CHECKPOINT_FILE] if po is not None else []),
             ],
             "board export",
         )
@@ -194,6 +219,26 @@ def export_board(
         _cleanup_staging_dir(staging)
         raise
     return DataExport(path=board_dir / "cards.json", count=len(normalized), source=summary["source"])
+
+
+def _refuse_secret_notes(staging: Path, instance_dir: Path) -> None:
+    """Refuse staged notes whose decoded text holds a known secret, before they replace the live export."""
+    from ummanu.board.po_notes_checkpoint import NOTES_CHECKPOINT_FILE, PoNotesError, scan_notes_secrets
+    from ummanu.runtime.redact import redact
+    from ummanu.secret_store import SecretStoreError, redaction_values
+
+    try:
+        secret_values = redaction_values(instance_dir)
+    except SecretStoreError as exc:
+        raise RuntimeError(f"could not load board export redaction values: {exc}") from None
+    runtime_env = Path(instance_dir) / "runtime.env"
+    try:
+        scan_notes_secrets(
+            (staging / NOTES_CHECKPOINT_FILE).read_text(encoding="utf-8"),
+            lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values),
+        )
+    except (OSError, PoNotesError) as exc:
+        raise RuntimeError(f"board export blocked: {exc}") from None
 
 
 def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) -> dict[str, Any]:

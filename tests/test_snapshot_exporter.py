@@ -21,7 +21,7 @@ from tests.fakes.installation import split_board
 from tests.fakes.tasks import empty_seed
 from tests.origin_checkpoint_fixtures import obligations, write_outbox
 from tests.owner_checkpoint_fixtures import bell_rows, write_bell
-from tests.po_checkpoint_fixtures import po_records, write_po
+from tests.po_checkpoint_fixtures import po_records, write_notes, write_po
 from tests.restore_fixtures import _restore_card
 from tests.sql_backend_fixtures import card_store
 from ummanu import checkpoint, secret_store, state_repo
@@ -37,6 +37,7 @@ from ummanu.board.owner_checkpoint import (
 )
 from ummanu.board.owner_events import OwnerEventStore
 from ummanu.board.po_checkpoint import PO_FILE, PoCheckpointError, read_checkpoint_po
+from ummanu.board.po_notes_checkpoint import NOTES_CHECKPOINT_FILE, NotesCapture, read_checkpoint_notes
 from ummanu.checkpoint import (
     SNAPSHOT_ALLOWLIST,
     SNAPSHOT_AUTHOR_EMAIL,
@@ -517,6 +518,78 @@ class SnapshotRepositoryTests(SnapshotCase):
             self.assertIsNone(read_checkpoint_po(source))
             self.assertEqual(materialize_checkpoint(self.live, self.root / f"legacy-po-{layout}"), (1, 0))
             write_po(source, {table: [] for table in po_records()})
+
+    def test_committed_po_notes_keep_exact_bytes_through_flat_and_split_materialization(self):
+        notes = b"\xef\xbb\xbf# Decisions\r\nkeep option B\rno newline \xd1\x8f"
+        for name, content in (("present", notes), ("empty", b""), ("absent", None)):
+            with self.subTest(capture=name):
+                self.seed_board([_restore_card()])
+                write_notes(self.data_dir / "board", content)
+                result = self.exporter().write()
+                self.assertEqual(result.status, "committed", result.reason)
+                committed = f"state/board/{NOTES_CHECKPOINT_FILE}"
+                self.assertEqual(committed in self.tree(), content is not None)
+                checkout = self.root / f"notes-checkout-{name}"
+                git(self.root, "clone", "--quiet", str(self.repo), str(checkout))
+                source = checkout / "state" / "board"
+                checkpoint.verify_analytics_checkpoint(source)
+                self.assertEqual(read_checkpoint_notes(source), NotesCapture(content))
+                flat = self.root / f"notes-flat-{name}"
+                (flat / "state" / "board").mkdir(parents=True)
+                reader = open_checkpoint_board(source)
+                for logical in LOGICAL_FILES:
+                    if reader.has(logical):
+                        (flat / "state" / "board" / logical).write_bytes(reader.read_bytes(logical))
+                shutil.copytree(checkout / "state" / "runs", flat / "state" / "runs")
+                for label, instance in (("split", checkout), ("flat", flat)):
+                    target = self.root / f"notes-data-{name}-{label}"
+                    self.assertEqual(materialize_checkpoint(instance, target), (1, 0))
+                    self.assertEqual(read_checkpoint_notes(target / "board"), NotesCapture(content))
+        payload = flat / "state" / "board" / NOTES_CHECKPOINT_FILE
+        payload.write_text(json.dumps({"version": 1, "text": "private substituted"}), encoding="utf-8")
+        summary = json.loads((flat / "state" / "board" / "export.json").read_text())
+        summary["po_notes"] = {"version": 1, "state": "present", "bytes": 4, "sha256": "0" * 64}
+        (flat / "state" / "board" / "export.json").write_text(json.dumps(summary), encoding="utf-8")
+        target = self.root / "notes-data-damaged"
+        with self.assertRaisesRegex(InstallError, "PO notes size/digest mismatch") as refused:
+            materialize_checkpoint(flat, target)
+        self.assertNotIn("private", str(refused.exception))
+        self.assertFalse(target.exists())
+        payload.unlink()
+        summary.pop("po_notes")
+        (flat / "state" / "board" / "export.json").write_text(json.dumps(summary), encoding="utf-8")
+        legacy = self.root / "notes-data-legacy"
+        self.assertEqual(materialize_checkpoint(flat, legacy), (1, 0))
+        self.assertIsNone(read_checkpoint_notes(legacy / "board"))
+
+    def test_escaped_secret_or_damaged_notes_cannot_replace_committed_bytes_or_tip(self):
+        self.seed_board([_restore_card()])
+        write_notes(self.data_dir / "board", b"# retained notes\n")
+        first = self.exporter().write()
+        self.assertEqual(first.status, "committed", first.reason)
+        committed = f"state/board/{NOTES_CHECKPOINT_FILE}"
+        saved = self.committed(committed)
+        secret = 'known\n"private\tsecret'
+        board = self.data_dir / "board"
+        for defect in ("secret", "digest", "missing", "undeclared"):
+            with self.subTest(defect=defect):
+                write_notes(board, f"before {secret} after".encode() if defect == "secret" else b"private changed")
+                summary = json.loads((board / "export.json").read_text())
+                if defect == "digest":
+                    summary["po_notes"]["sha256"] = "0" * 64
+                elif defect == "undeclared":
+                    summary.pop("po_notes")
+                (board / "export.json").write_text(json.dumps(summary), encoding="utf-8")
+                if defect == "missing":
+                    (board / NOTES_CHECKPOINT_FILE).unlink()
+                with mock.patch("ummanu.secret_store.redaction_values", return_value=(secret,)):
+                    result = self.exporter().write()
+                self.assertEqual(result.status, "blocked", result.reason)
+                self.assertEqual(self.tip(), first.commit)
+                self.assertEqual(self.committed(committed), saved)
+                self.assertNotIn("private", result.reason)
+                if defect == "secret":
+                    self.assertEqual(result.reason, "secret detected in PO notes")
 
     def test_invalid_po_or_secret_cannot_replace_committed_snapshot_bytes_or_tip(self):
         self.seed_board([_restore_card()])

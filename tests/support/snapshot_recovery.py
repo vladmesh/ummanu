@@ -22,7 +22,10 @@ from ummanu.installation import materialize as installation_materialize
 from ummanu.installation.upgrade import workspaces as upgrade_workspaces
 from ummanu.restore import DEFAULT_MEMORY_DIM
 
-PO_ARTIFACTS = (".po-recovery-admission.json", ".po-restore", ".po-restore/plan.json", ".po-restore/contexts.json")
+PO_ARTIFACTS = (
+    ".po-recovery-admission.json", ".po-restore", ".po-restore/plan.json", ".po-restore/contexts.json",
+    "po", "po/NOTES.md",
+)
 
 
 class Embedder:
@@ -91,10 +94,12 @@ def ownership_facts(data_dir: Path, instance_dir: Path, uid: int) -> dict[str, A
                 foreign.append(str(path))
     plan = data_dir / ".po-restore" / "plan.json"
     admission = data_dir / ".po-recovery-admission.json"
+    notes = data_dir / "po" / "NOTES.md"
     return {
         "data_dir": entry(data_dir),
         "artifacts": {name: entry(data_dir / name) for name in PO_ARTIFACTS},
         "plan_sha256": hashlib.sha256(plan.read_bytes()).hexdigest() if plan.exists() else None,
+        "notes_sha256": hashlib.sha256(notes.read_bytes()).hexdigest() if notes.exists() else None,
         "admission_phase": json.loads(admission.read_text())["phase"] if admission.exists() else None,
         "foreign": sorted(foreign)[:20],
     }

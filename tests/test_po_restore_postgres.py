@@ -27,6 +27,7 @@ from ummanu.board.po_checkpoint import (
     export_po_records,
     read_checkpoint_po,
 )
+from ummanu.board.po_notes_checkpoint import RESTORED_NOTES_COVERAGE
 from ummanu.board.po_restore import (
     PoRestoreStore,
     normalized_po_records,
@@ -44,7 +45,10 @@ from ummanu.po.restore_context import NOTICE, RestoreContextError, RestoredConte
 from ummanu.po.runner import PoRunner
 from ummanu.po.service import PoService, listening
 from ummanu.po.store import COMPLETED, PoStore, RequestConflict, SessionClosed
+from ummanu.po.workspace import NOTES_FILE, workspace_dir
 from ummanu.restore import RestoreError, restore_findings, restore_po, restore_state
+
+NOTES = b"# PO notes\r\nThe owner chose option B; the SQL feed has no record of it.\n"
 
 
 class PoRestorePostgresTests(unittest.TestCase):
@@ -329,10 +333,13 @@ class PoRecoveryWiringPostgresTests(unittest.TestCase):
         self.addCleanup(po.close)
         return instance, data, client, po
 
-    def capture(self, records, name):
+    def capture(self, records, name, notes=None):
         """The board export a source installation whose PO tables hold `records` publishes."""
         instance, data, client, _ = self.installation(name)
         seed_po(client, records)
+        if notes is not None:
+            workspace_dir(data).mkdir()
+            (workspace_dir(data) / NOTES_FILE).write_bytes(notes)
         export_board(data, instance_dir=instance)
         return data / "board"
 
@@ -355,7 +362,9 @@ class PoRecoveryWiringPostgresTests(unittest.TestCase):
         return code, output.getvalue()
 
     def launch(self, session, seq, argv, files, environment, spec):
-        self.calls.append({"argv": argv, "prompt": files.prompt.read_text()})
+        notes = Path(session.cwd) / NOTES_FILE
+        self.calls.append({"argv": argv, "prompt": files.prompt.read_text(),
+                           "notes": notes.read_bytes() if notes.exists() else None})
         output = ({"type": "result", "result": "fresh answer", "session_id": session.cli_session_id}
                   if session.cli == "claude" else {"type": "thread.started", "thread_id": "new-thread"})
         files.stdout.write_text(json.dumps(output) + "\n")
@@ -374,18 +383,24 @@ class PoRecoveryWiringPostgresTests(unittest.TestCase):
                 self.calls = []
                 records = po_records(feed_count=12)
                 records["po_sessions"][-1]["cli"] = cli
-                board = self.capture(records, f"{cli}-source")
+                board = self.capture(records, f"{cli}-source", notes=NOTES)
                 self.assertEqual(read_checkpoint_po(board), records)
                 instance, data, client, po = self.target(board, f"{cli}-target")
                 code, output = self.restore_board(instance)
                 self.assertEqual(code, 0, output)
                 self.assertNotIn("repeated text", output)
                 self.assertNotIn("password", output.lower())
+                self.assertNotIn("option B", output)
                 result = json.loads(output)
                 self.assertEqual(
                     (result["po_sql_coverage"], result["po_sql_restore"], result["po_sql_diagnostic"]),
                     ("captured", "finished", RESTORED_PO_COVERAGE),
                 )
+                self.assertEqual(
+                    (result["po_notes_coverage"], result["po_notes_parity"], result["po_notes_diagnostic"]),
+                    ("captured", "complete", RESTORED_NOTES_COVERAGE),
+                )
+                self.assertEqual((workspace_dir(data) / NOTES_FILE).read_bytes(), NOTES)
                 plan = prepare_po_restore(records, data, interrupted_at=datetime.now(UTC))
                 expected = normalized_po_records(records, plan)
                 require_po_parity(expected, self.readback(client))
@@ -400,6 +415,7 @@ class PoRecoveryWiringPostgresTests(unittest.TestCase):
                 first = runner.wait("open", first.seq, 2)
                 self.assertEqual(first.state, COMPLETED, first.reason)
                 [call] = self.calls
+                self.assertEqual(call["notes"], NOTES)
                 self.assertIn(NOTICE, call["prompt"])
                 self.assertEqual(call["prompt"].count("current-owner-input"), 1)
                 if cli == "claude":
@@ -419,6 +435,8 @@ class PoRecoveryWiringPostgresTests(unittest.TestCase):
                 code, output = self.restore_board(instance)
                 self.assertEqual(code, 0, output)
                 self.assertEqual(json.loads(output)["po_sql_restore"], "finished")
+                self.assertEqual(json.loads(output)["po_notes_parity"], "complete")
+                self.assertEqual((workspace_dir(data) / NOTES_FILE).read_bytes(), NOTES)
                 self.assertEqual(self.readback(client), live)
                 self.assertEqual(len(self.calls), 2)
                 again, created = runner.send_request("open", "current-owner-input", "new-request")

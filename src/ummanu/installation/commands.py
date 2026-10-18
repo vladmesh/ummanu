@@ -151,7 +151,9 @@ def _restore_board_and_po(
     # selected checkpoint, not `<data>/board`, which a running installation's export rewrites.
     changed = restore_po(data_dir, source=checkpoint_root / "state" / "board", instance=target,
                          runtime_user=args.installation_user, board=restore_board)
-    result.add("po-sql", "changed" if changed else "unchanged", restore_state(data_dir)["po_sql_diagnostic"])
+    state = restore_state(data_dir)
+    result.add("po-sql", "changed" if changed else "unchanged", state["po_sql_diagnostic"])
+    result.add("po-notes", "unchanged", state["po_notes_diagnostic"])
 
 
 
@@ -465,6 +467,20 @@ def install(args: argparse.Namespace) -> InstallResult:
                     result.add(
                         "po-sql", "would-change",
                         "would import captured PO SQL at parity, prepare restored contexts and finish admission",
+                    )
+                from ummanu.board.po_notes_checkpoint import (
+                    ABSENT_NOTES_COVERAGE,
+                    LEGACY_NOTES_COVERAGE,
+                    read_checkpoint_notes,
+                )
+
+                notes = read_checkpoint_notes(checkpoint_root / "state" / "board")
+                if notes is None or notes.content is None:
+                    result.add("po-notes", "unchanged", LEGACY_NOTES_COVERAGE if notes is None else ABSENT_NOTES_COVERAGE)
+                else:
+                    result.add(
+                        "po-notes", "would-change",
+                        f"would create the PO notes file from {len(notes.content)} captured byte(s) before admission",
                     )
                 result.add("memory", "would-change", "would rebuild the index from checkpoint facts")
                 result.add("host", "would-change", "would run the host materializer")

@@ -22,6 +22,7 @@ which the import wrote only after every comment, and no seed here held one.
 from __future__ import annotations
 
 import getpass
+import hashlib
 import io
 import json
 import os
@@ -39,19 +40,20 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.fakes.installation import PRODUCT_ROOT
-from tests.fakes.snapshot_remote import HEAD, exporter_remote, git
+from tests.fakes.snapshot_remote import HEAD, REVISION, exporter_remote, git
 from tests.owner_checkpoint_fixtures import bell_rows
-from tests.po_checkpoint_fixtures import po_records, seed_po
+from tests.po_checkpoint_fixtures import po_records, seed_po, write_notes
 from tests.sql_backend_fixtures import PostgresBoard, insert_card_row
 from tests.support.snapshot_recovery import recover_patches
 from ummanu import bootstrap as bootstrap_module
 from ummanu.board import store
-from ummanu.board.checkpoint_layout import LOGICAL_FILES, open_checkpoint_board
+from ummanu.board.checkpoint_layout import FLAT, LOGICAL_FILES, open_checkpoint_board
 from ummanu.board.close_checkpoint import (
     LEGACY_CLOSE_COVERAGE,
     read_checkpoint_close_facts,
     require_close_set_parity,
 )
+from ummanu.board.migrate import head_revision
 from ummanu.board.owner_checkpoint import (
     LEGACY_OWNER_COVERAGE,
     OWNER_FILE,
@@ -60,6 +62,13 @@ from ummanu.board.owner_checkpoint import (
 )
 from ummanu.board.owner_events import OwnerEventStore, ReadRefused
 from ummanu.board.po_checkpoint import RESTORED_PO_COVERAGE, export_po_records, read_checkpoint_po
+from ummanu.board.po_notes_checkpoint import (
+    LEGACY_NOTES_COVERAGE,
+    NOTES_CHECKPOINT_FILE,
+    RESTORED_NOTES_COVERAGE,
+    NotesCapture,
+    read_checkpoint_notes,
+)
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.board.store import BoardStoreConfig
@@ -76,11 +85,13 @@ from ummanu.data import export_board, init_layout
 from ummanu.head_registry import installed_heads, installed_pair
 from ummanu.installation import commands as installation_commands
 from ummanu.installation.materialize import materialize_checkpoint
+from ummanu.memory import client_config
 from ummanu.memory_journal import export_memory_snapshot, verify_memory_journal
+from ummanu.po import workspace as po_workspace
 from ummanu.po.recovery_admission import PoRecoveryAdmission
 from ummanu.po.runner import PoRunner
 from ummanu.po.store import COMPLETED, INTERRUPTED, PoStore
-from ummanu.po.workspace import workspace_dir
+from ummanu.po.workspace import NOTES_FILE, workspace_dir
 from ummanu.product_issues import ProductIssueStore
 from ummanu.restore import import_normalized_board, restore_state
 from ummanu.secret_recover import SecretRecovery
@@ -100,6 +111,8 @@ RETIRED_METADATA = {
 }
 CARDS = ("ummanu-1", "ummanu-2", RETIRED_CARD)
 SPRINTS = ("sprint:snapshot", "sprint:snapshot-open")
+#: The PO's own notes on the source host: a decision the SQL feed does not hold, in CRLF and UTF-8.
+SOURCE_NOTES = "# PO notes\r\nThe owner settled on option B in a call; no PO turn records it. Решено.\n".encode()
 
 
 def _write_store_file(instance: Path, config: BoardStoreConfig) -> None:
@@ -300,6 +313,8 @@ class _SnapshotRecoveryCase(unittest.TestCase):
         po_client = SqlCardClient(self.source_config.for_role("app"), source)
         self.addCleanup(po_client.close)
         seed_po(po_client, po_records())
+        workspace_dir(data_dir).mkdir()
+        (workspace_dir(data_dir) / NOTES_FILE).write_bytes(SOURCE_NOTES)
         self.source_kinds = self._kinds(source, data_dir, self.source_config)
 
     def _kinds(self, instance: Path, data_dir: Path, config: BoardStoreConfig) -> dict[str, object]:
@@ -341,9 +356,9 @@ class _SnapshotRecoveryCase(unittest.TestCase):
             "requests": {event["request_id"]: event for event in SqlTaskAudit(client).events()},
         }
 
-    def _bootstrap(self) -> tuple[int, list[str]]:
-        """The real `bootstrap` against the snapshot remote; returns its exit code and its output."""
-        target = self.fixture.target
+    def _bootstrap(self, *, target: Path | None = None, remote: Path | None = None) -> tuple[int, list[str]]:
+        """The real `bootstrap` against the snapshot remote (or `remote`); returns its exit code and output."""
+        target = self.fixture.target if target is None else target
 
         def provision(instance: Path, *, allow_create: bool) -> None:
             self.assertTrue(allow_create)
@@ -354,7 +369,7 @@ class _SnapshotRecoveryCase(unittest.TestCase):
         printed = mock.Mock()
         args = SimpleNamespace(
             instance_dir=str(target),
-            instance_remote=str(self.fixture.remote),
+            instance_remote=str(self.fixture.remote if remote is None else remote),
             installation_user=getpass.getuser(),
             dry_run=False,
         )
@@ -374,10 +389,10 @@ class _SnapshotRecoveryCase(unittest.TestCase):
             code = bootstrap_module.bootstrap(args)
         return code, [str(call.args[0]) for call in printed.call_args_list if call.args]
 
-    def _args(self) -> SimpleNamespace:
+    def _args(self, *, target: Path | None = None, remote: Path | None = None) -> SimpleNamespace:
         return SimpleNamespace(
-            instance_dir=str(self.fixture.target),
-            instance_remote=str(self.fixture.remote),
+            instance_dir=str(self.fixture.target if target is None else target),
+            instance_remote=str(self.fixture.remote if remote is None else remote),
             installation_user=getpass.getuser(),
             recover=True,
             adopt=False,
@@ -391,7 +406,7 @@ class _SnapshotRecoveryCase(unittest.TestCase):
             host_fixture=None,
         )
 
-    def _recover(self, *extra) -> tuple[object, list[str]]:
+    def _recover(self, *extra, args: SimpleNamespace | None = None) -> tuple[object, list[str]]:
         """One unprivileged `recover` with host provisioning stood in for, and the store refusals it met."""
         # A refused batch names the store's refusal itself; every refusal is kept anyway, so a
         # failure message holds each one the store gave, not only the first.
@@ -412,7 +427,7 @@ class _SnapshotRecoveryCase(unittest.TestCase):
                 *extra,
             ):
                 stack.enter_context(patch)
-            return installation_commands.install(self._args()), refused
+            return installation_commands.install(self._args() if args is None else args), refused
 
     def _target_po(self) -> tuple[PoStore, SqlCardClient]:
         po = PoStore(self.target_config.for_role("app"))
@@ -426,6 +441,17 @@ class _SnapshotRecoveryCase(unittest.TestCase):
         with client.transaction():
             return export_po_records(client)
 
+    def _materialize_po_workspace(self, data_dir: Path) -> tuple[str, ...]:
+        """The install step's workspace materialize over the recovered data dir, from a minimal product."""
+        product = self.root / "po-product"
+        bridge = client_config.bridge_executable(product)
+        bridge.parent.mkdir(parents=True, exist_ok=True)
+        bridge.write_text("#!/bin/sh\n", encoding="utf-8")
+        source = po_workspace.agents_source(product)
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("# PO workspace instructions\n", encoding="utf-8")
+        return po_workspace.materialize(product, data_dir).changed
+
 
 class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
     def test_legacy_recovery_and_retry_keep_coverage_descriptive_through_the_status_gate(self):
@@ -434,6 +460,8 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         summary = json.loads(summary_path.read_text())
         summary.pop("owner_events")
         summary.pop("sprint_close")
+        summary.pop("po_notes")
+        (board / NOTES_CHECKPOINT_FILE).unlink()
         for name in ("sprints.json", "sprints.ndjson"):
             path = board / name
             if name.endswith(".ndjson"):
@@ -449,6 +477,7 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         summary_path.write_text(json.dumps(summary))
         (board / OWNER_FILE).unlink()
         self.assertIsNone(read_checkpoint_owner_events(board))
+        self.assertIsNone(read_checkpoint_notes(board))
         canon = self.fixture.source / "heads" / "heads.toml"
         canon.write_text(
             canon.read_text().replace("fallback = []", 'fallback = ["legacy-fallback"]')
@@ -480,6 +509,13 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
                 self.assertEqual(state["owner_events_coverage"], "unavailable")
                 self.assertEqual(state["owner_events_parity"], "unavailable")
                 self.assertEqual(state["owner_events_diagnostic"], LEGACY_OWNER_COVERAGE)
+                self.assertEqual(
+                    (state["po_notes_coverage"], state["po_notes_parity"], state["po_notes_diagnostic"]),
+                    ("unavailable", "unavailable", LEGACY_NOTES_COVERAGE),
+                )
+                notes_step = next(step for step in machine["steps"] if step["name"] == "po-notes")
+                self.assertEqual((notes_step["status"], notes_step["detail"]), ("unchanged", LEGACY_NOTES_COVERAGE))
+                self.assertFalse((workspace_dir(data_dir) / NOTES_FILE).exists())
                 self.assertEqual(state["sprint_close_coverage"], "unavailable")
                 self.assertEqual(state["sprint_close_parity"], "unavailable")
                 self.assertEqual(state["sprint_close_diagnostic"], LEGACY_CLOSE_COVERAGE)
@@ -717,6 +753,16 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertEqual(len(po.feed("open")), len(po_records()["po_feed"]))
         self.assertIsNotNone(po.request("send"))
         self.assertIsNone(PoRecoveryAdmission(data_dir.resolve(), po).status())
+        # The PO's notes are back at the ordinary workspace path with their exact bytes, private and
+        # the runtime user's, and the install step's workspace materialize leaves them.
+        self.assertEqual(read_checkpoint_notes(data_dir / "board"), NotesCapture(SOURCE_NOTES))
+        notes = workspace_dir(data_dir.resolve()) / NOTES_FILE
+        self.assertEqual(steps["po-notes"], ("unchanged", RESTORED_NOTES_COVERAGE))
+        self.assertEqual((state["po_notes_coverage"], state["po_notes_parity"]), ("captured", "complete"))
+        self.assertEqual(notes.read_bytes(), SOURCE_NOTES)
+        self.assertEqual((notes.stat().st_mode & 0o777, notes.stat().st_uid), (0o600, os.getuid()))
+        self.assertNotIn(NOTES_FILE, self._materialize_po_workspace(data_dir.resolve()))
+        self.assertEqual(notes.read_bytes(), SOURCE_NOTES)
         # The closed card on the retired id is back as the tree exported it: placement and project.
         exported = next(
             card
@@ -792,11 +838,13 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertEqual(result.status, "ok", f"{result.render()}\nrefused store batches: {refused}")
         data_dir = self.fixture.data_dir.resolve()
         po, client = self._target_po()
-        (data_dir / "po").mkdir(exist_ok=True)
+        notes = workspace_dir(data_dir) / NOTES_FILE
         launches = []
+        seen_notes = []
 
         def launch(session, seq, argv, files, environment, spec):
             launches.append(seq)
+            seen_notes.append((Path(session.cwd) / NOTES_FILE).read_bytes())
             files.stdout.write_text(json.dumps({"type": "thread.started", "thread_id": "new-thread"}) + "\n")
             files.stderr.write_text("")
             files.last_message.write_text("fresh answer")
@@ -808,9 +856,13 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertTrue(created)
         self.assertEqual(runner.wait("open", turn.seq, 2).state, COMPLETED)
         self.assertEqual(po.session("open").cli_session_id, "new-thread")
-        # The installation's ordinary export rewrites `<data>/board` with the new history.
+        self.assertEqual(seen_notes, [SOURCE_NOTES])
+        # The installation's ordinary export rewrites `<data>/board` with the new history; a capture
+        # there holding other notes is not what the retry restores.
         export_board(data_dir, instance_dir=self.fixture.target)
         self.assertNotEqual(read_checkpoint_po(data_dir / "board"), po_records())
+        self.assertEqual(read_checkpoint_notes(data_dir / "board"), NotesCapture(SOURCE_NOTES))
+        write_notes(data_dir / "board", b"notes of a later live export")
         live = self._readback(client)
         plan = (data_dir / ".po-restore" / "plan.json").read_bytes()
 
@@ -825,6 +877,117 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         replay, created = runner.send_request("open", "input after recovery", "after-recovery")
         self.assertEqual((replay.seq, created), (turn.seq, False))
         self.assertEqual(launches, [turn.seq])
+        self.assertEqual(steps["po-notes"], ("unchanged", RESTORED_NOTES_COVERAGE))
+        self.assertEqual(notes.read_bytes(), SOURCE_NOTES)
+        # Notes the PO changed after recovery are its work: a retry refuses the conflict, keeps them
+        # and names no content.
+        edited = SOURCE_NOTES + b"Decided after recovery: keep the drill weekly.\n"
+        notes.write_bytes(edited)
+        conflicted, refused = self._recover()
+        self.assertEqual(conflicted.status, "failed", f"{conflicted.render()}\nrefused store batches: {refused}")
+        self.assertIn("PO notes target conflict", conflicted.render())
+        self.assertNotIn("Decided after recovery", conflicted.render())
+        self.assertEqual(notes.read_bytes(), edited)
+        self.assertEqual(restore_state(data_dir)["po_notes_parity"], "failed")
+
+    def test_a_committed_flat_checkpoint_recovers_notes_for_the_po_consumer_and_a_retry(self) -> None:
+        """A legacy flat Git checkpoint through `recover`: the PO consumer reads its notes, which stay."""
+        flat = self.root / "flat-source"
+        git(self.root, "clone", "--quiet", "--branch", "main", str(self.fixture.remote), str(flat))
+        board = flat / "state" / "board"
+        reader = open_checkpoint_board(board)
+        logical = {name: reader.read_bytes(name) for name in LOGICAL_FILES if reader.has(name)}
+        ignore = (board / ".gitignore").read_bytes()
+        shutil.rmtree(board)
+        board.mkdir()
+        for name, payload in logical.items():
+            (board / name).write_bytes(payload)
+        (board / ".gitignore").write_bytes(ignore)
+        _write_analytics_manifest(board)
+        verify_analytics_checkpoint(board)
+        self.assertEqual(open_checkpoint_board(board).layout, FLAT)
+        self.assertEqual(read_checkpoint_notes(board), NotesCapture(SOURCE_NOTES))
+        # Without the snapshot manifest the tip is a legacy checkpoint, recovered as a Git checkout.
+        (flat / "snapshot-manifest.json").unlink()
+        legacy = self.root / "legacy.git"
+        git(self.root, "init", "--quiet", "--bare", "--initial-branch", "main", str(legacy))
+        config = flat / "instance.yaml"
+        config.write_text(config.read_text(encoding="utf-8").replace(str(self.fixture.remote), str(legacy)), encoding="utf-8")
+        store.ensure_ignored(flat)
+        git(flat, "add", "-A")
+        git(flat, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "Flat checkpoint")
+        git(flat, "push", "--quiet", str(legacy), "HEAD:refs/heads/main")
+        target = self.root / "flat-target"
+        code, output = self._bootstrap(target=target, remote=legacy)
+        self.assertEqual(code, 0, output)
+        args = self._args(target=target, remote=legacy)
+        data_dir = self.fixture.data_dir.resolve()
+        notes = workspace_dir(data_dir) / NOTES_FILE
+
+        result, refused = self._recover(args=args)
+        steps = {step.name: (step.status, step.detail) for step in result.steps}
+        self.assertEqual(result.status, "ok", f"{result.render()}\nrefused store batches: {refused}")
+        self.assertTrue((target / ".git").is_dir())
+        self.assertEqual(open_checkpoint_board(target / "state" / "board").layout, FLAT)
+        self.assertEqual(steps["po-notes"], ("unchanged", RESTORED_NOTES_COVERAGE))
+        self.assertEqual(notes.read_bytes(), SOURCE_NOTES)
+        self.assertEqual(notes.stat().st_mode & 0o777, 0o600)
+        po = PoStore(self.target_config.for_role("app"))
+        self.addCleanup(po.close)
+        seen_notes = []
+
+        def launch(session, seq, argv, files, environment, spec):
+            seen_notes.append((Path(session.cwd) / NOTES_FILE).read_bytes())
+            files.stdout.write_text(json.dumps({"type": "thread.started", "thread_id": "flat-thread"}) + "\n")
+            files.stderr.write_text("")
+            files.last_message.write_text("answer after the flat recovery")
+            return _FinishedProcess()
+
+        runner = PoRunner(po, data_dir, head_specs={}, env={}, turn_launcher=launch)
+        self.enterContext(mock.patch.object(runner, "codex_home", return_value=self.root))
+        turn, created = runner.send_request("open", "input after the flat recovery", "after-flat-recovery")
+        self.assertTrue(created)
+        self.assertEqual(runner.wait("open", turn.seq, 2).state, COMPLETED)
+        self.assertEqual(seen_notes, [SOURCE_NOTES])
+        self.assertNotIn(NOTES_FILE, self._materialize_po_workspace(data_dir))
+        self.assertEqual(notes.read_bytes(), SOURCE_NOTES)
+
+        again, refused = self._recover(args=args)
+        steps = {step.name: (step.status, step.detail) for step in again.steps}
+        self.assertEqual(again.status, "ok", f"{again.render()}\nrefused store batches: {refused}")
+        self.assertEqual(steps["po-notes"], ("unchanged", RESTORED_NOTES_COVERAGE))
+        self.assertEqual(notes.read_bytes(), SOURCE_NOTES)
+        self.assertEqual(notes.stat().st_mode & 0o777, 0o600)
+
+    def test_a_known_secret_in_the_notes_keeps_the_live_export_and_the_committed_cut(self) -> None:
+        """The real export refuses decoded notes holding a runtime secret before replacing its last cut."""
+        source, source_data = self.fixture.source, self.fixture.source_data
+        board = source_data / "board"
+        before = {path.name: path.read_bytes() for path in board.iterdir() if path.is_file()}
+        repository = self.fixture.source_snapshot
+        tip = git(repository, "rev-parse", SNAPSHOT_REF)
+        committed = git(repository, "cat-file", "blob", f"{tip}:state/board/{NOTES_CHECKPOINT_FILE}")
+        # JSON escapes the quote and the backslash, so only the decoded notes contain the value.
+        secret = 'private"known\\secret-value'
+        with (source / "runtime.env").open("a", encoding="utf-8") as runtime_env:
+            runtime_env.write(f"EXAMPLE_TOKEN={secret}\n")
+        (workspace_dir(source_data) / NOTES_FILE).write_bytes(SOURCE_NOTES + f"pasted {secret}\n".encode())
+
+        result = SnapshotExporter(
+            source_data,
+            source,
+            snapshot_repo=repository,
+            product_revision=REVISION,
+            board_schema_head=head_revision(),
+            state_dir=self.root / "source-pipeline-state",
+        ).write()
+
+        self.assertEqual(result.status, "blocked", result.reason)
+        self.assertIn("secret detected in PO notes", result.reason)
+        self.assertNotIn("private", result.reason)
+        self.assertEqual({path.name: path.read_bytes() for path in board.iterdir() if path.is_file()}, before)
+        self.assertEqual(git(repository, "rev-parse", SNAPSHOT_REF), tip)
+        self.assertEqual(git(repository, "cat-file", "blob", f"{tip}:state/board/{NOTES_CHECKPOINT_FILE}"), committed)
 
     def test_locked_runtime_secrets_restore_board_and_po_sql_but_skip_activation(self) -> None:
         self.assertEqual(self._bootstrap()[0], 0)
@@ -932,6 +1095,13 @@ class RootHandoffSnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertEqual(retried["before_final_barrier"]["artifacts"][".po-restore/contexts.json"],
                          {"uid": uid, "mode": 0o600})
         self.assertEqual(retried["after"]["plan_sha256"], failed["after"]["plan_sha256"])
+        # The notes are published before the PO SQL phase, by the runtime user, on both runs.
+        for run in (failed, retried):
+            facts = run["before_final_barrier"]
+            self.assertEqual(facts["artifacts"]["po"], {"uid": uid, "mode": 0o700})
+            self.assertEqual(facts["artifacts"]["po/NOTES.md"], {"uid": uid, "mode": 0o600})
+            self.assertEqual(facts["notes_sha256"], hashlib.sha256(SOURCE_NOTES).hexdigest())
+        self.assertIn(["po-notes", "unchanged", RESTORED_NOTES_COVERAGE], retried["steps"])
         _, client = self._target_po()
         self.assertEqual(len(self._readback(client)["po_sessions"]), len(po_records()["po_sessions"]))
 

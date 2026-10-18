@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import hashlib
 import json
@@ -10,11 +11,73 @@ import shutil
 import stat as stat_module
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import IO, Any, BinaryIO
 
 from ummanu import _proc
+
+
+class BeneathRefused(Exception):
+    """`open_beneath` stopped at `names[:depth]`.
+
+    `reason` is `missing`, `symlink`, `directory` (not a plain directory), `regular` (not a regular
+    file) or the operating system's error text.
+    """
+
+    def __init__(self, depth: int, reason: str) -> None:
+        super().__init__(reason)
+        self.depth = depth
+        self.reason = reason
+
+
+def open_beneath(
+    directory: int, names: Sequence[str], *, want_directory: bool, missing_ok: bool = False
+) -> int | None:
+    """Open `names` beneath the descriptor `directory` without following any symlink.
+
+    Each component is opened relative to its parent's descriptor, `O_DIRECTORY | O_NOFOLLOW` for a
+    directory and `O_NOFOLLOW | O_NONBLOCK` for a file leaf (a FIFO cannot hang the open), and is
+    checked with `fstat`. Returns a new descriptor the caller closes; None only for a missing
+    component when `missing_ok`. Anything else raises `BeneathRefused`.
+    """
+    current = os.dup(directory)
+    try:
+        for index, name in enumerate(names):
+            as_directory = want_directory or index < len(names) - 1
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+            flags |= os.O_DIRECTORY if as_directory else os.O_NONBLOCK
+            try:
+                opened = os.open(name, flags, dir_fd=current)
+            except FileNotFoundError:
+                if missing_ok:
+                    return None
+                raise BeneathRefused(index + 1, "missing") from None
+            except OSError as exc:
+                # A refused symlink reads as ELOOP or, under O_DIRECTORY, ENOTDIR; name what is there.
+                try:
+                    status = os.stat(name, dir_fd=current, follow_symlinks=False)
+                except FileNotFoundError:
+                    status = None
+                if status is not None and stat_module.S_ISLNK(status.st_mode):
+                    reason = "symlink"
+                elif exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    reason = "directory" if as_directory else "regular"
+                else:
+                    reason = exc.strerror or str(exc)
+                raise BeneathRefused(index + 1, reason) from None
+            os.close(current)
+            current = opened
+            mode = os.fstat(current).st_mode
+            if as_directory and not stat_module.S_ISDIR(mode):
+                raise BeneathRefused(index + 1, "directory")
+            if not as_directory and not stat_module.S_ISREG(mode):
+                raise BeneathRefused(index + 1, "regular")
+        opened, current = current, -1
+        return opened
+    finally:
+        if current >= 0:
+            os.close(current)
 
 
 def write_json(path: Path, payload: Any) -> None:
