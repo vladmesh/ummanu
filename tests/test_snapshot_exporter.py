@@ -239,7 +239,13 @@ class SnapshotRepositoryTests(SnapshotCase):
         write("retained")
         first = self.exporter().write()
         self.assertEqual(first.status, "committed", first.reason)
-        saved = self.committed("state/board/sprints.ndjson")
+        checkout = self.root / "close-checkout"
+        git(self.root, "clone", str(self.repo), str(checkout))
+        self.assertEqual(
+            open_checkpoint_board(checkout / "state" / "board").read_bytes("sprints.ndjson"),
+            (board / "sprints.ndjson").read_bytes(),
+        )
+        saved = {path: self.committed(path) for path in self.tree() if path.startswith("state/board/")}
         secret = 'known\n"private\tsecret'
         for damage in ("missing", "fields", "secret"):
             with self.subTest(damage=damage):
@@ -253,7 +259,9 @@ class SnapshotRepositoryTests(SnapshotCase):
                     result = self.exporter().write()
                 self.assertEqual(result.status, "blocked", result.reason)
                 self.assertEqual(self.tip(), first.commit)
-                self.assertEqual(self.committed("state/board/sprints.ndjson"), saved)
+                self.assertEqual(
+                    {path: self.committed(path) for path in self.tree() if path.startswith("state/board/")}, saved,
+                )
                 self.assertNotIn("private", result.reason)
 
     def test_committed_owner_history_materializes_flat_and_split_and_imports_normally(self):

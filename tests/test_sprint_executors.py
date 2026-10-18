@@ -14,7 +14,6 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 from tests.fakes.sprints import (
     KEEP_THE_ISSUE_OPEN,

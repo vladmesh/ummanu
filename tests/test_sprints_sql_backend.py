@@ -105,14 +105,17 @@ class SqlSprintAtomicityTests(SprintFixture):
 
     def test_native_mixed_close_import_remaps_ids_and_caller_rollback_removes_all_facts(self):
         data, expected = self._export_mixed_close()
-        target = self.make_empty_sprint_client()
-        app = SqlCardClient(PostgresBoard.shared().config(target.credentials.dbname).for_role("app"), self.instance)
+        config = PostgresBoard.shared().fresh_database()
+        self.addCleanup(PostgresBoard.shared().release_database, config.dbname)
+        app = SqlCardClient(config.for_role("app"), self.instance)
         self.addCleanup(app.close)
         with self.assertRaisesRegex(RuntimeError, "caller rollback"), app.transaction():
             import_normalized_board(data, client=app, instance=self.instance)
             require_close_set_parity(expected, app.sprints.export_close_facts())
             raise RuntimeError("caller rollback")
         self.assertEqual(app.sprints.export_close_facts(), {})
+        self.assertEqual(TaskReader(app).export(), [])
+        self.assertEqual(TaskWriter(app, data_dir=data).audit.events(), [])
         import_normalized_board(data, client=app, instance=self.instance)
         actual = app.sprints.export_close_facts()
         require_close_set_parity(expected, actual)
@@ -122,8 +125,9 @@ class SqlSprintAtomicityTests(SprintFixture):
 
     def test_close_import_refuses_conflicting_extra_or_changed_columns_without_overwriting(self):
         data, expected = self._export_mixed_close()
-        target = self.make_empty_sprint_client()
-        app = SqlCardClient(PostgresBoard.shared().config(target.credentials.dbname).for_role("app"), self.instance)
+        config = PostgresBoard.shared().fresh_database()
+        self.addCleanup(PostgresBoard.shared().release_database, config.dbname)
+        app = SqlCardClient(config.for_role("app"), self.instance)
         self.addCleanup(app.close)
         import_normalized_board(data, client=app, instance=self.instance)
         for damage in ("reason", "column", "extra"):
@@ -159,7 +163,10 @@ class SqlSprintAtomicityTests(SprintFixture):
         data = Path(self.tmp.name) / "capture"
         init_layout(data)
         export_board(data, instance_dir=self.instance, reader=TaskReader(self.client), sprint_client=self.client)
-        target = self.make_empty_sprint_client()
+        config = PostgresBoard.shared().fresh_database()
+        self.addCleanup(PostgresBoard.shared().release_database, config.dbname)
+        target = SqlCardClient(config.for_role("app"), self.instance)
+        self.addCleanup(target.close)
         import_normalized_board(data, client=target, instance=self.instance)
         require_close_set_parity(self.client.sprints.export_close_facts(), target.sprints.export_close_facts())
         self.assertEqual(SprintReader(target).show("sprint:atomic")["status"], "open")
@@ -173,7 +180,10 @@ class SqlSprintAtomicityTests(SprintFixture):
         data = Path(self.tmp.name) / "capture"
         init_layout(data)
         export_board(data, instance_dir=self.instance, reader=TaskReader(self.client), sprint_client=self.client)
-        target = self.make_empty_sprint_client()
+        config = PostgresBoard.shared().fresh_database()
+        self.addCleanup(PostgresBoard.shared().release_database, config.dbname)
+        target = SqlCardClient(config.for_role("app"), self.instance)
+        self.addCleanup(target.close)
         import_normalized_board(data, client=target, instance=self.instance)
         facts = target.sprints.export_close_facts()["sprint:legacy"]
         self.assertEqual(facts, {"close_reason": None, "closeout_document": None, "decisions": []})

@@ -189,7 +189,9 @@ def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance:
         raise RestoreError("board audit repair is required before restore")
     set_restore_phase(client, "inventory")
     board_id, columns, swimlanes = reader._board()
-    existing = _existing_board_cards(client, board_id)
+    existing = _existing_board_cards(client, board_id, {
+        card["reference"] for card in cards if card["metadata"].get("record_type") in {"product", "issue"}
+    })
     unexpected = set(existing) - {card["reference"] for card in cards}
     if unexpected:
         raise RestoreError("board is not empty or does not match normalized restore data")
@@ -435,10 +437,12 @@ def _existing_sprints(
     return {sprint["ref"]: sprint for sprint in SprintReader(client, data_dir=data_dir).export()}
 
 
-def _existing_board_cards(client: SqlCardClient, board_id: int) -> dict[str, dict[str, Any]]:
-    """Read both active and closed Pipeline records before deciding a restore is empty."""
+def _existing_board_cards(
+    client: SqlCardClient, board_id: int, record_references: set[str]
+) -> dict[str, dict[str, Any]]:
+    """Read active and closed Cards and captured parents before deciding a restore is empty."""
     sql_rows = getattr(client, "restore_card_rows", None)
-    raw_cards = sql_rows() if callable(sql_rows) else all_project_cards(client, board_id)
+    raw_cards = sql_rows(record_references=record_references) if callable(sql_rows) else all_project_cards(client, board_id)
     result: dict[str, dict[str, Any]] = {}
     for card in raw_cards:
         if not isinstance(card, dict):
