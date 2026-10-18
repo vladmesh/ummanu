@@ -42,25 +42,8 @@ from ummanu.board.store import BoardStoreError
 #: Alembic's script directory, shipped inside the package.
 SCRIPT_LOCATION = Path(__file__).resolve().parent / "migrations"
 
-#: The revision this build of the product expects a store to be at.  It is Alembic's head, which
-#: `head_revision()` reads from the script directory; the schema gate (`board.schema_gate`) compares
-#: against this literal so that a healthy read never imports Alembic, and `tests/test_board_store.py`
-#: holds the two equal.
-#: `0033_po_session_moved` is the head: PO sessions, turns and feed, the one record of /po
-#: request ids, who closed a session and when, the card kinds with their review choice and
-#: live-impact flag, the indexes the audit's narrowed reads are served by, the budget pass's
-#: candidate index, the extension bag under its neutral key, a PO session's reasoning effort
-#: with the model each of its turns resolved to, a sprint's PO session and allowed productions,
-#: the PO-executed card kinds `decision` and `operation`, the owner events behind the bell, a PO
-#: session's title, the headless card kind `wait`, the owner event kind of a delegated card's
-#: returned result, the outbox of the returns a delegated card owes, and a sprint's e2e run budget
-#: with the bell kind of a spent per-card e2e cap, and the bell kind of an after-merge e2e run that
-#: returns a notice, creation-only sprint local-run exceptions, quoted standing owner decisions,
-#: explicit owner-turn attention with routine legacy notices reclassified, and optional
-#: typed PO waits on future observer resumes, PO feed metadata, a sprint's addressable
-#: Definition of Done items, the observer's Assessment decision stored as `accept`, and the bell
-#: kinds of a PO session moved to the other CLI family.
-EXPECTED_SCHEMA_REVISION = "0033_po_session_moved"
+#: Schema gates compare the packaged head without importing Alembic.
+EXPECTED_SCHEMA_REVISION = "0034_po_restore_sequence"
 
 #: A fixed 64-bit key, so every runner of every checkout contends on the same lock.  Any constant
 #: would do; this one is the first 63 bits of sha256("ummanu.board.migrations"), recorded here
