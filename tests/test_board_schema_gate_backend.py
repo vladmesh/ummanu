@@ -51,6 +51,7 @@ OWED = (
     "0031_sprint_dod_items",
     "0032_accept_decision",
     "0033_po_session_moved",
+    "0034_po_restore_sequence",
 )
 
 

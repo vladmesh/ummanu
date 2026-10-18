@@ -79,8 +79,8 @@ IMPORT_PHASES: tuple[ImportPhase, ...] = (
     ImportPhase("origin_returns", ("origin_returns",)),
 )
 
-#: Schema tables the board import never writes: the PO console and the owner-event outbox are not
-#: board export content, and a restored sprint keeps its close decisions out of the export format.
+#: The normalized board import does not wire the separate PO SQL capture/restore primitive.
+#: Owner events and sprint close decisions are outside board export content.
 NOT_IMPORTED: frozenset[str] = frozenset(
     {
         "owner_events",

@@ -969,7 +969,7 @@ Version-2 `board/export.json` requires `origin_returns.ndjson`, `origin_return_c
 `origin_return_sha256` (SHA-256 of the file's exact bytes, including the empty file). Every row carries
 `id`, `task_ref`, `event_id`, audit `request_id`, `target_state`, `created_at`, `delivered_at`, `status`,
 `notice`, `session` and `po_request_id`. Records are ordered by increasing source `id`; target SQL
-ids are local and parity compares relative event order. Times use UTC RFC 3339 with microseconds.
+ids are local and parity compares relative event order. Times use UTC RFC 3339 with microsecond precision, omitting the fraction when it is zero.
 Publication, checkpoint materialization and normalized import reject missing files, invalid records,
 count/digest mismatches, duplicate events and inconsistent card/audit links before accepting the cut.
 The export summary's analytics digest seals the outbox digest; the snapshot manifest also covers the
@@ -1003,7 +1003,7 @@ The file is one object with four complete arrays, including explicitly empty arr
 | `po_feed` | `entry_id`, `session_id`, `turn_seq`, `role`, `text`, `created_at`, `metadata` | source `entry_id`, increasing globally, including repeated text |
 | `po_requests` | `request_id`, `operation`, `fingerprint`, `session_id`, `seq`, `created_at` | `request_id`, ordered by its UTF-8 bytes |
 
-All nullable fields remain explicit nulls; times use UTC RFC 3339 with microseconds. Feed metadata
+All nullable fields remain explicit nulls; times use UTC RFC 3339 with microsecond precision, omitting the fraction when it is zero. Feed metadata
 retains the full object, including source, summary and accepted sprint comment position. Request
 operations `po_session_create`, `po_send` and `po_sprint_session` retain their exact fingerprints and
 bindings; only sends have a non-null turn sequence. This ledger is distinct from board requests and
@@ -1018,12 +1018,48 @@ existing secret scan before commit/push; diagnostics name only table, record ord
 
 Materialization writes inert files into `<data>/board`; the board importer leaves all four live PO
 tables untouched. Recovery's `po-sql` result and `restore-board`'s `po_sql_coverage` and
-`po_sql_diagnostic` distinguish captured source data from imported state. Running turns, provider
-session ids, cwd/stdout paths and process bindings are source records only: they start no process,
-signal no pid and send no events. SQL import/rebind and provider-context normalization are not
-implemented. Pending/refused inputs in `<data>/po-queue/` and images under
-`<data>/po/sessions/<id>/attachments/` are not transported by this capture. It establishes neither PO
-parity nor full PO recovery readiness or protection against every duplicate external effect.
+`po_sql_diagnostic` distinguish captured source data from imported state. These flows do not invoke
+the library primitive `board.po_restore.PoRestoreStore` or establish PO readiness.
+
+The library accepts validated captured records and an explicit `PoRestorePlan`. Create the plan
+with `plan_po_restore(records, target_data_dir, interrupted_at=aware_time)` and persist its fields
+before any import. The plan binds the complete source by canonical JSON SHA-256, an absolute
+canonical target data directory, a fixed interruption time and per-session native bindings. Retain
+the immutable tuple pairs in `native_bindings` when reloading a serialized plan. The pure
+`normalized_po_records(records, plan)` preview names the exact target rows. Allowed differences are:
+
+- Every session cwd becomes `<data>/po` and every turn stdout path becomes
+  `<data>/po-runs/<session_id>/turn-<seq:04d>.stdout`. No old files are accessed or copied.
+- Every turn pid and process identity becomes null, including terminal turns.
+- Each Claude session gets a fresh UUID frozen in the plan. Each Codex provider session id becomes
+  null, so a future native launch cannot resume the lost source context.
+- A captured running turn becomes interrupted with the plan's fixed finish time. Its reason retains
+  any existing reason followed by an explicit statement that completion and external effects are
+  unknown and no automatic retry occurred. Terminal turn state, finish time and reason are preserved.
+
+All other fields remain exact, including session/turn/feed/request identities, feed order, repeated
+texts, metadata, title, effort, close audit, resolved models and accepted request fingerprints.
+Import does not reconstruct fingerprints from prompts. No session is reopened. This primitive
+starts no process, sends no signal/input/event and needs no provider authentication.
+
+Call `PoRestoreStore(client).restore(records, plan)` inside the app-role SQL client's outer
+transaction. The owner must let every exception abort that transaction. The primitive locks all four
+tables against concurrent writers, inserts only missing identities in parent-first order and proves
+all ordered fields by fresh SQL readback before returning. Conflicting or extra target rows refuse
+the whole import, including a confirmed target completion newer than a captured running turn; no
+history is overwritten or deleted. A committed repeat with the same plan writes no rows. A rollback
+removes every inserted prefix; retry uses the same plan without generating timestamps or ids.
+
+Preserved feed identities require advancing `po_feed_entry_id_seq` beyond imported ids. The app role
+has SELECT and UPDATE on that sequence in addition to USAGE; other sequence/table grants do not
+change. Sequence advances survive rollback and can leave gaps, but never rewind or change restored
+row identities. Ordinary subsequent turn claims and feed appends use the normal store allocators.
+Parity errors name table, hashed identity and field, with transported values redacted.
+
+Service activation, seeding a fresh provider context from history, safe continuation and reconciliation
+of uncertain external effects remain separate work. Pending/refused inputs in `<data>/po-queue/`,
+images under `<data>/po/sessions/<id>/attachments/` and PO workspace notes are not transported by this
+capture or primitive. Library SQL parity does not establish full PO recovery readiness.
 
 Released v1/v2 checkpoints lacking both declaration and file remain supported and report
 `checkpoint has no PO SQL coverage; sessions, turns, feed and request bindings are unavailable`.

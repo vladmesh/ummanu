@@ -819,6 +819,7 @@ Revisions (`src/ummanu/board/migrations/versions/`):
 | `0031_sprint_dod_items` | nullable DoD item array on `sprints`, array CHECK; every existing sprint stays NULL (free-text DoD, unstructured); downgrade refuses while any sprint has items |
 | `0032_accept_decision` | data only, `release_safety = "destructive"`: the observer's Assessment decision value `release` becomes `accept` in `task_comments.marker` (`decision:accept`) and, at any depth of `board_events.data` and `requests.intent`, under the keys `decision` and `disposition` and in a `decision:` `marker`; no column; the downgrade writes `release` back the same way |
 | `0033_po_session_moved` | additive: `po_session_moved` (notice) and `po_session_moved_account` (`needs_owner`) in `owner_event_kind_in_vocabulary` and `owner_event_class_follows_kind`, both restated; no column; the downgrade restores `0028`'s two constraints and fails while either kind exists |
+| `0034_po_restore_sequence` | app-role SELECT and UPDATE on `po_feed_entry_id_seq` so inert PO import can advance preserved feed identities; no other grants change; no downgrade |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -941,7 +942,7 @@ UMMANU_DB_READ_PASSWORD=<generated>
 | Role | Privileges |
 |---|---|
 | `ummanu_owner` | initialization superuser from `POSTGRES_USER`; owns the schema; runs migrations |
-| `ummanu_app` | `SELECT, INSERT, UPDATE, DELETE` on all tables, `USAGE` on sequences; no DDL |
+| `ummanu_app` | `SELECT, INSERT, UPDATE, DELETE` on all tables, `USAGE` on sequences; also `SELECT, UPDATE` on `po_feed_entry_id_seq` for preserved PO feed identities; no DDL |
 | `ummanu_read` | `USAGE` on the schema, `SELECT` only |
 
 `0001_initial`, run as owner, creates the two login roles with passwords passed as run parameters
@@ -1212,7 +1213,7 @@ and restore reads stay outside latency-sensitive paths.
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0033_po_session_moved`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
+  (`0034_po_restore_sequence`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `ummanu.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a
