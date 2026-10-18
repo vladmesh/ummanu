@@ -623,7 +623,7 @@ class PublicationTests(_Case):
                     before = path.lstat()
                     real_stat = os.fstat
 
-                    def foreign_stat(fd):
+                    def foreign_stat(fd, real_stat=real_stat, before=before):
                         info = real_stat(fd)
                         if (info.st_dev, info.st_ino) == (before.st_dev, before.st_ino):
                             fields = list(info)
@@ -654,24 +654,28 @@ class PublicationTests(_Case):
             real_link(*args, **kwargs)
             raise OSError("interrupted after link")
 
-        with mock.patch.object(attachments.os, "link", side_effect=interrupted_link):
-            with self.assertRaises(AttachmentPublicationError):
-                publish_image(self.data, item, image)
+        with (
+            mock.patch.object(attachments.os, "link", side_effect=interrupted_link),
+            self.assertRaises(AttachmentPublicationError),
+        ):
+            publish_image(self.data, item, image)
         self.assertEqual(self.native(item).read_bytes(), image)
         for component in (item.name, "attachments", "open", "sessions", "po", "data"):
             for _ in range(2):
                 synced = []
 
-                def sync(fd):
+                def sync(fd, synced=synced, component=component):
                     name = Path(os.readlink(f"/proc/self/fd/{fd}")).name
                     synced.append(name)
                     if name == component:
                         raise OSError("injected directory sync failure")
                     return real_sync(fd)
 
-                with mock.patch.object(attachments.os, "fsync", side_effect=sync):
-                    with self.assertRaises(AttachmentPublicationError):
-                        publish_image(self.data, item, image)
+                with (
+                    mock.patch.object(attachments.os, "fsync", side_effect=sync),
+                    self.assertRaises(AttachmentPublicationError),
+                ):
+                    publish_image(self.data, item, image)
                 self.assertIn(item.name, synced)
                 self.assertEqual(self.native(item).read_bytes(), image)
             publish_image(self.data, item, image)
@@ -703,9 +707,11 @@ class PublicationTests(_Case):
             mock.patch("ummanu.po.store.PoStore", side_effect=lambda _: _ClosingStore(fake)),
             mock.patch("ummanu.board.po_restore.prepare_po_restore", side_effect=PoCheckpointError("stopped")) as plan,
         ):
-            with mock.patch.object(attachments, "publish_image", side_effect=publish):
-                with self.assertRaisesRegex(RestoreError, "PO images restore failed: .*injected failure"):
-                    restore_po(target, source=source, instance=self.root, board=board)
+            with (
+                mock.patch.object(attachments, "publish_image", side_effect=publish),
+                self.assertRaisesRegex(RestoreError, "PO images restore failed: .*injected failure"),
+            ):
+                restore_po(target, source=source, instance=self.root, board=board)
             self.assertEqual(attempts, [first, second])
             self.assertEqual(attachment_path(target, first.session_id, first.name).read_bytes(),
                              stored[first.session_id, first.name])
