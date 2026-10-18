@@ -580,8 +580,8 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
     def test_root_recovery_hands_po_recovery_to_a_distinct_runtime_user_and_retries(self) -> None:
         """Real root, a real distinct runtime account and real ownership changes, through `recover`.
 
-        Bootstrap's handoff gives the live root, data plane and remote to the runtime user; a root
-        `recover` then fails inside the PO import and is retried.
+        Bootstrap's handoff gives the live root and data plane to the runtime user; a root `recover`
+        then fails inside the PO import and is retried.
         """
         self.assertEqual(self._bootstrap()[0], 0)
         user = f"ummanu-po-{secrets.token_hex(3)}"
@@ -592,8 +592,9 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
                                          str(self.root)], check=True)
         self.root.chmod(0o755)
         fixture = self.fixture
+        # The remote stays the invoking account's, as a remote host's would not be the runtime user's.
         subprocess.run(["sudo", "-n", "chown", "-R", f"{user}:{user}", str(fixture.target),
-                        str(fixture.data_dir), str(fixture.remote)], check=True)
+                        str(fixture.data_dir)], check=True)
         repository = Path(__file__).resolve().parents[1]
         data_dir = fixture.data_dir.resolve()
         runs = []
