@@ -253,6 +253,8 @@ def materialize_checkpoint(
                     "cards.json",
                     "sprints.json",
                     *[n for n in CHECKPOINT_BOARD if (staging / n).is_file()],
+                    # A selected point without images still replaces the payload an earlier point left.
+                    *([] if (staging / ATTACHMENTS_CHECKPOINT_FILE).is_file() else [ATTACHMENTS_CHECKPOINT_FILE]),
                 ],
                 "checkpoint board materialization",
             )

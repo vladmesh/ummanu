@@ -449,6 +449,63 @@ class MaterializeTests(_Case):
                 self.assertEqual(fake.requests, {})
         self.assertEqual(source_files, sorted(path for path in (self.data / "po").rglob("*") if path.is_file()))
 
+    def test_a_later_point_without_images_replaces_the_payload_an_earlier_point_left_on_the_target(self) -> None:
+        stored = self.seed()
+        target = self.root / "target"
+        points = iter(range(100))
+
+        def point(inventory: AttachmentInventory | None, layout: str) -> Path:
+            instance = self.root / f"instance-{next(points)}"
+            _checkpoint(instance, target)
+            board = instance / "state" / "board"
+            write_po(board, po_records())
+            if inventory is not None:
+                self.declare(board, inventory)
+            if layout == "split":
+                split_board(board)
+            return instance
+
+        def restored_coverage() -> tuple[object, object, object]:
+            with (
+                mock.patch("ummanu.board.store.resolve_role", return_value=object()),
+                mock.patch("ummanu.po.store.PoStore", side_effect=lambda _credentials: _ClosingStore(FakeBoard())),
+                mock.patch("ummanu.board.po_restore.prepare_po_restore", side_effect=PoCheckpointError("stopped")),
+                self.assertRaisesRegex(RestoreError, "failed at plan: stopped"),
+            ):
+                restore_po(target, source=target / "board", instance=self.root / "instance")
+            state = restore_state(target)
+            return state["po_attachments_coverage"], state["po_attachments_files"], state["po_attachments_bytes"]
+
+        captured = inventory_attachments(self.data, SESSIONS)
+        later = {
+            "split empty": (AttachmentInventory(3, 1, ()), "split", ("empty", 0, 0)),
+            "split absent": (AttachmentInventory(3, 0, ()), "split", ("absent", 0, 0)),
+            "flat empty": (AttachmentInventory(3, 1, ()), "flat", ("empty", 0, 0)),
+            "legacy": (None, "split", ("unavailable", None, None)),
+        }
+        for label, (inventory, layout, coverage) in later.items():
+            with self.subTest(point=label):
+                materialize_checkpoint(point(captured, "split"), target)
+                self.assertEqual(self.captured_bytes(target / "board"), stored)
+                selected = point(inventory, layout)
+                for _ in ("selected", "repeated"):
+                    materialize_checkpoint(selected, target)
+                    source = open_checkpoint_board(selected / "state" / "board")
+                    published = target / "board" / ATTACHMENTS_CHECKPOINT_FILE
+                    self.assertEqual(published.read_bytes() if published.exists() else None,
+                                     source.read_bytes(ATTACHMENTS_CHECKPOINT_FILE)
+                                     if source.has(ATTACHMENTS_CHECKPOINT_FILE) else None)
+                    self.assertEqual(json.loads((target / "board" / "export.json").read_text()),
+                                     json.loads(open_checkpoint_board(selected / "state" / "board")
+                                                .read_text("export.json")))
+                    attachments = read_checkpoint_attachments(target / "board")
+                    if inventory is None:
+                        self.assertIsNone(attachments)
+                    else:
+                        self.assertEqual((attachments.coverage(), attachments.files), (coverage[0], ()))
+                    self.assertEqual(restored_coverage(), coverage)
+                    self.assertFalse((target / "po").exists())
+
     def test_legacy_and_damaged_captures_are_told_apart_before_any_write(self) -> None:
         legacy = self.root / "legacy"
         init_layout(legacy)

@@ -1232,7 +1232,8 @@ the image is not scanned. A checkpoint without the declaration and without the p
 capability and reports `checkpoint has no PO attachment coverage; PO session images are
 unavailable`.
 
-Materialization writes a non-empty payload to `<data>/board/po_attachments.ndjson` as inert data.
+Materialization writes the selected point's payload to `<data>/board/po_attachments.ndjson` as inert
+data and removes one an earlier point left when the selected point has none.
 Restore validates it and writes no `<data>/po/sessions/` file; the absolute paths in restored
 message text still name the source host. `restore-state.json` and `restore-board` expose
 `po_attachments_coverage` (`captured`, `empty` when directories held no image, `absent` when no

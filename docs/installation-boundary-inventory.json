@@ -54,7 +54,7 @@
     "_named_path": {"owner": "support", "baseline_lines": [1055, 1058], "ast_sha256": "c532669eead30834a237c7d38c90454c023f49b3f78a511d1d0ba09f6058421c"},
     "_holds_only": {"owner": "support", "baseline_lines": [1061, 1070], "ast_sha256": "f8d1a968a522afef3441c86f535b5529b9040dcfe0fb73c85bc2f66805c1be66"},
     "_checked_data_target": {"owner": "support", "baseline_lines": [1073, 1098], "ast_sha256": "afdcd76bc1a7ba02bd5d6a5951ac11cad439f6ba60a645fa3cb84b261eb4c73e"},
-    "materialize_checkpoint": {"owner": "materialize", "baseline_lines": [1101, 1215], "ast_sha256": "5bbc2d0239ae96c93a4b5a8e69e5dbad3f4fb684ddc298da0ef1c421545c2177"},
+    "materialize_checkpoint": {"owner": "materialize", "baseline_lines": [1101, 1215], "ast_sha256": "1f8f26906b2a34bf35d852cdb0baae736726ec5fbf4d6e9affcf7ba7be194319"},
     "_restored_run_journals": {"owner": "materialize", "baseline_lines": [1218, 1252], "ast_sha256": "9bbc864df2e43aa56b0201a9b1a1b816ffb0af91494a14db2346a680e4594e6a"},
     "_render_restored_journal": {"owner": "materialize", "baseline_lines": [1255, 1263], "ast_sha256": "38def3ec1702d23061ad4ce578ba3a036668b2ce4c0af7849627a2392fc7061e"},
     "_live_run_journals": {"owner": "materialize", "baseline_lines": [1266, 1283], "ast_sha256": "10ab372ff5b42d31fbe1b01ba7bcdbc37c386bd5f770e612277747df41c88e72"},
