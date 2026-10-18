@@ -882,7 +882,9 @@ class PoRunner:
         if restored is not None:
             if alive and not scoped:
                 _kill_group(int(turn.pid))
-            return self._finish(turn.session_id, turn.seq, INTERRUPTED, f"{RECOVERED_REASON}; {UNCERTAIN}")
+            reason = ("completion and external effects are unknown; no automatic retry"
+                      if restored["phase"] == "established" else UNCERTAIN)
+            return self._finish(turn.session_id, turn.seq, INTERRUPTED, f"{RECOVERED_REASON}; {reason}")
         if not rerun or turn.reason is not None:
             failed = self._rerun_failures.get(key)
             if failed is not None:

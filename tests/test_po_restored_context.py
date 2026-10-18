@@ -354,6 +354,31 @@ class RestoredContextTests(unittest.TestCase):
         self.assertEqual(first.state, COMPLETED)
         self.assert_no_new_launch(self.new_runner())
 
+    def test_restart_after_establishment_interrupts_input_and_keeps_confirmed_context(self):
+        self.setup_provider("codex")
+        first, _ = self.send()
+        self.assertEqual(first.state, COMPLETED)
+        with (
+            mock.patch.object(self.runner.store, "complete_turn", side_effect=PoStoreError("store lost")),
+            mock.patch.object(self.runner.store, "finish_turn", side_effect=PoStoreError("store lost")),
+        ):
+            second, _ = self.send(text="uncertain follow-up", request="second-request")
+        self.assertEqual(second.state, RUNNING)
+        restart = self.new_runner()
+        [recovered] = restart.recover(rerun=True)
+        self.assertEqual(recovered.state, INTERRUPTED)
+        self.assertIn("completion and external effects are unknown", recovered.reason)
+        count = len(self.calls)
+        replay, created = self.send(restart, text="uncertain follow-up", request="second-request")
+        self.assertFalse(created)
+        self.assertEqual(replay.state, INTERRUPTED)
+        self.assertEqual(len(self.calls), count)
+        third, _ = self.send(restart, text="new decision", request="third-request")
+        self.assertEqual(third.state, COMPLETED)
+        self.assertEqual(self.calls[-1]["argv"][1:3], ["exec", "resume"])
+        self.assertEqual(self.calls[-1]["argv"][-2:], ["new-thread", "-"])
+        self.assertEqual(self.calls[-1]["prompt"], "new decision")
+
     def test_launch_marker_publication_failure_cannot_spawn_or_reseed(self):
         self.setup_provider()
         original = os.replace
