@@ -26,7 +26,13 @@ from ummanu.board import sprint_dod
 from ummanu.board.backend import CARD, SPRINT, board_client
 from ummanu.board.local_run import parse_local_run_exceptions
 from ummanu.board.owner_decisions import stored_decisions
-from ummanu.board.po_checkpoint import PO_FILE, PoCheckpointError, export_po_records, po_coverage, read_checkpoint_po
+from ummanu.board.po_checkpoint import (
+    PO_FILE,
+    PoCheckpointError,
+    export_po_records,
+    po_coverage,
+    read_checkpoint_po,
+)
 from ummanu.config import validate
 from ummanu.kernel.errors import TaskError
 from ummanu.memory_journal import export_memory_snapshot

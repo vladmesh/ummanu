@@ -46,7 +46,12 @@ from ummanu.board.origin_checkpoint import (
 )
 from ummanu.board.origin_outbox import OriginOutboxStore
 from ummanu.board.owner_decisions import FIELD as OWNER_DECISIONS_FIELD, stored_decisions
-from ummanu.board.po_checkpoint import CAPTURED_PO_COVERAGE, LEGACY_PO_COVERAGE, PoCheckpointError, read_checkpoint_po
+from ummanu.board.po_checkpoint import (
+    CAPTURED_PO_COVERAGE,
+    LEGACY_PO_COVERAGE,
+    PoCheckpointError,
+    read_checkpoint_po,
+)
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.task_routing import TaskMetadata
 from ummanu.config import DataDirError, instance_data_dir, validate_instance
