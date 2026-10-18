@@ -1022,8 +1022,10 @@ tables untouched. Recovery's `po-sql` result and `restore-board`'s `po_sql_cover
 the library primitive `board.po_restore.PoRestoreStore` or establish PO readiness.
 
 The library ordering is: validate captured source with `read_checkpoint_po`/`validate_po_records`,
-prepare/load and persist the plan, open the caller's SQL transaction and import, prove parity, then
-consider activation separately. Legacy unavailable coverage cannot be passed as empty records.
+prepare/load and persist the plan, open the caller's SQL transaction and import, prove parity and
+commit, explicitly prepare the runner context, then admit a new owner input for native establishment.
+Normal recovery does not perform this library sequence. Legacy unavailable coverage cannot be
+passed as empty records.
 `board.po_restore.prepare_po_restore(records, target_data_dir, interrupted_at=aware_time)` owns
 preparation and loading. The target must already exist, be absolute and canonical with no symlink
 components, belong to the effective user and deny group/other writes. Its private `.po-restore`
@@ -1081,10 +1083,44 @@ change. Sequence advances survive rollback and can leave gaps, but never rewind 
 row identities. Ordinary subsequent turn claims and feed appends use the normal store allocators.
 Parity errors name table, hashed identity and field, with transported values redacted.
 
-Service activation, seeding a fresh provider context from history, safe continuation and reconciliation
-of uncertain external effects remain separate work. Pending/refused inputs in `<data>/po-queue/`,
-images under `<data>/po/sessions/<id>/attachments/` and PO workspace notes are not transported by this
-capture or primitive. Library SQL parity does not establish full PO recovery readiness.
+After the import transaction commits and the canonical PO workspace exists,
+`PoRunner.prepare_restored_context(records, plan)` validates the same captured records, persisted
+frozen plan and live imported session/turn/feed/request rows. It neither imports SQL nor starts a
+turn. `.po-restore/contexts.json` is the sole owner of restored native establishment: a private,
+mode-0600 atomic file under the plan's mode-0700 locked directory. It binds the plan digest, source
+session fields, maximum source turn sequence, ordered source turn/feed digest, launch attempt and
+current confirmed native binding. It stores no duplicate dialogue or request ledger. Same-source
+preparation retries retain the frozen UUID/time and state; incompatible or damaged state is refused.
+After launch, unconfirmed or blocked establishment refuses preparation as well as new launches.
+Do not remove these files to retry an uncertain turn. A planned imported session without its explicit
+context preparation cannot enter the normal-session path.
+
+The first new input gets historical dialogue in durable feed order, recorded terminal outcomes and
+an explicit restoration/uncertainty notice. Historical messages are separated from the current input,
+which is passed once. A private full transcript under `<data>/po/.restored-context/` remains available
+to the head; prompts carry up to 24000 bytes of inline history and an explicit instruction to read
+that transcript. Large histories use the reference without dropping saved messages. Missing, changed
+or unreadable required source history, unsafe paths and unreadable retained transcripts prevent launch.
+Claude uses the plan's fresh UUID with `--session-id` regardless of captured completed turns. Codex
+starts fresh `exec` and records its new thread id through the ordinary capture path.
+
+The runner persists a launch attempt before spawning. Establishment requires a successful final
+answer with the matching Claude result session id or captured Codex thread id, followed by SQL
+completion and durable context publication. Subsequent turns, including after restart, resume that
+confirmed binding without another seed. A UUID or old completed turn alone proves no establishment.
+Stop, failed/missing native evidence or a restart during establishment leaves a blocked/interrupted
+explanation; it never triggers another seed, session-collision relaunch or provider fallback. A crash
+after SQL completion but before context publication also refuses continuation. Recovery of an unowned
+new restored turn interrupts it even with `rerun=True`; captured source turns are never rerun or
+rewritten. Request-id replay returns its recorded turn without spawning. Ordinary sessions retain
+their existing resume, recovery and fallback behavior. Automatic provider switching is disabled for
+explicitly restored sessions so it cannot discard the recorded native binding.
+
+Normal `recover`/`restore-board` still do not call SQL import or runner context preparation. Their
+captured/unavailable coverage is not restored/ready. Activation wiring and reconciliation of uncertain
+external effects remain separate. Pending/refused inputs in `<data>/po-queue/`, images under
+`<data>/po/sessions/<id>/attachments/` and PO workspace notes are not transported by these primitives.
+Library SQL parity and runner preparation do not establish full PO recovery readiness.
 
 Released v1/v2 checkpoints lacking both declaration and file remain supported and report
 `checkpoint has no PO SQL coverage; sessions, turns, feed and request bindings are unavailable`.
