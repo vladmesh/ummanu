@@ -52,7 +52,7 @@ def _plan_constant(value: str) -> None:
     raise PoCheckpointError("PO restore plan JSON has a nonfinite number")
 
 
-def _load_plan(payload: bytes, records: dict[str, list[dict[str, Any]]], data_dir: Path) -> PoRestorePlan:
+def _decode_plan(payload: bytes, data_dir: Path) -> PoRestorePlan:
     try:
         saved = json.loads(payload.decode("utf-8"), object_pairs_hook=_plan_object,
                            parse_constant=_plan_constant)
@@ -78,6 +78,24 @@ def _load_plan(payload: bytes, records: dict[str, list[dict[str, Any]]], data_di
         raise PoCheckpointError("PO restore plan field native_bindings is invalid")
     plan = PoRestorePlan(saved["source_sha256"], saved["data_dir"], saved["interrupted_at"],
                          tuple(tuple(binding) for binding in bindings))
+    moment = parse_rfc3339(plan.interrupted_at)
+    if (moment is None or moment.tzinfo is None
+            or rfc3339(moment, microseconds=True) != plan.interrupted_at
+            or len(dict(plan.native_bindings)) != len(bindings)
+            or any(Path(key).name != key or key in {"", ".", ".."} for key, _ in bindings)):
+        raise PoCheckpointError("PO restore plan time or session identities are invalid")
+    native_ids = [value for _, value in bindings if value is not None]
+    try:
+        valid = len(set(native_ids)) == len(native_ids) and all(str(uuid.UUID(value)) == value for value in native_ids)
+    except ValueError:
+        valid = False
+    if not valid:
+        raise PoCheckpointError("PO restore plan native bindings are invalid")
+    return plan
+
+
+def _load_plan(payload: bytes, records: dict[str, list[dict[str, Any]]], data_dir: Path) -> PoRestorePlan:
+    plan = _decode_plan(payload, data_dir)
     normalized_po_records(records, plan)
     return plan
 
@@ -98,6 +116,8 @@ def prepare_po_restore(records: dict[str, list[dict[str, Any]]], data_dir: Path,
 
     Only a missing plan permits creation; callers import in a later SQL transaction.
     """
+    from ummanu.po.recovery_admission import recovery_target_lock
+
     validate_po_records(records)
     if interrupted_at.tzinfo is None or interrupted_at.utcoffset() is None:
         raise PoCheckpointError("PO restore plan requires an aware interruption time")
@@ -105,28 +125,29 @@ def prepare_po_restore(records: dict[str, list[dict[str, Any]]], data_dir: Path,
         if not data_dir.is_absolute() or data_dir.resolve(strict=True) != data_dir:
             raise PoCheckpointError("PO restore plan target must be canonical without symlinks")
         _check_plan_path(data_dir.lstat(), directory=True, private=False)
-        state = data_dir / ".po-restore"
-        state.mkdir(mode=0o700, exist_ok=True)
-        _check_plan_path(state.lstat(), directory=True, private=True)
-        with directory_lock(state):
-            fsync_directory(data_dir)
-            path = state / "plan.json"
-            try:
-                info = path.lstat()
-            except FileNotFoundError:
-                plan = plan_po_restore(records, data_dir, interrupted_at=interrupted_at)
-                payload = {"version": 1, **asdict(plan)}
-                write_bytes_atomic(path, (json.dumps(payload, ensure_ascii=False, sort_keys=True,
-                                                     allow_nan=False) + "\n").encode("utf-8"), mode=0o600)
-            else:
-                _check_plan_path(info, directory=False, private=True)
-                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-                with os.fdopen(descriptor, "rb") as handle:
-                    _check_plan_path(os.fstat(handle.fileno()), directory=False, private=True)
-                    plan = _load_plan(handle.read(), records, data_dir)
-            # A failed directory sync after rename must be completed by the next retry too.
-            fsync_directory(state)
-            return plan
+        with recovery_target_lock(data_dir):
+            state = data_dir / ".po-restore"
+            state.mkdir(mode=0o700, exist_ok=True)
+            _check_plan_path(state.lstat(), directory=True, private=True)
+            with directory_lock(state):
+                fsync_directory(data_dir)
+                path = state / "plan.json"
+                try:
+                    info = path.lstat()
+                except FileNotFoundError:
+                    plan = plan_po_restore(records, data_dir, interrupted_at=interrupted_at)
+                    payload = {"version": 1, **asdict(plan)}
+                    write_bytes_atomic(path, (json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                                                         allow_nan=False) + "\n").encode("utf-8"), mode=0o600)
+                else:
+                    _check_plan_path(info, directory=False, private=True)
+                    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    with os.fdopen(descriptor, "rb") as handle:
+                        _check_plan_path(os.fstat(handle.fileno()), directory=False, private=True)
+                        plan = _load_plan(handle.read(), records, data_dir)
+                # A failed directory sync after rename must be completed by the next retry too.
+                fsync_directory(state)
+                return plan
     except (OSError, RuntimeError) as exc:
         raise PoCheckpointError(f"PO restore plan storage failed ({type(exc).__name__})") from None
 

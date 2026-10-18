@@ -1022,15 +1022,63 @@ tables untouched. Recovery's `po-sql` result and `restore-board`'s `po_sql_cover
 the library primitive `board.po_restore.PoRestoreStore` or establish PO readiness.
 
 The library ordering is: validate captured source with `read_checkpoint_po`/`validate_po_records`,
-prepare/load and persist the plan, open the caller's SQL transaction and import, prove parity and
-commit, explicitly prepare the runner context, then admit a new owner input for native establishment.
-Normal recovery does not perform this library sequence. Legacy unavailable coverage cannot be
-passed as empty records.
+begin recovery admission, prepare/load the frozen plan, import in the caller's SQL transaction,
+prove parity and commit, prepare the full runner context cohort, then finish recovery admission.
+New owner input can then establish a replacement native context. Normal recovery does not perform
+this library sequence. Legacy unavailable coverage cannot be passed as empty records.
+
+`po.recovery_admission.PoRecoveryAdmission(target_data_dir, store)` is the sole admission owner.
+`begin(records)` durably closes all new PO mutations before any plan/import work and returns
+`holding`. It refuses with retryable `recovery_busy` while any turn is running, without killing or
+settling that work. Drain existing turns before retrying; a refused begin authorizes no import.
+The private, single-link, mode-0600 `.po-recovery-admission.json` binds the captured source digest,
+canonical target and phase. Same-source/target retries preserve that phase without generating times
+or native ids; a finished retry returns `finished`. Foreign, corrupt, unsafe or unreadable authority
+is never overwritten or interpreted as absence. A `.po-restore` directory without admission
+authority, including an interrupted mkdir before plan publication, fails closed with `recovery_invalid`.
+Ordinary targets with neither recovery artifact admit mutations normally.
+
+The native target directory lock serializes begin, finish, frozen plan publication and ingress
+through SQL mutation and process launch. Lock order is service lock, target directory, runner lock,
+then scoped process ownership/context directory locks as needed; direct runner/coordinator calls
+start at the target lock. Nested calls in one thread reuse that target lock. SQL row methods have no
+filesystem admission dependency. Begin waits for an admission already holding the target lock,
+then refuses if its turn is running. Terminal transitions hold the same target lock through SQL
+completion and context publication, so begin cannot overtake a partially settled turn. The caller
+does not hold a SQL transaction while waiting for this lock.
+
+`finish(records, plan, import_committed=True, parity_verified=True)` requires explicit caller
+confirmation that its import transaction committed with normalized parity. It also reuses the
+plan/context validators to prove an existing, complete `prepared` cohort, exact live imported
+session metadata, source turn/feed history and request bindings, including empty and closed
+sessions. Neither plan existence nor a progress flag satisfies finish. It never prepares missing
+contexts, imports SQL or launches a provider. Only then does it publish the finished phase bound to
+the frozen plan digest. A finish retry validates that binding and full shared authority without
+requiring later legitimate turns to equal the initial import. Atomic private publication and
+directory sync leave either the prior hold or a proven finished phase after interruption. Retry
+completes a failed directory sync without regenerating the plan.
+
+Runner send/create and their request-id forms, stop/recover, service submit/new-session/sprint-session,
+close and rename all enforce admission before a SQL claim, session metadata write or spawn. During
+`holding`, they report `recovery_hold` with the required finish action; service/client distinguish
+this retryable no-write refusal from invalid input and from damaged authority. An existing queue
+item remains pending with identical request id, text, card, note and metadata. The service neither
+refuses/removes it nor creates a failed turn; after finish the usual request ledger claims it once.
+Service status and queued dialogue reads expose the recovery reason. Conversation reads remain
+available. New sessions, rerun recovery and provider fallback cannot bypass an active hold.
+
+Finished admission validates the shared plan and full contexts structure before every mutation.
+Missing/corrupt shared files close all mutations with a recovery reason. A structurally valid
+session with an uncertain native establishment remains under its individual guard and does not
+hold unrelated sessions. Read-only exact request replay on an admitted target returns its ledger
+result without spawning, including for an individually blocked session. There is no automatic
+reset for uncertain effects; do not delete authority files or edit SQL/markers to reopen admission.
+
 `board.po_restore.prepare_po_restore(records, target_data_dir, interrupted_at=aware_time)` owns
 preparation and loading. The target must already exist, be absolute and canonical with no symlink
 components, belong to the effective user and deny group/other writes. Its private `.po-restore`
 directory must belong to that user with mode 0700; `plan.json` must be a single-link regular file
-owned by that user with mode 0600. Preparation holds the native directory lock, publishes a synced
+owned by that user with mode 0600. Preparation holds target then plan directory locks, publishes a synced
 temporary file by atomic replacement and syncs the directories before returning. A same-source,
 same-target retry reloads the frozen time and UUIDs even when its explicit aware caller time differs;
 it never rewrites the plan. Pure `plan_po_restore` alone does not persist anything.
@@ -1098,8 +1146,9 @@ context preparation cannot enter the normal-session path.
 The first new input gets historical dialogue in durable feed order, recorded terminal outcomes and
 an explicit restoration/uncertainty notice. Historical messages are separated from the current input,
 which is passed once. A private full transcript under `<data>/po/.restored-context/` remains available
-to the head; prompts carry up to 24000 bytes of inline history and an explicit instruction to read
-that transcript. Large histories use the reference without dropping saved messages. Missing, changed
+to the head with an explicit instruction to read it. History at most 24000 bytes is inline; larger
+history supplies the restoration notice and private full-history pointer, without an inline tail
+guarantee or dropped saved messages. Missing, changed
 or unreadable required source history, unsafe paths and unreadable retained transcripts prevent launch.
 Claude uses the plan's fresh UUID with `--session-id` regardless of captured completed turns. Codex
 starts fresh `exec` and records its new thread id through the ordinary capture path.
@@ -1116,7 +1165,7 @@ rewritten. Request-id replay returns its recorded turn without spawning. Ordinar
 their existing resume, recovery and fallback behavior. Automatic provider switching is disabled for
 explicitly restored sessions so it cannot discard the recorded native binding.
 
-Normal `recover`/`restore-board` still do not call SQL import or runner context preparation. Their
+Normal `recover`/`restore-board` still do not call admission begin/finish, SQL import or runner context preparation. Their
 captured/unavailable coverage is not restored/ready. Activation wiring and reconciliation of uncertain
 external effects remain separate. Pending/refused inputs in `<data>/po-queue/`, images under
 `<data>/po/sessions/<id>/attachments/` and PO workspace notes are not transported by these primitives.

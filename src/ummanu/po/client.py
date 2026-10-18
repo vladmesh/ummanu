@@ -5,7 +5,8 @@ The service (`ummanu.po.service`, unit `ummanu-po.service`) listens on the Unix 
 reach it). One connection carries one request, a JSON object on one line with an ``op``, and one
 answer line: ``{"ok": true, "result": {...}}`` or ``{"ok": false, "error": {"code", "message"}}``.
 The codes are the store's outcomes (`session_not_found`, `session_closed`, `request_conflict`,
-`turn_in_progress`) plus `validation`, `unavailable` and `outcome_unknown`; :class:`PoServiceClient`
+`turn_in_progress`) plus `validation`, `unavailable`, `outcome_unknown` and recovery admission
+codes (`recovery_hold`, `recovery_busy`, `recovery_invalid`); :class:`PoServiceClient`
 raises the store's own exception for the first four, so a caller keeps the vocabulary it had when the
 runner was local. A refusal the service knows wrote nothing carries ``"nothing_written": true``, and the
 raised exception an attribute of the same name; every other refusal may follow an accepted request, and
@@ -63,6 +64,14 @@ class ServiceRefused(PoServiceError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class RecoveryRefused(ServiceRefused):
+    """Recovery admission refused a mutation; repeat the same request after the named action."""
+
+    @property
+    def retryable(self) -> bool:
+        return self.code in {"recovery_hold", "recovery_busy"}
 
 
 _STORE_OUTCOMES: dict[str, type[Exception]] = {
@@ -171,7 +180,8 @@ class PoServiceClient:
         if code == "outcome_unknown":
             raise OutcomeUnknown(message)
         outcome = _STORE_OUTCOMES.get(code)
-        refusal = outcome(message) if outcome is not None else ServiceRefused(code, message)
+        refusal_type = RecoveryRefused if code in {"recovery_hold", "recovery_busy", "recovery_invalid"} else ServiceRefused
+        refusal = outcome(message) if outcome is not None else refusal_type(code, message)
         # Only the service says a refusal wrote nothing; the exception carries that on.
         refusal.nothing_written = error.get("nothing_written") is True  # type: ignore[attr-defined]
         raise refusal

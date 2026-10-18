@@ -81,17 +81,10 @@ class RestoredContexts:
             _check_plan_path(self.data_dir.lstat(), directory=True, private=False)
             _check_plan_path(self.directory.lstat(), directory=True, private=True)
             with directory_lock(self.directory):
-                plan = self._read(self.directory / "plan.json")
-                if (type(plan) is not dict or set(plan) != {
-                    "version", "source_sha256", "data_dir", "interrupted_at", "native_bindings"
-                } or type(plan["version"]) is not int or plan["version"] != 1
-                        or plan["data_dir"] != str(self.data_dir)
-                        or type(plan["native_bindings"]) is not list
-                        or any(type(pair) is not list or len(pair) != 2 or type(pair[0]) is not str
-                               or (pair[1] is not None and type(pair[1]) is not str)
-                               for pair in plan["native_bindings"])
-                        or len(dict(plan["native_bindings"])) != len(plan["native_bindings"])):
-                    raise RestoreContextError("restored context frozen plan is invalid")
+                from ummanu.board.po_restore import _decode_plan
+
+                frozen = _decode_plan(self._read_bytes(self.directory / "plan.json"), self.data_dir)
+                plan = json.loads(_encoded({"version": 1, **asdict(frozen)}))
                 try:
                     state = self._read(self.path)
                 except FileNotFoundError:
@@ -176,7 +169,8 @@ class RestoredContexts:
                 and self.store.turn(session.session_id, entry["attempt"]).state != COMPLETED):
             raise RestoreContextError("restored context establishment turn is not completed")
 
-    def prepare(self, records: dict[str, list[dict[str, Any]]], frozen: PoRestorePlan) -> None:
+    def prepare(self, records: dict[str, list[dict[str, Any]]], frozen: PoRestorePlan,
+                *, require_prepared: bool = False) -> None:
         """Bind committed imported rows to an already persisted plan without importing or launching."""
         from ummanu.board.po_checkpoint import PO_COLUMNS
         from ummanu.board.po_restore import _digest, _load_plan, normalized_po_records
@@ -185,6 +179,15 @@ class RestoredContexts:
         with self._locked() as (plan, state):
             if plan is None or _load_plan(_encoded(plan), records, self.data_dir) != frozen:
                 raise RestoreContextError("restored context requires the matching persisted frozen plan")
+            if require_prepared and (state is None or any(
+                entry["phase"] != "prepared" for entry in state["sessions"].values()
+            )):
+                raise RestoreContextError("recovery finish requires the full prepared context cohort")
+            if require_prepared:
+                live_ids = {session.session_id for status in ("open", "closed")
+                            for session in self.store.sessions(status)}
+                if live_ids != {saved["session_id"] for saved in expected["po_sessions"]}:
+                    raise RestoreContextError("recovery finish live session cohort differs")
             entries = {}
             for saved in expected["po_sessions"]:
                 identity = saved["session_id"]
@@ -196,12 +199,12 @@ class RestoredContexts:
                          "phase": "prepared", "attempt": None,
                          "native_id": saved["cli_session_id"], "reason": None}
                 live = self.store.session(identity)
-                if state is None:
+                if state is None or require_prepared:
                     if (_row(live, PO_COLUMNS["po_sessions"]) != saved
                             or len(self.store.turns(identity)) != len(turns)
                             or len(self.store.feed(identity)) != len(feed)):
                         raise RestoreContextError("restored context live imported session differs")
-                else:
+                if state is not None:
                     known = state["sessions"][identity]
                     if any(known[key] != entry[key] for key in ("session", "boundary", "history_sha256")):
                         raise RestoreContextError("restored context source boundary differs")
@@ -220,6 +223,29 @@ class RestoredContexts:
                 self._publish({"version": 1, "plan_sha256": _digest(plan), "sessions": entries})
             else:
                 fsync_directory(self.directory)
+
+    def authority(self, plan_sha256: str, source_sha256: str) -> None:
+        """Validate shared authority without treating a known session's uncertainty as global damage."""
+        from ummanu.board.po_restore import _digest
+
+        with self._locked() as (plan, state):
+            if (plan is None or state is None or _digest(plan) != plan_sha256
+                    or plan["source_sha256"] != source_sha256):
+                raise RestoreContextError("recovery authority requires its finished plan and full contexts")
+
+    def admit(self, identity: str) -> None:
+        """Refuse an unprepared or uncertain restored session before a new ledger claim."""
+        from ummanu.board.po_restore import _digest
+
+        with self._locked() as (plan, state):
+            entry = self._entry(plan, state, identity)
+            if entry is None:
+                return
+            if entry["phase"] not in ("prepared", "established"):
+                raise RestoreContextError(UNCERTAIN)
+            self._binding(entry, self.store.session(identity))
+            if _digest(self._history(identity, entry["boundary"])) != entry["history_sha256"]:
+                raise RestoreContextError("restored context required source history differs")
 
     def context(self, identity: str) -> dict[str, Any] | None:
         with self._locked() as (plan, state):
