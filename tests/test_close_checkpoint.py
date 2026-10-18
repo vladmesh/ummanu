@@ -179,5 +179,5 @@ class CloseCheckpointTests(unittest.TestCase):
                     facts[location] = secret
                 text = json.dumps({"close_facts": facts}).replace("known-secret", "known-\\u0073ecret")
                 with self.subTest(multiline="\n" in secret, location=location), self.assertRaises(CloseCheckpointError) as raised:
-                    scan_close_secrets(text, lambda value: redact(value, env_files=[], secret_values=(secret,)))
+                    scan_close_secrets(text, lambda value, secret=secret: redact(value, env_files=[], secret_values=(secret,)))
                 self.assertNotIn(secret, str(raised.exception))
