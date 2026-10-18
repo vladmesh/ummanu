@@ -63,6 +63,12 @@ from ummanu.board.owner_checkpoint import (
 )
 from ummanu.board.owner_decisions import FIELD as OWNER_DECISIONS_FIELD, stored_decisions
 from ummanu.board.owner_events import OwnerEventStore
+from ummanu.board.po_attachments_checkpoint import (
+    LEGACY_ATTACHMENTS_COVERAGE,
+    CheckpointAttachments,
+    PoAttachmentsCheckpointError,
+    read_checkpoint_attachments,
+)
 from ummanu.board.po_checkpoint import (
     LEGACY_PO_COVERAGE,
     RESTORED_PO_COVERAGE,
@@ -324,11 +330,20 @@ def _checkpoint_queue(board: Path) -> CheckpointQueue | None:
         raise RestoreError(str(exc)) from None
 
 
+def _checkpoint_attachments(board: Path) -> CheckpointAttachments | None:
+    """The validated PO image capture of a board directory, None only for legacy absence."""
+    try:
+        return read_checkpoint_attachments(board)
+    except PoAttachmentsCheckpointError as exc:
+        raise RestoreError(str(exc)) from None
+
+
 def restore_po(data_dir: Path, *, source: Path, instance: Path, runtime_user: str | None = None,
                board: Callable[[], None] | None = None) -> bool:
-    """Hold PO admission, run `board`, publish the notes, describe the queue, then import the PO SQL.
+    """Hold PO admission, run `board`, publish the notes, describe the queue and images, then import the PO SQL.
 
-    True when this call advanced the PO SQL phases. The captured queue stays inert board data. `source` is the selected checkpoint's board
+    True when this call advanced the PO SQL phases. The captured queue and images stay inert board
+    data. `source` is the selected checkpoint's board
     directory, never a live export rewritten later. The hold is durable before `board` publishes
     restored obligations. Root runs the PO protocol as `runtime_user`; restore state records the
     last phase reached and a refusal raises after it.
@@ -341,6 +356,7 @@ def restore_po(data_dir: Path, *, source: Path, instance: Path, runtime_user: st
         records = _checkpoint_po(source)
         notes = _checkpoint_notes(source)
         queue = _checkpoint_queue(source)
+        attachments = _checkpoint_attachments(source)
         if records is not None:
             try:
                 credentials = resolve_role(instance, "app")
@@ -354,6 +370,7 @@ def restore_po(data_dir: Path, *, source: Path, instance: Path, runtime_user: st
     with file_lock(lock):
         _restore_notes(data_dir, notes, runtime_user)
         _record_queue(data_dir, queue)
+        _record_attachments(data_dir, attachments)
     if records is None:
         _update_restore_state(data_dir, po_sql_coverage="unavailable", po_sql_restore="unavailable",
                               po_sql_diagnostic=LEGACY_PO_COVERAGE)
@@ -401,6 +418,17 @@ def _record_queue(data_dir: Path, queue: CheckpointQueue | None) -> None:
     pending, refused = queue.counts()
     _update_restore_state(data_dir, po_queue_coverage="captured" if queue.capture.present else "absent",
                           po_queue_pending=pending, po_queue_refused=refused, po_queue_diagnostic=queue.describe())
+
+
+def _record_attachments(data_dir: Path, attachments: CheckpointAttachments | None) -> None:
+    """Describe the captured PO images; restore writes no session attachments directory."""
+    if attachments is None:
+        _update_restore_state(data_dir, po_attachments_coverage="unavailable", po_attachments_files=None,
+                              po_attachments_bytes=None, po_attachments_diagnostic=LEGACY_ATTACHMENTS_COVERAGE)
+        return
+    _update_restore_state(data_dir, po_attachments_coverage=attachments.coverage(),
+                          po_attachments_files=len(attachments.files), po_attachments_bytes=attachments.image_bytes(),
+                          po_attachments_diagnostic=attachments.describe())
 
 
 def _po_phase(data_dir: Path, runtime_user: str | None, step: Callable[[], dict[str, Any]]) -> dict[str, Any]:

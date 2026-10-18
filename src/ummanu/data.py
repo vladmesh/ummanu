@@ -40,6 +40,7 @@ from ummanu.runtime.paths import PIPELINE_STATE_DIR
 from ummanu.tasks import TaskReader, task_audit_for
 
 if TYPE_CHECKING:
+    from ummanu.po.attachments import AttachmentInventory
     from ummanu.po.queue import QueueCapture
 
 LAYOUT_DIRS = ("board", "memory", "runs", "transcripts", "artifacts", "backups")
@@ -115,8 +116,14 @@ def export_board(
     data_dir = data_dir.expanduser().resolve()
     board_dir = data_dir / "board"
     _ensure_dir(board_dir, "board data dir")
-    cards, history, sprints, outbox, po, owner_events, queue = _read_board_cut(
+    cards, history, sprints, outbox, po, owner_events, queue, attachments = _read_board_cut(
         data_dir, instance_dir, reader, sprint_client
+    )
+    from ummanu.board.po_attachments_checkpoint import (
+        ATTACHMENTS_CHECKPOINT_FILE,
+        PoAttachmentsCheckpointError,
+        read_checkpoint_attachments,
+        write_attachments_capture,
     )
     from ummanu.board.po_notes_checkpoint import (
         NOTES_CHECKPOINT_FILE,
@@ -131,6 +138,7 @@ def export_board(
         read_checkpoint_queue,
         write_queue_capture,
     )
+    from ummanu.po.attachments import AttachmentCaptureError
 
     # The notes are the PO's file beside the PO SQL capture; they travel with it.
     try:
@@ -183,6 +191,13 @@ def export_board(
             summary["po_notes"] = write_notes_capture(staging, notes)
             assert queue is not None  # captured with every PO SQL cut
             summary["po_queue"] = write_queue_capture(staging, queue, summary["po_sql"]["sha256"])
+            assert attachments is not None  # inventoried with every PO SQL cut
+            try:
+                summary["po_attachments"] = write_attachments_capture(
+                    staging, data_dir, attachments, summary["po_sql"]["sha256"]
+                )
+            except AttachmentCaptureError as exc:
+                raise RuntimeError(f"board export is not restorable: {exc}") from None
         _write_json(staging / "export.json", summary)
         # Validate the exact pair restore consumes before replacing the last good live export.
         from ummanu.board.close_checkpoint import CloseCheckpointError, read_checkpoint_close_facts
@@ -198,6 +213,7 @@ def export_board(
             read_checkpoint_po(staging)
             read_checkpoint_notes(staging)
             read_checkpoint_queue(staging)
+            read_checkpoint_attachments(staging)
         except (
             NormalizedBoardError,
             OriginCheckpointError,
@@ -206,6 +222,7 @@ def export_board(
             CloseCheckpointError,
             PoNotesError,
             PoQueueCheckpointError,
+            PoAttachmentsCheckpointError,
         ) as exc:
             raise RuntimeError(f"board export is not restorable: {exc}") from None
         if po is not None:
@@ -224,7 +241,11 @@ def export_board(
                 *(["origin_returns.ndjson"] if outbox is not None else []),
                 *(["owner_events.ndjson"] if owner_events is not None else []),
                 # Listed for a captured absence too, so a payload from an earlier export leaves.
-                *([PO_FILE, NOTES_CHECKPOINT_FILE, QUEUE_CHECKPOINT_FILE] if po is not None else []),
+                *(
+                    [PO_FILE, NOTES_CHECKPOINT_FILE, QUEUE_CHECKPOINT_FILE, ATTACHMENTS_CHECKPOINT_FILE]
+                    if po is not None
+                    else []
+                ),
             ],
             "board export",
         )
@@ -235,7 +256,12 @@ def export_board(
 
 
 def _refuse_staged_secrets(staging: Path, instance_dir: Path, *, notes: bool) -> None:
-    """Refuse staged PO notes or queue inputs holding a known secret before they replace the live export."""
+    """Refuse staged PO notes, queue inputs or images holding a known secret before they replace the live export."""
+    from ummanu.board.po_attachments_checkpoint import (
+        ATTACHMENTS_CHECKPOINT_FILE,
+        PoAttachmentsCheckpointError,
+        scan_attachment_secrets,
+    )
     from ummanu.board.po_notes_checkpoint import NOTES_CHECKPOINT_FILE, PoNotesError, scan_notes_secrets
     from ummanu.board.po_queue_checkpoint import (
         QUEUE_CHECKPOINT_FILE,
@@ -254,13 +280,13 @@ def _refuse_staged_secrets(staging: Path, instance_dir: Path, *, notes: bool) ->
     def scrub(value: str) -> str:
         return redact(value, env_files=[runtime_env], secret_values=secret_values)
 
-    scans = [(QUEUE_CHECKPOINT_FILE, scan_queue_secrets)]
+    scans = [(QUEUE_CHECKPOINT_FILE, scan_queue_secrets), (ATTACHMENTS_CHECKPOINT_FILE, scan_attachment_secrets)]
     if notes:
         scans.insert(0, (NOTES_CHECKPOINT_FILE, scan_notes_secrets))
     try:
         for name, scan in scans:
             scan((staging / name).read_text(encoding="utf-8"), scrub)
-    except (OSError, PoNotesError, PoQueueCheckpointError) as exc:
+    except (OSError, PoNotesError, PoQueueCheckpointError, PoAttachmentsCheckpointError) as exc:
         raise RuntimeError(f"board export blocked: {exc}") from None
 
 
@@ -321,15 +347,19 @@ def _read_board_cut(
     dict[str, list[dict[str, Any]]] | None,
     list[dict[str, Any]] | None,
     QueueCapture | None,
+    AttachmentInventory | None,
 ]:
     """Read cards, audit, sprints, origin obligations, PO SQL, the PO queue and owner events as one cut.
 
-    The PO queue's mutation boundary is taken before the bulk lane and the snapshot, held while the
-    PO rows pin the snapshot and the queue is captured, and released before the remaining reads. The
-    shared bulk lane covers reads only; publication and Git occur after releasing it.
+    The PO queue's mutation boundary, which image publication shares, is taken before the bulk lane
+    and the snapshot, held while the PO rows pin the snapshot, the queue is captured and the images of
+    the captured sessions are listed, and released before the remaining reads. The images' bytes are
+    read after the cut. The shared bulk lane covers reads only; publication and Git occur after
+    releasing it.
     """
     from ummanu.board.sql_cards import SqlCardClient
     from ummanu.dispatch.ownership import bulk_lane
+    from ummanu.po.attachments import AttachmentCaptureError, inventory_attachments
     from ummanu.po.queue import PoQueue, QueueError
 
     owned = reader is None
@@ -345,12 +375,13 @@ def _read_board_cut(
         with capture_window, bulk_lane(data_dir), (
             client.read_snapshot() if isinstance(client, SqlCardClient) else contextlib.nullcontext()
         ):
-            po = queue = None
+            po = queue = attachments = None
             if isinstance(client, SqlCardClient):
                 # The first statement pins the snapshot, so a claim is in these rows exactly when
                 # its queue writes are in the capture.
                 po = export_po_records(client)
                 queue = PoQueue(data_dir).capture()
+                attachments = inventory_attachments(data_dir, [row["session_id"] for row in po["po_sessions"]])
             capture_window.close()
             audit_owner = task_audit_for(client, data_dir)
             audit = audit_owner.status()
@@ -382,8 +413,8 @@ def _read_board_cut(
                     sprints = export_sprint_entities(instance_dir, sprint_board)
                 finally:
                     sprint_board.connection.close()
-            return cards, history, sprints, outbox, po, owner_events, queue
-    except QueueError as exc:
+            return cards, history, sprints, outbox, po, owner_events, queue, attachments
+    except (QueueError, AttachmentCaptureError) as exc:
         raise RuntimeError(f"board export is not restorable: {exc}") from None
     except TaskError as exc:
         raise RuntimeError(f"ummanu task export failed: {exc.message}") from None

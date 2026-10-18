@@ -75,6 +75,12 @@ from ummanu.board.owner_checkpoint import (
     read_checkpoint_owner_events,
     scan_owner_secrets,
 )
+from ummanu.board.po_attachments_checkpoint import (
+    ATTACHMENTS_CHECKPOINT_FILE,
+    PoAttachmentsCheckpointError,
+    read_checkpoint_attachments,
+    scan_attachment_secrets,
+)
 from ummanu.board.po_checkpoint import PO_FILE, PoCheckpointError, read_checkpoint_po, scan_po_secrets
 from ummanu.board.po_notes_checkpoint import (
     NOTES_CHECKPOINT_FILE,
@@ -129,6 +135,7 @@ BOARD_ENTRIES = (
     PO_FILE,
     NOTES_CHECKPOINT_FILE,
     QUEUE_CHECKPOINT_FILE,
+    ATTACHMENTS_CHECKPOINT_FILE,
     "cards.ndjson",
     "sprints.ndjson",
     "events.ndjson",
@@ -381,7 +388,7 @@ def _verify_analytics_directory_files(root: Path, board: CheckpointBoard, files:
     if board.layout == FLAT:
         allowed = {
             *files, OUTBOX_FILE, OWNER_FILE, PO_FILE, NOTES_CHECKPOINT_FILE, QUEUE_CHECKPOINT_FILE,
-            ANALYTICS_MANIFEST, ".gitignore",
+            ATTACHMENTS_CHECKPOINT_FILE, ANALYTICS_MANIFEST, ".gitignore",
         }
     else:
         allowed = {*board.physical_entries(), ANALYTICS_MANIFEST, ".gitignore"}
@@ -404,9 +411,10 @@ def _verify_analytics_export_summary(board: CheckpointBoard) -> None:
         read_checkpoint_po(board.directory)
         read_checkpoint_notes(board.directory)
         read_checkpoint_queue(board.directory)
+        read_checkpoint_attachments(board.directory)
     except (
         OriginCheckpointError, OwnerCheckpointError, PoCheckpointError, CloseCheckpointError, PoNotesError,
-        PoQueueCheckpointError,
+        PoQueueCheckpointError, PoAttachmentsCheckpointError,
     ) as exc:
         raise AnalyticsManifestError(str(exc)) from None
     export_path = board.path("export.json")
@@ -1395,13 +1403,18 @@ class SnapshotExporter(CheckpointWriter):
                     board.read_text("sprints.ndjson"),
                     lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values),
                 )
-            # Queue parts may cut a line, a token or a UTF-8 sequence, so the whole logical file is scanned.
+            # Queue and image parts may cut a line, a token or a UTF-8 sequence, so the whole logical file is scanned.
             if board.has(QUEUE_CHECKPOINT_FILE):
                 scan_queue_secrets(
                     board.read_text(QUEUE_CHECKPOINT_FILE),
                     lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values),
                 )
-        except (CloseCheckpointError, CheckpointLayoutError, PoQueueCheckpointError) as exc:
+            if board.has(ATTACHMENTS_CHECKPOINT_FILE):
+                scan_attachment_secrets(
+                    board.read_text(ATTACHMENTS_CHECKPOINT_FILE),
+                    lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values),
+                )
+        except (CloseCheckpointError, CheckpointLayoutError, PoQueueCheckpointError, PoAttachmentsCheckpointError) as exc:
             raise CheckpointBlocked(str(exc)) from None
         for path in paths:
             text = (cut / path).read_bytes().decode("utf-8", errors="replace")
@@ -2537,6 +2550,13 @@ def _scan_for_secrets(
                 )
             except PoQueueCheckpointError as exc:
                 raise CheckpointBlocked(str(exc)) from None
+        if component == "board" and entry == ATTACHMENTS_CHECKPOINT_FILE:
+            try:
+                scan_attachment_secrets(
+                    text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values)
+                )
+            except PoAttachmentsCheckpointError as exc:
+                raise CheckpointBlocked(str(exc)) from None
         # Scan against this installation rather than the process home default:
         # a recovery/doctor can intentionally point at another instance, and a
         # credential in that instance must still fail closed.
@@ -2564,9 +2584,10 @@ def _validate_board(
         read_checkpoint_po(staging)
         read_checkpoint_notes(staging)
         read_checkpoint_queue(staging)
+        read_checkpoint_attachments(staging)
     except (
         OriginCheckpointError, OwnerCheckpointError, PoCheckpointError, CloseCheckpointError, PoNotesError,
-        PoQueueCheckpointError,
+        PoQueueCheckpointError, PoAttachmentsCheckpointError,
     ) as exc:
         raise CheckpointBlocked(str(exc)) from None
     summary = _read_json(staging / "export.json", "board export.json")

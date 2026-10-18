@@ -155,6 +155,7 @@ def _restore_board_and_po(
     result.add("po-sql", "changed" if changed else "unchanged", state["po_sql_diagnostic"])
     result.add("po-notes", "unchanged", state["po_notes_diagnostic"])
     result.add("po-queue", "unchanged", state["po_queue_diagnostic"])
+    result.add("po-attachments", "unchanged", state["po_attachments_diagnostic"])
 
 
 
@@ -487,6 +488,14 @@ def install(args: argparse.Namespace) -> InstallResult:
 
                 queue = read_checkpoint_queue(checkpoint_root / "state" / "board")
                 result.add("po-queue", "unchanged", LEGACY_QUEUE_COVERAGE if queue is None else queue.describe())
+                from ummanu.board.po_attachments_checkpoint import (
+                    LEGACY_ATTACHMENTS_COVERAGE,
+                    read_checkpoint_attachments,
+                )
+
+                attachments = read_checkpoint_attachments(checkpoint_root / "state" / "board")
+                result.add("po-attachments", "unchanged",
+                           LEGACY_ATTACHMENTS_COVERAGE if attachments is None else attachments.describe())
                 result.add("memory", "would-change", "would rebuild the index from checkpoint facts")
                 result.add("host", "would-change", "would run the host materializer")
                 result.add("status", "skipped", "preview made no recovery changes")
