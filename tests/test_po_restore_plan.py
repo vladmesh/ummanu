@@ -194,9 +194,11 @@ class PoRestorePlanTests(unittest.TestCase):
                 raise PermissionError("private-credential")
             return original(path, *args, **kwargs)
 
-        with mock.patch("os.open", side_effect=denied):
-            with self.assertRaisesRegex(PoCheckpointError, "storage failed \\(PermissionError\\)"):
-                self.prepare()
+        with (
+            mock.patch("os.open", side_effect=denied),
+            self.assertRaisesRegex(PoCheckpointError, "storage failed \\(PermissionError\\)"),
+        ):
+            self.prepare()
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_interruption_before_publication_has_no_accepted_plan_and_retry_succeeds(self):
@@ -210,9 +212,11 @@ class PoRestorePlanTests(unittest.TestCase):
         for operation, failure in (("os.replace", OSError("rename interrupted")),
                                    ("os.fsync", file_sync_interrupted)):
             with self.subTest(operation=operation):
-                with mock.patch(operation, side_effect=failure):
-                    with self.assertRaisesRegex(PoCheckpointError, "storage failed"):
-                        self.prepare()
+                with (
+                    mock.patch(operation, side_effect=failure),
+                    self.assertRaisesRegex(PoCheckpointError, "storage failed"),
+                ):
+                    self.prepare()
                 self.assertFalse(self.path.exists())
         plan = self.prepare()
         self.assertEqual(self.prepare(), plan)

@@ -12,7 +12,12 @@ from unittest import mock
 from tests.po_checkpoint_fixtures import po_records, seed_po
 from tests.sql_backend_fixtures import PostgresBoard
 from ummanu.board.po_checkpoint import PO_COLUMNS, PoCheckpointError, export_po_records
-from ummanu.board.po_restore import PoRestoreStore, normalized_po_records, prepare_po_restore, require_po_parity
+from ummanu.board.po_restore import (
+    PoRestoreStore,
+    normalized_po_records,
+    prepare_po_restore,
+    require_po_parity,
+)
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.board.sql_rows import rfc3339
 from ummanu.po.store import PoStore, RequestConflict, SessionClosed
