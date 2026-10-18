@@ -284,9 +284,13 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         self.assertEqual(normalize_sprint_entity(live), exported)
         self.assertEqual(restore_state(self.target_data)["sprint_count"], 1)
         self.assertEqual(restore_state(self.target_data)["sprint_parity"], "complete")
+        self.assertEqual(restore_state(self.target_data)["owner_events_coverage"], "unavailable")
         self.assertEqual(
             restore_findings(self.target_data),
-            ["memory index has not been rebuilt", "managed reconcile has not been applied"],
+            [
+                "memory index has not been rebuilt",
+                "managed reconcile has not been applied",
+            ],
         )
 
     def test_the_observer_declaration_survives_a_round_trip(self) -> None:

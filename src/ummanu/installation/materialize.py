@@ -21,6 +21,7 @@ from ummanu._fsutil import (
 )
 from ummanu.board.backend import CARD, board_client
 from ummanu.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
+from ummanu.board.owner_checkpoint import OWNER_FILE, OwnerCheckpointError, read_checkpoint_owner_events
 from ummanu.board.po_checkpoint import PO_FILE, PoCheckpointError, read_checkpoint_po
 from ummanu.config import ConfigError, load_config, validate_instance
 from ummanu.data import init_layout
@@ -44,8 +45,14 @@ from ummanu.upgrade import STEPS, run_steps
 from ummanu.webfront.commands import configured_sites, missing_sites_message
 
 CHECKPOINT_BOARD = (
-    "cards.ndjson", "sprints.ndjson", "events.ndjson", "audit.ndjson", "export.json", "origin_returns.ndjson",
+    "cards.ndjson",
+    "sprints.ndjson",
+    "events.ndjson",
+    "audit.ndjson",
+    "export.json",
+    "origin_returns.ndjson",
     PO_FILE,
+    OWNER_FILE,
 )
 
 
@@ -144,8 +151,9 @@ def materialize_checkpoint(
             raise InstallError(f"private checkpoint is missing state/board/{name}")
     try:
         read_checkpoint_outbox(board_source)
+        read_checkpoint_owner_events(board_source)
         read_checkpoint_po(board_source)
-    except (OriginCheckpointError, PoCheckpointError) as exc:
+    except (OriginCheckpointError, OwnerCheckpointError, PoCheckpointError) as exc:
         raise InstallError(str(exc)) from None
     for name in CHECKPOINT_RUNS:
         if not (runs_source / name).is_file():

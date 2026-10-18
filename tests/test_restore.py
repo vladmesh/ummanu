@@ -16,6 +16,7 @@ from unittest import mock
 import ummanu.restore as restore_module
 from tests.fakes.tasks import empty_seed
 from tests.origin_checkpoint_fixtures import obligations, write_outbox
+from tests.owner_checkpoint_fixtures import bell_rows, write_bell
 from tests.po_checkpoint_fixtures import po_records, seed_po, write_po
 from tests.restore_fixtures import (
     _restore_card,
@@ -23,12 +24,15 @@ from tests.restore_fixtures import (
     _write_instance_to,
 )
 from tests.runtime_account_fixtures import fixture_runtime_account
-from tests.sql_backend_fixtures import card_store
+from tests.sql_backend_fixtures import PostgresBoard, card_store
 from ummanu._fsutil import write_json, write_ndjson
 from ummanu.board.origin_checkpoint import read_checkpoint_outbox, require_outbox_parity
 from ummanu.board.origin_outbox import OriginOutboxStore
+from ummanu.board.owner_checkpoint import LEGACY_OWNER_COVERAGE, require_owner_parity
+from ummanu.board.owner_events import OwnerEventStore
 from ummanu.board.po_checkpoint import LEGACY_PO_COVERAGE, export_po_records
 from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.board.sql_cards import SqlCardClient
 from ummanu.checkpoint import _validate_board
 from ummanu.cli import main as cli_main
 from ummanu.config import validate_instance
@@ -122,6 +126,113 @@ class RestoreTests(unittest.TestCase):
         write_ndjson(board / "audit.ndjson", history)
         write_outbox(board, rows)
         return rows
+
+    def test_owner_restore_app_role_retry_read_state_dedup_and_sequence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self._portable_origin_board(data_dir)
+            rows = bell_rows(33)
+            write_bell(data_dir / "board", rows)
+            owner = card_store(self, empty_seed())
+            client = SqlCardClient(
+                PostgresBoard.shared().config(owner.credentials.dbname).for_role("app"), owner.instance_dir
+            )
+            self.addCleanup(client.close)
+            store = OwnerEventStore(client.credentials, client=client)
+            for _ in range(2):
+                self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+                require_owner_parity(rows, store.export())
+            self.assertEqual(restore_state(data_dir)["owner_events_parity"], "complete")
+            self.assertFalse(
+                store.insert(rows[0]["kind"], rows[0]["subject_ref"], rows[0]["text"], rows[0]["dedup_key"])
+            )
+            self.assertTrue(store.insert("sprint_closed", None, "new legitimate notice", "new-notice"))
+            before = store.export()
+            self.assertGreater(before[-1]["id"], before[-2]["id"])
+            with self.assertRaisesRegex(RestoreError, "dedup_key/order"):
+                import_normalized_board(data_dir, client=client)
+            self.assertEqual(before, store.export())
+            store.mark_read(before[-1]["id"])
+            self.assertIsNotNone(
+                next(event for event in store.events() if event.dedup_key == "new-notice").read_at
+            )
+
+    def test_owner_conflict_rolls_back_card_audit_and_inserted_prefix_without_reopening_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self._portable_origin_board(data_dir)
+            rows = bell_rows()
+            write_bell(data_dir / "board", rows)
+            client = card_store(self, empty_seed())
+            store = OwnerEventStore(client.credentials, client=client)
+            contradictory = dict(rows[3], read_at="2026-09-01T03:00:00Z")
+            with client.transaction():
+                store.restore([contradictory])
+            before = store.export()
+            with self.assertRaisesRegex(RestoreError, "record 0: read_at"):
+                import_normalized_board(data_dir, client=client)
+            self.assertEqual(store.export(), before)
+            self.assertEqual(client.card_count(), 0)
+            self.assertEqual(SqlTaskAudit(client).events(), [])
+
+    def test_owner_interrupted_import_and_caller_rollback_remove_the_inserted_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self._portable_origin_board(data_dir)
+            rows = bell_rows()
+            write_bell(data_dir / "board", rows)
+            client = card_store(self, empty_seed())
+            store = OwnerEventStore(client.credentials, client=client)
+            execute = client._execute
+
+            def interrupt(sql, params=(), **kwargs):
+                if sql.startswith("INSERT INTO owner_events") and params[-1] == rows[1]["dedup_key"]:
+                    raise RuntimeError("interrupted import")
+                return execute(sql, params, **kwargs)
+
+            with (
+                mock.patch.object(client, "_execute", side_effect=interrupt),
+                self.assertRaisesRegex(RuntimeError, "interrupted"),
+            ):
+                import_normalized_board(data_dir, client=client)
+            self.assertEqual(store.export(), [])
+            self.assertEqual(client.card_count(), 0)
+            with self.assertRaisesRegex(RuntimeError, "caller rollback"), client.transaction():
+                import_normalized_board(data_dir, client=client)
+                require_owner_parity(rows, store.export())
+                raise RuntimeError("caller rollback")
+            self.assertEqual(store.export(), [])
+            self.assertEqual(client.card_count(), 0)
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+            require_owner_parity(rows, store.export())
+
+    def test_owner_legacy_coverage_is_unavailable_and_doctor_does_not_claim_complete_attention(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self._portable_origin_board(data_dir)
+            client = card_store(self, empty_seed())
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+            state = restore_state(data_dir)
+            self.assertEqual(state["owner_events_coverage"], "unavailable")
+            self.assertEqual(state["owner_events_parity"], "unavailable")
+            self.assertEqual(state["owner_events_diagnostic"], LEGACY_OWNER_COVERAGE)
+            self.assertEqual(
+                restore_findings(data_dir),
+                ["memory index has not been rebuilt", "managed reconcile has not been applied"],
+            )
+
+    def test_owner_missing_payload_refuses_before_any_board_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self._portable_origin_board(data_dir)
+            write_bell(data_dir / "board", bell_rows())
+            (data_dir / "board" / "owner_events.ndjson").unlink()
+            client = card_store(self, empty_seed())
+            with (
+                mock.patch.object(client, "_execute", side_effect=AssertionError("write before validation")),
+                self.assertRaisesRegex(RestoreError, "owner events checkpoint"),
+            ):
+                import_normalized_board(data_dir, client=client)
 
     def test_origin_restore_retries_without_requeueing_completed_deliveries(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -997,6 +1108,7 @@ class RestoreTests(unittest.TestCase):
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
             )
+            write_bell(data_dir / "board", [])
             _seed_instance_facts(instance, {"global/one.md": "fact\n"})
 
             self.assertEqual(import_normalized_board(data_dir, client=card_store(self, empty_seed())), 1)

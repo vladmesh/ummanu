@@ -93,7 +93,10 @@ def split_board(board: Path) -> None:
     try:
         for name in LOGICAL_FILES:
             source = board / name
-            if name in {"origin_returns.ndjson", "po_sql.json"} and not source.exists():
+            if (
+                name in {"origin_returns.ndjson", "po_sql.json", "owner_events.ndjson"}
+                and not source.exists()
+            ):
                 continue
             (staging / name).write_bytes(source.read_bytes() if source.is_file() else b"")
         publish_split_board(staging, board)

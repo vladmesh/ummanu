@@ -22,6 +22,7 @@ which the import wrote only after every comment, and no seed here held one.
 from __future__ import annotations
 
 import getpass
+import io
 import json
 import os
 import secrets
@@ -30,7 +31,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stdout
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,16 +40,25 @@ from unittest import mock
 
 from tests.fakes.installation import PRODUCT_ROOT
 from tests.fakes.snapshot_remote import HEAD, exporter_remote, git
+from tests.owner_checkpoint_fixtures import bell_rows
 from tests.po_checkpoint_fixtures import po_records, seed_po
 from tests.sql_backend_fixtures import PostgresBoard, insert_card_row
 from tests.support.snapshot_recovery import recover_patches
 from ummanu import bootstrap as bootstrap_module
 from ummanu.board import store
+from ummanu.board.owner_checkpoint import (
+    LEGACY_OWNER_COVERAGE,
+    OWNER_FILE,
+    read_checkpoint_owner_events,
+    require_owner_parity,
+)
+from ummanu.board.owner_events import OwnerEventStore, ReadRefused
 from ummanu.board.po_checkpoint import RESTORED_PO_COVERAGE, export_po_records, read_checkpoint_po
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.board.store import BoardStoreConfig
 from ummanu.checkpoint import SNAPSHOT_BASE_REF, SNAPSHOT_REF, SnapshotExporter, tick_checkpoint_writer
+from ummanu.cli import main as cli_main
 from ummanu.data import export_board, init_layout
 from ummanu.head_registry import installed_heads, installed_pair
 from ummanu.installation import commands as installation_commands
@@ -62,6 +73,7 @@ from ummanu.secret_recover import SecretRecovery
 from ummanu.sprint_observer import none_choice
 from ummanu.sprints import SprintReader, SprintWriter, sprint_client
 from ummanu.tasks import TaskError, TaskReader, TaskWriter
+from ummanu.webproto.owner_events import OwnerEventLayer
 
 #: Production's `personal_site-198` (`cards/0001/00001509.json`): closed in Done, in the lane and on
 #: the project id `personal_site` that the registry has since retired for `personal-site`, with the
@@ -401,6 +413,155 @@ class _SnapshotRecoveryCase(unittest.TestCase):
 
 
 class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
+    def test_legacy_recovery_and_retry_keep_coverage_descriptive_through_the_status_gate(self):
+        board = self.fixture.source_data / "board"
+        summary_path = board / "export.json"
+        summary = json.loads(summary_path.read_text())
+        summary.pop("owner_events")
+        summary_path.write_text(json.dumps(summary))
+        (board / OWNER_FILE).unlink()
+        self.assertIsNone(read_checkpoint_owner_events(board))
+        canon = self.fixture.source / "heads" / "heads.toml"
+        canon.write_text(
+            canon.read_text().replace("fallback = []", 'fallback = ["legacy-fallback"]')
+            + '\n[resources.legacy-fallback]\naccount = "legacy-fallback"\n'
+            + '[profiles.legacy-fallback]\nresource = "legacy-fallback"\nadapter = "claude"\n'
+            + f'fallback = ["{HEAD}"]\n'
+        )
+        self.tip = self.fixture.cut()
+        code, output = self._bootstrap()
+        self.assertEqual(code, 0, output)
+        previous = None
+        target, data_dir = self.fixture.target, self.fixture.data_dir
+        client = SqlCardClient(self.target_config.for_role("app"), target)
+        self.addCleanup(client.close)
+        for attempt in ("first", "retry"):
+            with self.subTest(attempt=attempt):
+                result, refused = self._recover()
+                self.assertEqual(result.status, "ok", f"{result.render()} {refused}")
+                machine = asdict(result)
+                coverage = next(step for step in machine["steps"] if step["name"] == "owner-events")
+                self.assertEqual(
+                    (coverage["status"], coverage["detail"]), ("unchanged", LEGACY_OWNER_COVERAGE)
+                )
+                self.assertEqual(
+                    next(step for step in machine["steps"] if step["name"] == "status")["status"], "unchanged"
+                )
+                state = restore_state(data_dir)
+                self.assertEqual(state["board_parity"], "complete")
+                self.assertEqual(state["owner_events_coverage"], "unavailable")
+                self.assertEqual(state["owner_events_parity"], "unavailable")
+                self.assertEqual(state["owner_events_diagnostic"], LEGACY_OWNER_COVERAGE)
+                self.assertEqual(OwnerEventStore(client.credentials, client=client).export(), [])
+                current = self._kinds(target, data_dir, self.target_config)
+                if previous is not None:
+                    self.assertEqual(current, previous)
+                previous = current
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    code = cli_main(["doctor", "--offline", "--json", "--instance", str(target)])
+                self.assertEqual(code, 0, output.getvalue())
+                self.assertTrue(json.loads(output.getvalue())["ok"])
+
+    def test_normal_recovery_preserves_held_settled_and_read_bell_facts_and_accepts_new_answer(self):
+        source, source_data = self.fixture.source, self.fixture.source_data
+        client = SqlCardClient(self.source_config.for_role("app"), source)
+        self.addCleanup(client.close)
+        writer = TaskWriter(client, data_dir=source_data)
+        self.handovers = {}
+        for number in (3, 4):
+            ref = f"ummanu-{number}"
+            writer.create(
+                role="po",
+                actor="po",
+                project="ummanu",
+                task_type="decision",
+                title="Owner decision",
+                target="ready",
+                sprint=SPRINTS[1],
+                reference=ref,
+                request_id=f"create-owner-{number}",
+            )
+            writer.claim(
+                role="dispatcher",
+                actor="test",
+                reference=ref,
+                worker="fixture",
+                request_id=f"claim-owner-{number}",
+            )
+            self.handovers[number] = writer.handover(
+                role="po",
+                actor="po",
+                reference=ref,
+                to="owner",
+                reason="Choose a recovery option",
+                request_id=f"handover-owner-{number}",
+            )
+        answer = writer.record_owner_answer(
+            role="po",
+            actor="po",
+            reference="ummanu-3",
+            handover_event=self.handovers[3]["event_id"],
+            quotation="Use option A",
+            request_id="source-owner-answer",
+        )
+        writer.escalate_po_card(
+            actor="test", reference="ummanu-3", episode=answer["event_id"], reason="Owner help required"
+        )
+        events = OwnerEventStore(client.credentials, client=client)
+        rows = events.export()
+        start = max(row["id"] for row in rows)
+        extra = [dict(row, id=start + index + 1) for index, row in enumerate(bell_rows(513))]
+        with client.transaction():
+            events.restore(rows + extra)
+        source_bell = events.export()
+        source_attention = events.snapshot()
+        state_dir = self.root / "owner-pipeline-state"
+        state_dir.mkdir()
+        self.tip = self.fixture.cut(stand_in=False, state_dir=state_dir)
+        code, output = self._bootstrap()
+        self.assertEqual(code, 0, output)
+        result, refused = self._recover()
+        self.assertEqual(result.status, "ok", f"{result.render()} {refused}")
+        target, data_dir = self.fixture.target, self.fixture.data_dir
+        state = restore_state(data_dir)
+        client = SqlCardClient(self.target_config.for_role("app"), target)
+        self.addCleanup(client.close)
+        events = OwnerEventStore(client.credentials, client=client)
+        require_owner_parity(source_bell, read_checkpoint_owner_events(data_dir / "board"))
+        require_owner_parity(source_bell, events.export())
+        self.assertEqual(state["owner_events_coverage"], "restored")
+        self.assertEqual(state["owner_events_parity"], "complete")
+        attention = OwnerEventLayer(target, store=events).snapshot()
+        for field in ("unread", "needs_owner_count", "notice_count", "held_count"):
+            self.assertEqual(attention[field], source_attention[field])
+        held = [event for event in events.events() if event.held]
+        self.assertEqual({event.kind for event in held}, {"card_handed_to_owner", "po_card_escalated"})
+        for event in held:
+            with self.assertRaises(ReadRefused):
+                events.mark_read(event.id)
+        settled = next(
+            event
+            for event in events.events()
+            if event.kind == "card_handed_to_owner" and event.subject_ref == "ummanu-3"
+        )
+        self.assertFalse(settled.pinned)
+        self.assertFalse(settled.held)
+        writer = TaskWriter(client, data_dir=data_dir)
+        writer.record_owner_answer(
+            role="po",
+            actor="po",
+            reference="ummanu-4",
+            handover_event=self.handovers[4]["event_id"],
+            quotation="Use option B",
+            request_id="recovered-owner-answer",
+        )
+        self.assertFalse(next(event for event in events.events() if event.subject_ref == "ummanu-4").held)
+        saved = source_bell[-1]
+        self.assertFalse(
+            events.insert(saved["kind"], saved["subject_ref"], saved["text"], saved["dedup_key"])
+        )
+
     def test_a_snapshot_remote_recovers_into_an_empty_store_at_parity(self) -> None:
         fixture = self.fixture
         target, data_dir = fixture.target, fixture.data_dir

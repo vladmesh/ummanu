@@ -63,6 +63,12 @@ from ummanu.board.checkpoint_layout import (
 )
 from ummanu.board.models import Event
 from ummanu.board.origin_checkpoint import OUTBOX_FILE
+from ummanu.board.owner_checkpoint import (
+    OWNER_FILE,
+    OwnerCheckpointError,
+    read_checkpoint_owner_events,
+    scan_owner_secrets,
+)
 from ummanu.board.po_checkpoint import PO_FILE, PoCheckpointError, read_checkpoint_po, scan_po_secrets
 from ummanu.data import (
     PIPELINE_STATE_DIR,
@@ -101,6 +107,7 @@ ANALYTICS_FILES = (
 )
 BOARD_ENTRIES = (
     OUTBOX_FILE,
+    OWNER_FILE,
     PO_FILE,
     "cards.ndjson",
     "sprints.ndjson",
@@ -352,7 +359,7 @@ def _analytics_checkpoint_id(entries: list[dict[str, Any]]) -> str:
 
 def _verify_analytics_directory_files(root: Path, board: CheckpointBoard, files: tuple[str, ...]) -> None:
     if board.layout == FLAT:
-        allowed = {*files, OUTBOX_FILE, PO_FILE, ANALYTICS_MANIFEST, ".gitignore"}
+        allowed = {*files, OUTBOX_FILE, OWNER_FILE, PO_FILE, ANALYTICS_MANIFEST, ".gitignore"}
     else:
         allowed = {*board.physical_entries(), ANALYTICS_MANIFEST, ".gitignore"}
     try:
@@ -369,8 +376,9 @@ def _verify_analytics_export_summary(board: CheckpointBoard) -> None:
 
     try:
         read_checkpoint_outbox(board.directory)
+        read_checkpoint_owner_events(board.directory)
         read_checkpoint_po(board.directory)
-    except (OriginCheckpointError, PoCheckpointError) as exc:
+    except (OriginCheckpointError, OwnerCheckpointError, PoCheckpointError) as exc:
         raise AnalyticsManifestError(str(exc)) from None
     export_path = board.path("export.json")
     try:
@@ -1353,6 +1361,14 @@ class SnapshotExporter(CheckpointWriter):
         runtime_env = self.instance_dir / "runtime.env"
         for path in paths:
             text = (cut / path).read_bytes().decode("utf-8", errors="replace")
+            if path == f"state/board/{OWNER_FILE}":
+                try:
+                    scan_owner_secrets(
+                        text,
+                        lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values),
+                    )
+                except OwnerCheckpointError as exc:
+                    raise CheckpointBlocked(str(exc)) from None
             if path == f"state/board/{PO_FILE}":
                 try:
                     scan_po_secrets(text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values))
@@ -2462,6 +2478,13 @@ def _scan_for_secrets(
     """`state/` is what leaves the host, so a pasted token stops the commit here."""
     for entry in staged:
         text = _read_text(staging / entry, entry)
+        if component == "board" and entry == OWNER_FILE:
+            try:
+                scan_owner_secrets(
+                    text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values)
+                )
+            except OwnerCheckpointError as exc:
+                raise CheckpointBlocked(str(exc)) from None
         if component == "board" and entry == PO_FILE:
             try:
                 scan_po_secrets(text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values))
@@ -2489,8 +2512,9 @@ def _validate_board(
 
     try:
         read_checkpoint_outbox(staging)
+        read_checkpoint_owner_events(staging)
         read_checkpoint_po(staging)
-    except (OriginCheckpointError, PoCheckpointError) as exc:
+    except (OriginCheckpointError, OwnerCheckpointError, PoCheckpointError) as exc:
         raise CheckpointBlocked(str(exc)) from None
     summary = _read_json(staging / "export.json", "board export.json")
     declared = _int_field(summary, "card_count", "board export.json")

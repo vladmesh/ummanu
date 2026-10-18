@@ -230,8 +230,8 @@ split, so a checkpoint's Git cost follows what changed instead of the size of th
   that does not extend the committed one (the first split checkpoint after a flat one, or rewritten
   history) is replaced from its first segment. Segments are cut at line ends and hold at most 32 MiB
   unless one line is longer, so no blob reaches the 100 MB file limit of the GitHub remote.
-- `export.json`, `origin_returns.ndjson` and `po_sql.json` stay single files. The outbox and PO SQL
-  contain mutable state and are read through the same flat/split reader.
+- `export.json`, `origin_returns.ndjson`, `owner_events.ndjson` and `po_sql.json` stay single files.
+  These payloads contain mutable state and are read through the same flat/split reader.
 - A logical file's bytes are the concatenation of its parts in index order; a gap in the sequence or
   an unexpected entry is a broken checkpoint, not a shorter one.
 
@@ -484,10 +484,11 @@ malformed or unreadable new file cannot revive legacy success. The production ti
 checkpoint work nor its failures into its own outcome.
 
 The board cut is one read-only REPEATABLE READ transaction over cards, Product/Issue rows, batched
-metadata and comments, request/audit history, sprints, the complete origin-return outbox and all four
-PO SQL tables on the same client. Completed deliveries and closed PO sessions are included without
-UI or dispatcher limits. `board-bulk.lock` is shared only for these reads, preventing overlap with
-bulk recovery; normal transactional board writers can commit while the cut sees its earlier snapshot.
+metadata and comments, request/audit history, sprints, the complete origin-return outbox, stored owner
+events and all four PO SQL tables on the same client. Completed deliveries and closed PO sessions
+are included without UI or dispatcher limits. `board-bulk.lock` is shared only for these reads,
+preventing overlap with bulk recovery; normal transactional board writers can commit while the cut
+sees its earlier snapshot.
 Dispatcher state and run JSON files can be replaced while exported: a read sees one complete version
 through atomic rename, and append-only
 run history is checked against the preceding checkpoint. The cut need not coincide with a whole tick
@@ -996,6 +997,40 @@ and `restore-board` output explicitly report unavailable coverage; `restore-stat
 and unknown deliveries are never reconstructed from audit. This coverage diagnostic does not turn a
 valid legacy recovery into a failure.
 
+### Owner events
+
+The optional `export.json.owner_events` object declares `version: 1`, `count` and `sha256` of
+`owner_events.ndjson`. All stored rows are captured on the same read snapshot as cards, audit,
+sprints, origin returns and PO SQL, without the bell's list limit. Each row retains `kind`, `class`,
+nullable `subject_ref`, `text`, `created_at`, nullable `read_at` and `dedup_key` in increasing source
+`id` order. Historical read-only kinds remain saved data; producers still cannot record them.
+Subjects may name deleted or retired entities and PO sessions. No subject foreign key is inferred.
+
+Publication, flat/split readers, materialization and normal import validate coverage, vocabulary,
+classes, timestamps, unique identities and ordering before accepting data or writing restored rows.
+The export summary binds the digest into the analytics seal and the snapshot manifest covers the
+physical file. Secret scanning checks decoded fields as well as serialized bytes before publication.
+A damaged or secret-bearing cut cannot replace the preceding good checkpoint.
+
+After card and sprint facts, OwnerEventStore inserts missing dedup identities in the caller's app
+transaction, then reads back and proves semantic fields and relative order. Numeric IDs are local
+bell identities and may change. Retry refuses conflicting read state, extra rows or changed order;
+it never overwrites, deletes, replays producers or sends owner answers. Caller rollback removes the
+inserted prefix. Held state is computed by the ordinary store from restored cards, so current
+handover/escalation waits remain held, answered waits remain settled, and notices retain read state.
+The ordinary owner-answer writer can settle a recovered wait and producer dedup remains effective.
+
+Released checkpoints without both declaration and payload report unavailable coverage, distinct
+from a declared zero-row file. No bell facts are reconstructed from audit. `restore-state.json` and
+`restore-board` expose `owner_events_coverage`, `owner_events_parity` and `owner_events_diagnostic`;
+the install/recover result retains the unavailable diagnostic. Legacy recovery succeeds without
+reconstructing unknown history. `restore_findings` and `doctor` treat incomplete promised parity as
+an invariant failure, but do not treat absent legacy coverage as a failure. Inspect the recovery
+result or restore state for bell coverage; a successful doctor result does not prove complete bell
+history or sprint readiness. Bell fact coverage does not restore pending handover dispatch or
+delivery effects, sprint decisions, PO attachments or NOTES transport, or the remaining durability
+classes.
+
 ### PO SQL capture
 
 `export.json` is required before interpreting any coverage. Its optional `po_sql` object declares
@@ -1261,7 +1296,7 @@ A checkpoint without a sprints file restores as an installation without sprints.
 **Write order.** The import writes in the phases `src/ummanu/board/import_order.py` declares, and
 nowhere else is the order stated: exported request/audit history first, then Products, Issues and
 task cards, card comments (task, Issue and Product), closure, card order, sprints, sprint comments and
-origin returns.
+origin returns and owner events.
 Each phase names the schema tables it writes. The rule is that for every immediate foreign key in
 `src/ummanu/board/schema.py` between two tables the import writes, the parent's phase comes no later
 than the child's (a `DEFERRABLE INITIALLY DEFERRED` key holds at commit, whatever the order). History

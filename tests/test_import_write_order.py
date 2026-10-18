@@ -159,6 +159,7 @@ _STEPS = (
     (restore, "_reconcile_restored_order", "order"),
     (restore, "_import_sprints", "sprints"),
     (restore.OriginOutboxStore, "restore", "origin_returns"),
+    (restore.OwnerEventStore, "restore", "owner_events"),
 )
 
 
@@ -189,6 +190,7 @@ class ImportFollowsTheOrderTests(unittest.TestCase):
                 ("ummanu.restore._normalized_cards", mock.Mock(return_value=[])),
                 ("ummanu.restore._normalized_sprints", mock.Mock(return_value=[])),
                 ("ummanu.restore.read_checkpoint_outbox", mock.Mock(return_value=[])),
+                ("ummanu.restore.read_checkpoint_owner_events", mock.Mock(return_value=[])),
                 ("ummanu.restore._checkpoint_po", mock.Mock(return_value=None)),
                 ("ummanu.restore.OriginOutboxStore.export", mock.Mock(return_value=[])),
                 ("ummanu.restore._check_sql_sprint_current_tasks", mock.Mock()),
@@ -208,13 +210,12 @@ class ImportFollowsTheOrderTests(unittest.TestCase):
                 ("ummanu.task_restore.commit_restored_cards", mock.Mock()),
             ):
                 stack.enter_context(mock.patch(target, value))
-            for module, name, _phase in _STEPS:
-                stack.enter_context(mock.patch.object(module, name, step(name)))
+            for module, name, phase in _STEPS:
+                stack.enter_context(mock.patch.object(module, name, step(phase)))
             restore._import_normalized_board(Path("/nonexistent-restore-data"), client=mock.Mock())
 
-        self.assertEqual(called, [name for _module, name, _phase in _STEPS])
-        phases = {name: phase for _module, name, phase in _STEPS}
-        ranks = [phase_rank(phases[name]) for name in called]
+        self.assertEqual(called, [phase for _module, _name, phase in _STEPS])
+        ranks = [phase_rank(phase) for phase in called]
         self.assertEqual(ranks, sorted(ranks))
 
 

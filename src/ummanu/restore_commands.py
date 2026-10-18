@@ -132,7 +132,13 @@ def run_restore_board(args: argparse.Namespace) -> int:
     restore_po(data_dir, source=data_dir / "board", instance=instance, board=restore_board)
     state = restore_state(data_dir)
     return {
-        "ok": True, "action": "restore-board", "cards": count, "sprints": state["sprint_count"],
+        "ok": True,
+        "action": "restore-board",
+        "cards": count,
+        "sprints": state["sprint_count"],
+        "owner_events_coverage": state["owner_events_coverage"],
+        "owner_events_parity": state["owner_events_parity"],
+        "owner_events_diagnostic": state["owner_events_diagnostic"],
         "origin_outbox_coverage": state["origin_outbox_coverage"],
         "origin_outbox_diagnostic": state["origin_outbox_diagnostic"],
         "po_sql_coverage": state["po_sql_coverage"],

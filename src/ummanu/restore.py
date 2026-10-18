@@ -48,7 +48,14 @@ from ummanu.board.origin_checkpoint import (
     validate_outbox_records,
 )
 from ummanu.board.origin_outbox import OriginOutboxStore
+from ummanu.board.owner_checkpoint import (
+    LEGACY_OWNER_COVERAGE,
+    OwnerCheckpointError,
+    read_checkpoint_owner_events,
+    require_owner_parity,
+)
 from ummanu.board.owner_decisions import FIELD as OWNER_DECISIONS_FIELD, stored_decisions
+from ummanu.board.owner_events import OwnerEventStore
 from ummanu.board.po_checkpoint import (
     LEGACY_PO_COVERAGE,
     RESTORED_PO_COVERAGE,
@@ -144,7 +151,7 @@ def import_normalized_board(
                 with client.transaction():
                     return _import_normalized_board(data_dir, client=client, instance=instance)
             return _import_normalized_board(data_dir, client=client, instance=instance)
-    except OriginCheckpointError as exc:
+    except (OriginCheckpointError, OwnerCheckpointError) as exc:
         raise RestoreError(str(exc)) from None
     except TaskError as exc:
         raise RestoreError(exc.message) from None
@@ -159,6 +166,7 @@ def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance:
     # `restore_po` imports this capture after the board commits; refuse a damaged one before writes.
     _checkpoint_po(data_dir / "board")
     outbox = read_checkpoint_outbox(data_dir / "board")
+    owner_events = read_checkpoint_owner_events(data_dir / "board")
     # Validate both sets before the first backend write.
     _check_sql_sprint_current_tasks(cards, sprints)
     _check_restored_observers(sprints, instance)
@@ -229,6 +237,9 @@ def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance:
         set_restore_phase(client, "origin_returns")
         OriginOutboxStore(client).restore(outbox)
         validate_outbox_records(OriginOutboxStore(client).export(), cards, writer.audit.events())
+    if owner_events is not None:
+        set_restore_phase(client, "owner_events")
+        OwnerEventStore(client.credentials, client=client).restore(owner_events)
     pending_comments = [
         event for event in writer.audit.pending_events() if event.get("kind") == "restored_comment"
     ]
@@ -242,6 +253,9 @@ def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance:
         sprints="complete",
         sprint_parity="complete",
         sprint_count=len(sprints),
+        owner_events_coverage="restored" if owner_events is not None else "unavailable",
+        owner_events_parity="complete" if owner_events is not None else "unavailable",
+        owner_events_diagnostic="" if owner_events is not None else LEGACY_OWNER_COVERAGE,
         origin_outbox_coverage="complete" if outbox is not None else "unavailable",
         origin_outbox_diagnostic="" if outbox is not None else LEGACY_COVERAGE,
     )
@@ -1007,6 +1021,8 @@ def restore_findings(data_dir: Path) -> list[str]:
         findings.append("sprint restore is incomplete")
     if state.get("po_sql_coverage") == "captured" and state.get("po_sql_restore") != "finished":
         findings.append(f"PO SQL restore is incomplete at {state.get('po_sql_restore')}")
+    if state.get("owner_events_coverage") == "restored" and state.get("owner_events_parity") != "complete":
+        findings.append("owner events restore parity is incomplete")
     if state.get("memory_index") != "complete":
         findings.append("memory index has not been rebuilt")
     if state.get("reconcile") != "complete":
@@ -1635,6 +1651,9 @@ def _verify_postgres_normalized_parity(data_dir: Path, instance_dir: Path) -> No
         history_payload = json.loads((data_dir / "board" / "audit.json").read_text(encoding="utf-8"))
         expected_history = history_payload.get("events") if isinstance(history_payload, dict) else None
         actual_history = SqlTaskAudit(client).events()
+        expected_owner = read_checkpoint_owner_events(data_dir / "board")
+        if expected_owner is not None:
+            require_owner_parity(expected_owner, OwnerEventStore(client.credentials, client=client).export())
         expected_outbox = read_checkpoint_outbox(data_dir / "board")
         if expected_outbox is not None:
             require_outbox_parity(expected_outbox, OriginOutboxStore(client).export())

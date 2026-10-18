@@ -20,6 +20,7 @@ from unittest import mock
 from tests.fakes.installation import split_board
 from tests.fakes.tasks import empty_seed
 from tests.origin_checkpoint_fixtures import obligations, write_outbox
+from tests.owner_checkpoint_fixtures import bell_rows, write_bell
 from tests.po_checkpoint_fixtures import po_records, write_po
 from tests.restore_fixtures import _restore_card
 from tests.sql_backend_fixtures import card_store
@@ -27,6 +28,13 @@ from ummanu import checkpoint, secret_store, state_repo
 from ummanu.board.checkpoint_layout import LOGICAL_FILES, open_checkpoint_board
 from ummanu.board.origin_checkpoint import read_checkpoint_outbox, require_outbox_parity
 from ummanu.board.origin_outbox import OriginOutboxStore
+from ummanu.board.owner_checkpoint import (
+    OWNER_FILE,
+    OwnerCheckpointError,
+    read_checkpoint_owner_events,
+    require_owner_parity,
+)
+from ummanu.board.owner_events import OwnerEventStore
 from ummanu.board.po_checkpoint import PO_FILE, PoCheckpointError, read_checkpoint_po
 from ummanu.checkpoint import (
     SNAPSHOT_ALLOWLIST,
@@ -208,6 +216,166 @@ class SnapshotCase(unittest.TestCase):
 
 
 class SnapshotRepositoryTests(SnapshotCase):
+    def test_committed_owner_history_materializes_flat_and_split_and_imports_normally(self):
+        rows = bell_rows(513)
+        self.seed_board([_restore_card()])
+        write_bell(self.data_dir / "board", rows)
+        result = self.exporter().write()
+        self.assertEqual(result.status, "committed", result.reason)
+        saved = self.committed(f"state/board/{OWNER_FILE}")
+        self.assertEqual(saved, (self.data_dir / "board" / OWNER_FILE).read_bytes())
+        checkout = self.root / "owner-checkout"
+        git(self.root, "clone", str(self.repo), str(checkout))
+        source = checkout / "state" / "board"
+        flat = self.root / "owner-flat"
+        flat_source = flat / "state" / "board"
+        flat_source.mkdir(parents=True)
+        reader = open_checkpoint_board(source)
+        for name in LOGICAL_FILES:
+            if reader.has(name):
+                (flat_source / name).write_bytes(reader.read_bytes(name))
+        checkpoint._write_analytics_manifest(flat_source)
+        shutil.copytree(checkout / "state" / "runs", flat / "state" / "runs")
+        git(flat, "init", "--quiet")
+        git(flat, "add", "state")
+        git(
+            flat,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "Flat checkpoint",
+        )
+        for layout, instance in (("flat", flat), ("split", checkout)):
+            with self.subTest(layout=layout):
+                checkpoint.verify_analytics_checkpoint(instance / "state" / "board")
+                target = self.root / f"owner-target-{layout}"
+                self.assertEqual(materialize_checkpoint(instance, target), (1, 0))
+                self.assertEqual(read_checkpoint_owner_events(target / "board"), rows)
+                client = card_store(self, empty_seed())
+                for _ in range(2):
+                    self.assertEqual(import_normalized_board(target, client=client), 1)
+                    require_owner_parity(rows, OwnerEventStore(client.credentials, client=client).export())
+
+    def test_owner_zero_legacy_and_corrupt_coverage_fail_closed_in_both_layouts(self):
+        self.seed_board([_restore_card()])
+        write_bell(self.data_dir / "board", [])
+        source = self.live / "state" / "board"
+        shutil.copytree(self.data_dir / "board", source, dirs_exist_ok=True)
+        shutil.copytree(self.data_dir / "runs", self.live / "state" / "runs")
+        for layout in ("flat", "split"):
+            if layout == "split":
+                split_board(source)
+            summary = (source / "export.json").read_bytes()
+            self.assertEqual(read_checkpoint_owner_events(source), [])
+            self.assertEqual(materialize_checkpoint(self.live, self.root / f"owner-empty-{layout}"), (1, 0))
+            for defect in (
+                "missing",
+                "json",
+                "hash",
+                "count",
+                "coverage",
+                "undeclared",
+                "symlink",
+                "duplicate-field",
+                "duplicate-summary",
+                "duplicate-coverage",
+                "duplicate-row",
+                "class",
+            ):
+                with self.subTest(layout=layout, defect=defect):
+                    (source / OWNER_FILE).unlink(missing_ok=True)
+                    (source / OWNER_FILE).write_bytes(b"")
+                    (source / "export.json").write_bytes(summary)
+                    if defect == "missing":
+                        (source / OWNER_FILE).unlink()
+                    elif defect == "symlink":
+                        (source / OWNER_FILE).unlink()
+                        (source / OWNER_FILE).symlink_to(self.root / "missing")
+                    elif defect == "json":
+                        (source / OWNER_FILE).write_text("broken")
+                    elif defect == "duplicate-field":
+                        row = bell_rows(1)[0]
+                        payload = (json.dumps(row)[:-1] + ', "text": "private-duplicate-value"}\n').encode()
+                        (source / OWNER_FILE).write_bytes(payload)
+                        changed = json.loads(summary)
+                        changed["owner_events"].update(count=1, sha256=hashlib.sha256(payload).hexdigest())
+                        (source / "export.json").write_text(json.dumps(changed))
+                    elif defect == "duplicate-summary":
+                        changed = json.loads(summary)
+                        payload = (
+                            json.dumps(changed)[:-1]
+                            + ', "owner_events": '
+                            + json.dumps(changed["owner_events"])
+                            + "}"
+                        )
+                        (source / "export.json").write_text(payload)
+                    elif defect == "duplicate-coverage":
+                        payload = summary.decode().replace('"count": 0', '"count": 0, "count": 0')
+                        (source / "export.json").write_text(payload)
+                    elif defect in {"duplicate-row", "class"}:
+                        rows = bell_rows(2)
+                        if defect == "duplicate-row":
+                            rows[1]["dedup_key"] = rows[0]["dedup_key"]
+                        else:
+                            rows[0]["class"] = "notice"
+                        write_bell(source, rows)
+                    else:
+                        changed = json.loads(summary)
+                        if defect == "hash":
+                            changed["owner_events"]["sha256"] = "0" * 64
+                        elif defect == "count":
+                            changed["owner_events"]["count"] = 1
+                        elif defect == "coverage":
+                            changed["owner_events"] = None
+                        else:
+                            changed.pop("owner_events")
+                        (source / "export.json").write_text(json.dumps(changed))
+                    with self.assertRaises(OwnerCheckpointError) as failure:
+                        read_checkpoint_owner_events(source)
+                    if defect in {"duplicate-field", "duplicate-summary", "duplicate-coverage"}:
+                        self.assertEqual(
+                            str(failure.exception), "owner events checkpoint is unreadable or invalid"
+                        )
+                    target = self.root / f"bad-owner-{layout}-{defect}"
+                    with self.assertRaises(InstallError):
+                        materialize_checkpoint(self.live, target)
+                    self.assertFalse(target.exists())
+            (source / OWNER_FILE).unlink()
+            legacy = json.loads(summary)
+            legacy.pop("owner_events")
+            (source / "export.json").write_text(json.dumps(legacy))
+            self.assertIsNone(read_checkpoint_owner_events(source))
+            self.assertEqual(materialize_checkpoint(self.live, self.root / f"owner-legacy-{layout}"), (1, 0))
+            write_bell(source, [])
+
+    def test_invalid_or_secret_owner_capture_cannot_replace_committed_bytes_or_tip(self):
+        self.seed_board([_restore_card()])
+        write_bell(self.data_dir / "board", bell_rows())
+        first = self.exporter().write()
+        self.assertEqual(first.status, "committed", first.reason)
+        saved = self.committed(f"state/board/{OWNER_FILE}")
+        secret = 'known\n"private\tsecret'
+        for defect in ("missing", "class", "text", "dedup_key"):
+            with self.subTest(defect=defect):
+                rows = bell_rows()
+                if defect == "class":
+                    rows[0]["class"] = "notice"
+                elif defect in {"text", "dedup_key"}:
+                    rows[0][defect] = secret
+                write_bell(self.data_dir / "board", rows)
+                if defect == "missing":
+                    (self.data_dir / "board" / OWNER_FILE).unlink()
+                with mock.patch("ummanu.secret_store.redaction_values", return_value=(secret,)):
+                    result = self.exporter().write()
+                self.assertEqual(result.status, "blocked", result.reason)
+                self.assertEqual(self.tip(), first.commit)
+                self.assertEqual(self.committed(f"state/board/{OWNER_FILE}"), saved)
+                self.assertNotIn("private", result.reason)
+
     def test_committed_po_capture_materializes_flat_and_split_without_live_effects(self):
         records = po_records()
         self.seed_board([_restore_card()])

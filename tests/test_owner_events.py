@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import importlib
+import json
 import re
 import tempfile
 import unittest
@@ -21,11 +22,19 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
+from tests.owner_checkpoint_fixtures import bell_rows
 from tests.owner_event_fakes import CheckViolation, FakeOwnerEvents
 from tests.po_card_fakes import DECISION_BODY, REF
 from tests.po_handover_fakes import REASON, MemoryAudit, OneCardClient, decision_card
 from tests.web_fakes import Recording
 from ummanu.board import owner_events, schema, schema_gate
+from ummanu.board.owner_checkpoint import (
+    LEGACY_OWNER_COVERAGE,
+    OwnerCheckpointError,
+    require_owner_parity,
+    scan_owner_secrets,
+    validate_owner_records,
+)
 from ummanu.board.owner_events import (
     CLASSES,
     KIND_CLASS,
@@ -798,6 +807,97 @@ class DispatcherRecordsLoadUnchangedTests(unittest.TestCase):
         loaded = DispatcherRecord.from_json(document)
         self.assertEqual(DispatcherRecord.from_json(loaded.to_json()).to_json(), loaded.to_json())
         self.assertEqual(loaded.state, "po_submitted")
+
+
+class OwnerCheckpointTests(unittest.TestCase):
+    def test_complete_history_accepts_historical_kinds_subjects_and_equal_timestamp_order(self):
+        rows = bell_rows(513)
+        validate_owner_records(rows)
+        require_owner_parity(rows, [dict(row, id=index + 100) for index, row in enumerate(rows)])
+
+    def test_invalid_fields_types_vocabulary_classes_order_identity_and_timestamps_refuse_safely(self):
+        rows = bell_rows()
+        for field, value in (
+            ("id", True),
+            ("id", 0),
+            ("kind", "private-value"),
+            ("kind", []),
+            ("class", "notice"),
+            ("subject_ref", 9),
+            ("text", None),
+            ("text", "bad\x00text"),
+            ("dedup_key", ""),
+            ("created_at", "bad"),
+            ("created_at", 3),
+            ("read_at", "2026-09-01T01:00:00+00:00"),
+        ):
+            with self.subTest(field=field, value=value):
+                changed = copy.deepcopy(rows)
+                changed[2][field] = value
+                with self.assertRaises(OwnerCheckpointError) as failure:
+                    validate_owner_records(changed)
+                self.assertNotIn("private-value", str(failure.exception))
+        for changed in (rows[::-1], rows + [dict(rows[-1], id=100)], [dict(rows[0], held=True)]):
+            with self.assertRaises(OwnerCheckpointError):
+                validate_owner_records(changed)
+
+    def test_parity_refuses_semantic_changes_missing_extra_and_reordered_rows_without_contents(self):
+        rows = bell_rows()
+        for field in rows[0]:
+            if field == "id":
+                continue
+            changed = copy.deepcopy(rows)
+            changed[0][field] = "private-secret-value"
+            with self.subTest(field=field), self.assertRaises(OwnerCheckpointError) as failure:
+                require_owner_parity(rows, changed)
+            self.assertNotIn("private-secret-value", str(failure.exception))
+        for changed in (rows[:-1], rows + [dict(rows[0], dedup_key="extra")], rows[::-1]):
+            with self.assertRaises(OwnerCheckpointError):
+                require_owner_parity(rows, changed)
+
+    def test_secret_scan_decodes_json_escaped_text_and_dedup_with_safe_field_diagnostic(self):
+        import json
+
+        from ummanu.runtime.redact import redact
+
+        for field in ("text", "dedup_key"):
+            rows = bell_rows(1)
+            secret = 'private\n"secret\tvalue'
+            rows[0][field] = secret
+            payload = json.dumps(rows[0]) + "\n"
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(OwnerCheckpointError, f"record 0 field {field}") as failure,
+            ):
+                scan_owner_secrets(
+                    payload, lambda value, secret=secret: redact(value, secret_values=(secret,))
+                )
+            self.assertNotIn("private", str(failure.exception))
+
+    def test_legacy_coverage_does_not_block_status_but_incomplete_promised_parity_does(self):
+        from ummanu.restore import restore_findings, restore_state
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            path = data_dir / "restore-state.json"
+            state = {
+                "version": 1,
+                "board": "complete",
+                "board_parity": "complete",
+                "sprints": "complete",
+                "sprint_parity": "complete",
+                "memory_index": "complete",
+                "reconcile": "complete",
+                "owner_events_coverage": "unavailable",
+                "owner_events_parity": "unavailable",
+                "owner_events_diagnostic": LEGACY_OWNER_COVERAGE,
+            }
+            path.write_text(json.dumps(state))
+            self.assertEqual(restore_findings(data_dir), [])
+            self.assertEqual(restore_state(data_dir)["owner_events_diagnostic"], LEGACY_OWNER_COVERAGE)
+            state.update(owner_events_coverage="restored", owner_events_parity="failed")
+            path.write_text(json.dumps(state))
+            self.assertEqual(restore_findings(data_dir), ["owner events restore parity is incomplete"])
 
 
 if __name__ == "__main__":
