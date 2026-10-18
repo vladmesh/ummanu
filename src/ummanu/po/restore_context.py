@@ -36,10 +36,6 @@ def _encoded(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 
-def _digest(value: Any) -> str:
-    return hashlib.sha256(_encoded(value)).hexdigest()
-
-
 def _row(value: Any, columns: tuple[str, ...]) -> dict[str, Any]:
     fields = asdict(value)
     return {key: rfc3339(fields[key], microseconds=True) if isinstance(fields[key], datetime)
@@ -111,6 +107,7 @@ class RestoredContexts:
     @staticmethod
     def _validate(state: Any, plan: dict[str, Any]) -> None:
         from ummanu.board.po_checkpoint import PO_COLUMNS
+        from ummanu.board.po_restore import _digest
 
         if (type(state) is not dict or set(state) != {"version", "plan_sha256", "sessions"}
                 or type(state["version"]) is not int or state["version"] != 1
@@ -182,7 +179,7 @@ class RestoredContexts:
     def prepare(self, records: dict[str, list[dict[str, Any]]], frozen: PoRestorePlan) -> None:
         """Bind committed imported rows to an already persisted plan without importing or launching."""
         from ummanu.board.po_checkpoint import PO_COLUMNS
-        from ummanu.board.po_restore import _load_plan, normalized_po_records
+        from ummanu.board.po_restore import _digest, _load_plan, normalized_po_records
 
         expected = normalized_po_records(records, frozen)
         with self._locked() as (plan, state):
@@ -229,6 +226,8 @@ class RestoredContexts:
             return self._entry(plan, state, identity)
 
     def prompt(self, session: Session, seq: int, text: str) -> tuple[bool, str] | None:
+        from ummanu.board.po_restore import _check_plan_path, _digest
+
         with self._locked() as (plan, state):
             entry = self._entry(plan, state, session.session_id)
             if entry is None:
@@ -251,8 +250,6 @@ class RestoredContexts:
                            ensure_ascii=False) for row in history["feed"]
             )]
             transcript = "\n".join(lines)
-            from ummanu.board.po_restore import _check_plan_path
-
             workspace = workspace_dir(self.data_dir)
             if workspace.resolve(strict=True) != workspace:
                 raise RestoreContextError("restored context workspace is not canonical")
