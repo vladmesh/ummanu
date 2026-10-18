@@ -266,7 +266,7 @@ class SnapshotRepositoryTests(SnapshotCase):
             self.assertEqual(read_checkpoint_po(source), {table: [] for table in po_records()})
             for defect in ("missing", "empty-file", "digest", "count", "coverage-null", "undeclared", "missing-export", "symlink", "dangling-symlink"):
                 with self.subTest(layout=layout, defect=defect):
-                    (source / PO_FILE).unlink()
+                    (source / PO_FILE).unlink(missing_ok=True)
                     (source / PO_FILE).write_bytes(valid)
                     (source / "export.json").write_bytes(summary)
                     if defect in {"missing", "symlink", "dangling-symlink"}:

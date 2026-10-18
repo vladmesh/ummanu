@@ -983,6 +983,7 @@ class RestoreTests(unittest.TestCase):
                 stream.write("  foreign_units:\n    - ummanu-supervisor.timer\n")
             bootstrap_empty(instance)
             card = _restore_card()
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
             )
