@@ -155,6 +155,7 @@ def run_restore_board(args: argparse.Namespace) -> int:
         "po_queue_refused": state["po_queue_refused"],
         "po_queue_diagnostic": state["po_queue_diagnostic"],
         "po_attachments_coverage": state["po_attachments_coverage"],
+        "po_attachments_parity": state["po_attachments_parity"],
         "po_attachments_files": state["po_attachments_files"],
         "po_attachments_bytes": state["po_attachments_bytes"],
         "po_attachments_diagnostic": state["po_attachments_diagnostic"],

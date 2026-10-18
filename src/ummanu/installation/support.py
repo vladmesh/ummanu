@@ -65,10 +65,10 @@ def _ensure_installation_user(name: str | None, *, recovery: bool, dry_run: bool
 
 
 
-def _set_installation_owner(path: Path, name: str | None) -> None:
+def _set_installation_owner(path: Path, name: str | None, *, preserve: tuple[Path, ...] = ()) -> None:
     """Give root-created installation files safe ownership for the runtime user."""
     try:
-        _set_runtime_owner(path, name)
+        _set_runtime_owner(path, name, preserve=preserve)
     except GitError as exc:
         raise InstallError(str(exc)) from None
 
@@ -92,7 +92,10 @@ def _establish_recovery_ownership_barrier(
         *additional_paths,
     )
     for path in dict.fromkeys(ownership_roots):
-        _set_installation_owner(path, installation_user)
+        if data_dir is not None and path == data_dir:
+            _set_installation_owner(path, installation_user, preserve=(data_dir / "po",))
+        else:
+            _set_installation_owner(path, installation_user)
     key = key_path(instance_dir)
     if not key.exists() and not key.is_symlink():
         return

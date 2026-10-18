@@ -1,13 +1,16 @@
-"""PO session images are inventoried with the PO SQL cut, carried as exact bytes and materialized inert."""
+"""PO images are SQL-bound captures published at exact native parity before recovery admission."""
 
 import hashlib
 import json
 import os
 import shutil
+import stat
 import tempfile
 import threading
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from tests.fakes.installation import _checkpoint, split_board
@@ -27,6 +30,7 @@ from ummanu.board.po_attachments_checkpoint import (
 )
 from ummanu.board.po_checkpoint import PoCheckpointError
 from ummanu.data import export_board, init_layout
+from ummanu.installation import support as installation_support
 from ummanu.installation.materialize import materialize_checkpoint
 from ummanu.installation.models import InstallError
 from ummanu.po import attachments, recovery_admission
@@ -34,13 +38,17 @@ from ummanu.po.attachments import (
     MAX_ATTACHMENT_BYTES,
     AttachmentCaptureError,
     AttachmentInventory,
+    AttachmentPublicationError,
     StoredAttachment,
+    attachment_path,
     attachments_dir,
     inventory_attachments,
+    publish_image,
     store_image,
 )
 from ummanu.po.queue import QueueCapture
-from ummanu.restore import RestoreError, restore_po, restore_state
+from ummanu.po.recovery_admission import PoRecoveryAdmission
+from ummanu.restore import RestoreError, restore_findings, restore_po, restore_state
 from ummanu.runtime.redact import redact
 
 SESSIONS = ["closed", "empty", "open"]
@@ -414,7 +422,7 @@ class ExportTests(_Case):
 
 
 class MaterializeTests(_Case):
-    def test_committed_flat_and_split_points_materialize_inert_bytes_and_restore_describes_them(self) -> None:
+    def test_flat_and_split_points_materialize_then_restore_native_bytes_before_sql(self) -> None:
         stored = self.seed()
         source_files = sorted(path for path in (self.data / "po").rglob("*") if path.is_file())
         for layout in ("flat", "split"):
@@ -443,9 +451,12 @@ class MaterializeTests(_Case):
                 self.assertEqual(
                     (state["po_attachments_coverage"], state["po_attachments_files"], state["po_attachments_bytes"],
                      state["po_attachments_diagnostic"]),
-                    ("captured", 4, sum(map(len, stored.values())), captured.describe()),
+                    ("captured", 4, sum(map(len, stored.values())),
+                     captured.describe() + "; native runtime parity complete"),
                 )
-                self.assertFalse((target / "po").exists())
+                self.assertEqual(state["po_attachments_parity"], "complete")
+                for (session, name), image in stored.items():
+                    self.assertEqual(attachment_path(target, session, name).read_bytes(), image)
                 self.assertEqual(fake.requests, {})
         self.assertEqual(source_files, sorted(path for path in (self.data / "po").rglob("*") if path.is_file()))
 
@@ -474,6 +485,8 @@ class MaterializeTests(_Case):
             ):
                 restore_po(target, source=target / "board", instance=self.root / "instance")
             state = restore_state(target)
+            self.assertEqual(state["po_attachments_parity"],
+                             "unavailable" if state["po_attachments_coverage"] == "unavailable" else "complete")
             return state["po_attachments_coverage"], state["po_attachments_files"], state["po_attachments_bytes"]
 
         captured = inventory_attachments(self.data, SESSIONS)
@@ -540,6 +553,197 @@ class MaterializeTests(_Case):
             restore_po(damaged, source=damaged / "board", instance=instance, board=publish)
         publish.assert_not_called()
         self.assertEqual(restore_state(damaged), {})
+
+
+class PublicationTests(_Case):
+    def image(self, image=PNG, session="open"):
+        name = f"{hashlib.sha256(image).hexdigest()}.{attachments.image_kind(image)}"
+        return StoredAttachment(session, name, len(image)), image
+
+    def native(self, item):
+        return attachments_dir(self.data, item.session_id) / item.name
+
+    def test_exact_images_retry_and_later_uploads_survive(self):
+        images = [self.image(PNG), self.image(JPEG), self.image(WEBP, "closed")]
+        for item, image in images:
+            publish_image(self.data, item, image)
+        later = store_image(self.data, "open", PNG + b"later")
+        before = {self.native(item): self.native(item).stat().st_ino for item, _ in images}
+        for item, image in images:
+            publish_image(self.data, item, image)
+            self.assertEqual(attachment_path(self.data, item.session_id, item.name).read_bytes(), image)
+            self.assertEqual(self.native(item).stat().st_ino, before[self.native(item)])
+            self.assertEqual(stat.S_IMODE(self.native(item).stat().st_mode), 0o600)
+            for path in (self.native(item).parent, *list(self.native(item).parents)[1:4]):
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
+        self.assertEqual(later.read_bytes(), PNG + b"later")
+
+    def test_invalid_bytes_and_native_conflicts_never_replace_content(self):
+        item, image = self.image()
+        for invalid in (image[:-1], JPEG, b"private"):
+            with self.assertRaises(AttachmentPublicationError):
+                publish_image(self.data, item, invalid)
+        self.assertFalse((self.data / "po").exists())
+        publish_image(self.data, item, image)
+        target = self.native(item)
+        target.write_bytes(b"private")
+        before = target.stat()
+        with self.assertRaisesRegex(AttachmentPublicationError, "session open attachment .*conflict"):
+            publish_image(self.data, item, image)
+        self.assertEqual(target.read_bytes(), b"private")
+        self.assertEqual(target.stat().st_ino, before.st_ino)
+        self.assertEqual(target.stat().st_mode, before.st_mode)
+
+    def test_symlinks_nonregular_entries_and_unsafe_permissions_refuse_without_changes(self):
+        item, image = self.image()
+        outside = self.root / "outside"
+        outside.write_bytes(b"private")
+        for part in ("po", "sessions", "open", "attachments", item.name):
+            for kind in ("symlink", "fifo", "permissions", "owner"):
+                with self.subTest(part=part, kind=kind):
+                    if (self.data / "po").exists():
+                        shutil.rmtree(self.data / "po")
+                    publish_image(self.data, item, image)
+                    path = self.data / "po"
+                    for name in ("sessions", "open", "attachments", item.name):
+                        if path.name == part:
+                            break
+                        path /= name
+                    if kind in ("symlink", "fifo"):
+                        if path.is_dir():
+                            shutil.rmtree(path)
+                        else:
+                            path.unlink()
+                        if kind == "symlink":
+                            path.symlink_to(outside)
+                        else:
+                            os.mkfifo(path)
+                    elif kind == "permissions":
+                        path.chmod(0o777 if path.is_dir() else 0o644)
+                    before = path.lstat()
+                    real_stat = os.fstat
+
+                    def foreign_stat(fd):
+                        info = real_stat(fd)
+                        if (info.st_dev, info.st_ino) == (before.st_dev, before.st_ino):
+                            fields = list(info)
+                            fields[4] = os.geteuid() + 1
+                            return os.stat_result(fields)
+                        return info
+
+                    patch = mock.patch.object(attachments.os, "fstat", side_effect=foreign_stat)
+                    with ExitStack() as stack:
+                        if kind == "owner":
+                            stack.enter_context(patch)
+                        with self.assertRaises(AttachmentPublicationError):
+                            publish_image(self.data, item, image)
+                    after = path.lstat()
+                    self.assertEqual((after.st_ino, after.st_uid, after.st_mode),
+                                     (before.st_ino, before.st_uid, before.st_mode))
+                    self.assertEqual(outside.read_bytes(), b"private")
+                    if not path.is_dir():
+                        path.unlink()
+                    if (self.data / "po").exists():
+                        shutil.rmtree(self.data / "po")
+
+    def test_link_and_every_directory_sync_failure_retry_checks_and_syncs_existing_bytes(self):
+        item, image = self.image()
+        real_link, real_sync = os.link, os.fsync
+
+        def interrupted_link(*args, **kwargs):
+            real_link(*args, **kwargs)
+            raise OSError("interrupted after link")
+
+        with mock.patch.object(attachments.os, "link", side_effect=interrupted_link):
+            with self.assertRaises(AttachmentPublicationError):
+                publish_image(self.data, item, image)
+        self.assertEqual(self.native(item).read_bytes(), image)
+        for component in (item.name, "attachments", "open", "sessions", "po", "data"):
+            for _ in range(2):
+                synced = []
+
+                def sync(fd):
+                    name = Path(os.readlink(f"/proc/self/fd/{fd}")).name
+                    synced.append(name)
+                    if name == component:
+                        raise OSError("injected directory sync failure")
+                    return real_sync(fd)
+
+                with mock.patch.object(attachments.os, "fsync", side_effect=sync):
+                    with self.assertRaises(AttachmentPublicationError):
+                        publish_image(self.data, item, image)
+                self.assertIn(item.name, synced)
+                self.assertEqual(self.native(item).read_bytes(), image)
+            publish_image(self.data, item, image)
+        self.assertEqual(attachment_path(self.data, item.session_id, item.name).read_bytes(), image)
+
+    def test_selected_capture_is_frozen_and_partial_failure_holds_admission_until_retry(self):
+        stored = self.seed()
+        source = self.board(inventory_attachments(self.data, SESSIONS))
+        target = self.root / "target"
+        init_layout(target)
+        fake = FakeBoard()
+        images = read_checkpoint_attachments(source)
+        first, second = images.files[:2]
+        real_publish = attachments.publish_image
+        attempts = []
+
+        def publish(data_dir, item, content):
+            attempts.append(item)
+            if item == second:
+                raise AttachmentPublicationError(f"session {item.session_id} attachment {item.name}: injected failure")
+            real_publish(data_dir, item, content)
+
+        def board():
+            self.assertEqual(PoRecoveryAdmission(target, FakePoStore(fake)).status()["reason"], "recovery_hold")
+            (source / ATTACHMENTS_CHECKPOINT_FILE).write_bytes(b"damaged after validation")
+
+        with (
+            mock.patch("ummanu.board.store.resolve_role", return_value=object()),
+            mock.patch("ummanu.po.store.PoStore", side_effect=lambda _: _ClosingStore(fake)),
+            mock.patch("ummanu.board.po_restore.prepare_po_restore", side_effect=PoCheckpointError("stopped")) as plan,
+        ):
+            with mock.patch.object(attachments, "publish_image", side_effect=publish):
+                with self.assertRaisesRegex(RestoreError, "PO images restore failed: .*injected failure"):
+                    restore_po(target, source=source, instance=self.root, board=board)
+            self.assertEqual(attempts, [first, second])
+            self.assertEqual(attachment_path(target, first.session_id, first.name).read_bytes(),
+                             stored[first.session_id, first.name])
+            self.assertEqual(restore_state(target)["po_attachments_parity"], "failed")
+            self.assertIn("PO images restore parity is incomplete", restore_findings(target))
+            self.assertEqual(PoRecoveryAdmission(target, FakePoStore(fake)).status()["reason"], "recovery_hold")
+            plan.assert_not_called()
+            self.declare(source, inventory_attachments(self.data, SESSIONS))
+            # Restore the selected source's bytes, not a mutable target export.
+            write_json(target / "board" / "export.json", {"version": 1})
+            for _ in range(2):
+                with self.assertRaisesRegex(RestoreError, "failed at plan: stopped"):
+                    restore_po(target, source=source, instance=self.root)
+                self.assertEqual(restore_state(target)["po_attachments_parity"], "complete")
+                for (session, name), image in stored.items():
+                    self.assertEqual(attachment_path(target, session, name).read_bytes(), image)
+        self.assertEqual(fake.requests, {})
+
+    def test_recovery_ownership_handoff_leaves_native_content_for_runtime_validation(self):
+        item, image = self.image()
+        publish_image(self.data, item, image)
+        instance = self.root / "instance"
+        instance.mkdir()
+        progress = self.data / "progress"
+        progress.write_text("fixture")
+        from ummanu.installation.upgrade import workspaces
+
+        with (
+            mock.patch.object(workspaces.os, "geteuid", return_value=0),
+            mock.patch.object(workspaces.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=123, pw_gid=456)),
+            mock.patch.object(workspaces.os, "chown") as chown,
+        ):
+            installation_support._establish_recovery_ownership_barrier(instance, self.data, "runtime")
+        changed = {Path(call.args[0]) for call in chown.call_args_list}
+        self.assertIn(progress, changed)
+        self.assertIn(self.data, changed)
+        self.assertFalse(any(path == self.data / "po" or self.data / "po" in path.parents for path in changed))
+        self.assertEqual(self.native(item).read_bytes(), image)
 
 
 class _ClosingStore(FakePoStore):

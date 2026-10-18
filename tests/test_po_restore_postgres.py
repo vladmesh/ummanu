@@ -40,6 +40,7 @@ from ummanu.board.sql_rows import rfc3339
 from ummanu.cli import main
 from ummanu.data import export_board, init_layout
 from ummanu.dispatch.po_delivery import deliver
+from ummanu.po.attachments import AttachmentPublicationError, attachment_path, store_image
 from ummanu.po.client import PoServiceClient
 from ummanu.po.queue import PoQueue, queue_dir
 from ummanu.po.recovery_admission import PoRecoveryAdmission, RecoveryAdmissionError
@@ -551,6 +552,48 @@ class PoRecoveryWiringPostgresTests(unittest.TestCase):
             self.assertEqual(service.queue.pending(), [])
             self.assertEqual(len(self.calls), 1)
             self.assertEqual(successors, [])
+
+    def test_image_failure_after_import_retry_preserves_plan_and_sql_until_native_parity(self):
+        from ummanu.po import attachments
+
+        board = self.capture(po_records(), "images-source", notes=NOTES)
+        source_data = board.parent
+        images = [(session, store_image(source_data, session, content).name, content)
+                  for session, content in (("open", b"\x89PNG\r\n\x1a\nimage"),
+                                           ("closed", b"\xff\xd8\xffimage"),
+                                           ("empty", b"RIFF\x00\x00\x00\x00WEBPimage"))]
+        export_board(source_data, instance_dir=self.root / "images-source")
+        instance, data, client, po = self.target(board, "images-target")
+        (data / "po").chmod(0o700)
+        with mock.patch.object(RestoredContexts, "prepare", side_effect=RestoreContextError("context failure")):
+            code, output = self.restore_board(instance)
+        self.assertEqual(code, 2, output)
+        self.assertIn("context failure", output)
+        plan_bytes = (data / ".po-restore" / "plan.json").read_bytes()
+        imported = self.readback(client)
+        session, name, content = images[0]
+        attachment_path(data, session, name).unlink()
+        with mock.patch.object(attachments, "publish_image", side_effect=AttachmentPublicationError("injected image failure")):
+            code, output = self.restore_board(instance)
+        self.assertEqual(code, 2, output)
+        self.assertIn("injected image failure", output)
+        self.assertEqual(restore_state(data)["po_attachments_parity"], "failed")
+        self.assertEqual(self.readback(client), imported)
+        self.assertEqual(PoRecoveryAdmission(data, po).status()["reason"], "recovery_hold")
+        self.assertEqual((data / ".po-restore" / "plan.json").read_bytes(), plan_bytes)
+        later = store_image(data, session, content + b"later")
+        for _ in range(2):
+            code, output = self.restore_board(instance)
+            self.assertEqual(code, 0, output)
+            self.assertEqual(json.loads(output)["po_attachments_parity"], "complete")
+            self.assertEqual(self.readback(client), imported)
+            self.assertEqual((data / ".po-restore" / "plan.json").read_bytes(), plan_bytes)
+            for session, name, content in images:
+                self.assertEqual(attachment_path(data, session, name).read_bytes(), content)
+        self.assertEqual(later.read_bytes(), images[0][2] + b"later")
+        self.assertIsNone(PoRecoveryAdmission(data, po).status())
+        self.assertEqual(self.calls, [])
+        self.assertFalse(queue_dir(data).exists())
 
     def test_unfinished_plan_with_another_source_digest_is_refused_by_field_through_restore_board(self):
         board = self.capture(po_records(), "plan-source")

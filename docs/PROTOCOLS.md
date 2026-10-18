@@ -4815,8 +4815,9 @@ form (`application/x-www-form-urlencoded`) with `request_id`, `product`, `goal`,
 unknown field is refused.
 
 Instance checkpoints capture the complete PO SQL ledger and conversation, the PO queue and the
-session images as inert files; they do not import/rebind PO state, run the queue or restore
-attachments. Coverage, fields and recovery limits are specified in [Recovery: PO SQL
+session images. Recovery imports PO SQL with restored contexts and publishes native attachment
+bytes before admission finishes; the queue stays inert and historical absolute image paths are
+not remapped. Coverage, fields and recovery limits are specified in [Recovery: PO SQL
 capture](RECOVERY.md#po-sql-capture).
 
 A `/po` `request_id` belongs to one operation

@@ -13,6 +13,7 @@ import hashlib
 import os
 import re
 import stat
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +32,10 @@ class AttachmentRefused(ValueError):
 
 class AttachmentCaptureError(RuntimeError):
     """The stored images cannot be captured whole and exactly; nothing of them is quoted."""
+
+
+class AttachmentPublicationError(ValueError):
+    """A captured image cannot reach native parity without replacing or trusting unsafe content."""
 
 
 def image_kind(data: bytes) -> str:
@@ -163,6 +168,114 @@ def stored_image_matches(name: str, data: bytes) -> bool:
         return False
     return (0 < len(data) <= MAX_ATTACHMENT_BYTES
             and name == f"{hashlib.sha256(data).hexdigest()}.{kind}")
+
+
+def publish_image(data_dir: Path, item: StoredAttachment, data: bytes) -> None:
+    """Publish exact captured bytes privately without overwrite, syncing file and ancestry on every retry."""
+    from ummanu.po.recovery_admission import RecoveryAdmissionError, recovery_target_lock
+
+    shown = f"PO image publication session {item.session_id} attachment {item.name}"
+    try:
+        attachments_dir(data_dir, item.session_id)
+        if item.size != len(data) or not stored_image_matches(item.name, data):
+            raise AttachmentPublicationError("captured bytes do not match size, name or image type")
+        if data_dir.resolve(strict=True) != data_dir.absolute():
+            raise AttachmentPublicationError("data directory is not canonical")
+        with recovery_target_lock(data_dir), ExitStack() as stack:
+            root = os.open(data_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            stack.callback(os.close, root)
+            _publication_identity(root, directory=True, private=False)
+            directories = [root]
+            for name in (*_SESSIONS, item.session_id, "attachments"):
+                parent = directories[-1]
+                opened = open_beneath(parent, [name], want_directory=True, missing_ok=True)
+                if opened is None:
+                    try:
+                        os.mkdir(name, 0o700, dir_fd=parent)
+                    except FileExistsError:
+                        pass
+                    opened = open_beneath(parent, [name], want_directory=True)
+                stack.callback(os.close, opened)
+                _publication_identity(opened, directory=True)
+                directories.append(opened)
+            _publish_image_beneath(directories[-1], item, data)
+            # Existing names may come from a call interrupted before any ancestor's sync.
+            for directory in reversed(directories):
+                os.fsync(directory)
+    except (AttachmentPublicationError, AttachmentRefused, RecoveryAdmissionError) as exc:
+        raise AttachmentPublicationError(f"{shown}: {exc}") from None
+    except BeneathRefused as exc:
+        raise AttachmentPublicationError(f"{shown}: unsafe target ({exc.reason})") from None
+    except OSError as exc:
+        raise AttachmentPublicationError(f"{shown}: {exc.strerror or type(exc).__name__}") from None
+
+
+def _publication_identity(handle: int, *, directory: bool, private: bool = True) -> None:
+    info = os.fstat(handle)
+    mode = 0o700 if directory else 0o600
+    unsafe_mode = stat.S_IMODE(info.st_mode) != mode if private else bool(info.st_mode & 0o022)
+    if info.st_uid != os.geteuid() or unsafe_mode:
+        raise AttachmentPublicationError("target owner or permissions are unsafe")
+
+
+def _read_published(directory: int, item: StoredAttachment, data: bytes) -> bool:
+    handle = open_beneath(directory, [item.name], want_directory=False, missing_ok=True)
+    if handle is None:
+        return False
+    try:
+        _publication_identity(handle, directory=False)
+        before = os.fstat(handle)
+        if before.st_size != item.size or before.st_nlink != 1:
+            raise AttachmentPublicationError("target size or link count conflicts with capture")
+        chunks = []
+        remaining = item.size + 1
+        while remaining and (chunk := os.read(handle, min(remaining, 1 << 20))):
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if b"".join(chunks) != data:
+            raise AttachmentPublicationError("target bytes conflict with capture")
+        os.fsync(handle)
+        after = os.fstat(handle)
+        named = os.stat(item.name, dir_fd=directory, follow_symlinks=False)
+        if ((before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+                or (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino)):
+            raise AttachmentPublicationError("target changed during readback")
+    finally:
+        os.close(handle)
+    return True
+
+
+def _publish_image_beneath(directory: int, item: StoredAttachment, data: bytes) -> None:
+    staged_name = f".{item.name}.restore.tmp"
+    staged = open_beneath(directory, [staged_name], want_directory=False, missing_ok=True)
+    if staged is not None:
+        try:
+            _publication_identity(staged, directory=False)
+        finally:
+            os.close(staged)
+        os.unlink(staged_name, dir_fd=directory)
+    if _read_published(directory, item, data):
+        return
+    staged = os.open(staged_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o600, dir_fd=directory)
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(staged, view)
+            if written == 0:
+                raise AttachmentPublicationError("staged write made no progress")
+            view = view[written:]
+        os.fsync(staged)
+    finally:
+        os.close(staged)
+    try:
+        os.link(staged_name, item.name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+    except FileExistsError:
+        pass
+    os.unlink(staged_name, dir_fd=directory)
+    if not _read_published(directory, item, data):
+        raise AttachmentPublicationError("target vanished after publication")
 
 
 _SESSIONS = (WORKSPACE_NAME, "sessions")
