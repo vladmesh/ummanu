@@ -45,6 +45,7 @@ from ummanu.routing_journal import (
     routing_payload,
 )
 from ummanu.runtime.head import HeadRun as LifecycleHeadRun, HeadSpec, TaskRef
+from ummanu.sprint_observer import none_choice
 from ummanu.sprints import refresh_active_sprint_projects
 from ummanu.tasks import (
     _STATE_BY_COLUMN,
@@ -1654,7 +1655,16 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
                 "INSERT INTO projects (project_id, enabled, registry_present) VALUES ('ummanu', true, true)"
             )
             ensure_sprint_row(destination, "sprint:test")
+        self.prepare_sprint_export(destination)
         return destination
+
+    def prepare_sprint_export(self, client):
+        """Give minimal legacy sprint parents a closed, explicitly unobserved export shape."""
+        with client.transaction():
+            for sprint in client.sprints.rows():
+                client.sprints.save_metadata(int(sprint["id"]), {
+                    "sprint_status": "closed", "sprint_observer": json.dumps(none_choice()),
+                })
 
     def test_kind_review_and_live_impact_survive_export_and_restore(self) -> None:
         self.create_kind("ummanu-550", "research", live_impact=True, description=self.BOUNDS)
@@ -1672,12 +1682,12 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         }
         data_dir = Path(self.tmpdir.name) / "round-trip"
         init_layout(data_dir)
-        # The subject is the cards: the sprint set comes from a store that holds none.
+        self.prepare_sprint_export(self.client)
         export_board(
             data_dir,
             instance_dir=Path(self.tmpdir.name),
             reader=self.writer.reader,
-            sprint_client=self.card_store(empty_seed()),
+            sprint_client=self.client,
         )
         exported = {
             card["reference"]: card
@@ -1733,11 +1743,12 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.set_card_metadata("old-1", record_type="task", project="ummanu", task_type="research")
         data_dir = Path(self.tmpdir.name) / "round-trip"
         init_layout(data_dir)
+        self.prepare_sprint_export(self.client)
         export_board(
             data_dir,
             instance_dir=Path(self.tmpdir.name),
             reader=self.writer.reader,
-            sprint_client=self.card_store(empty_seed()),
+            sprint_client=self.client,
         )
 
         destination = self.restore_destination()

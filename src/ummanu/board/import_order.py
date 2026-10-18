@@ -78,13 +78,13 @@ IMPORT_PHASES: tuple[ImportPhase, ...] = (
         ),
     ),
     ImportPhase("sprint_comments", ("sprint_comments",)),
+    ImportPhase("sprint_close", ("sprints", "sprint_decisions")),
     ImportPhase("origin_returns", ("origin_returns",)),
     ImportPhase("owner_events", ("owner_events",)),
     ImportPhase("po_sql", ("po_sessions", "po_turns", "po_feed", "po_requests")),
 )
 
-#: Sprint close decisions are outside board export content.
-NOT_IMPORTED: frozenset[str] = frozenset({"sprint_decisions"})
+NOT_IMPORTED: frozenset[str] = frozenset()
 
 
 def phase_rank(name: str) -> int:

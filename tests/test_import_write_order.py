@@ -30,6 +30,7 @@ from ummanu.board.import_order import (
     phase_rank,
     record_rank,
 )
+from ummanu.board.sql_sprints import SqlSprintRecords
 from ummanu.task_restore import RestoreCardObligation, _foreign_key_rank
 
 
@@ -158,6 +159,7 @@ _STEPS = (
     (task_restore, "close_restored_cards_batched", "closure"),
     (restore, "_reconcile_restored_order", "order"),
     (restore, "_import_sprints", "sprints"),
+    (SqlSprintRecords, "restore_close_facts", "sprint_close"),
     (restore.OriginOutboxStore, "restore", "origin_returns"),
     (restore.OwnerEventStore, "restore", "owner_events"),
 )
@@ -191,6 +193,8 @@ class ImportFollowsTheOrderTests(unittest.TestCase):
                 ("ummanu.restore._normalized_sprints", mock.Mock(return_value=[])),
                 ("ummanu.restore.read_checkpoint_outbox", mock.Mock(return_value=[])),
                 ("ummanu.restore.read_checkpoint_owner_events", mock.Mock(return_value=[])),
+                ("ummanu.restore.read_checkpoint_close_facts", mock.Mock(return_value={})),
+                ("ummanu.board.sql_sprints.SqlSprintRecords.export_close_facts", mock.Mock(return_value={})),
                 ("ummanu.restore._checkpoint_po", mock.Mock(return_value=None)),
                 ("ummanu.restore.OriginOutboxStore.export", mock.Mock(return_value=[])),
                 ("ummanu.restore._check_sql_sprint_current_tasks", mock.Mock()),
@@ -200,6 +204,7 @@ class ImportFollowsTheOrderTests(unittest.TestCase):
                 ("ummanu.restore.TaskReader", mock.Mock(return_value=reader)),
                 ("ummanu.restore.TaskWriter", mock.Mock(return_value=writer)),
                 ("ummanu.restore._existing_board_cards", mock.Mock(return_value={})),
+                ("ummanu.task_restore._restore_inventory", mock.Mock(return_value={})),
                 ("ummanu.restore._existing_sprints", mock.Mock(return_value={})),
                 ("ummanu.restore._restore_request_prefix", mock.Mock(return_value="restore:t:")),
                 ("ummanu.restore._validate_deferred_restore_comments", mock.Mock()),
@@ -212,7 +217,9 @@ class ImportFollowsTheOrderTests(unittest.TestCase):
                 stack.enter_context(mock.patch(target, value))
             for module, name, phase in _STEPS:
                 stack.enter_context(mock.patch.object(module, name, step(phase)))
-            restore._import_normalized_board(Path("/nonexistent-restore-data"), client=mock.Mock())
+            client = mock.Mock()
+            client.sprints = SqlSprintRecords(client)
+            restore._import_normalized_board(Path("/nonexistent-restore-data"), client=client)
 
         self.assertEqual(called, [phase for _module, _name, phase in _STEPS])
         ranks = [phase_rank(phase) for phase in called]

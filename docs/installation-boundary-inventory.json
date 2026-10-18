@@ -54,7 +54,7 @@
     "_named_path": {"owner": "support", "baseline_lines": [1055, 1058], "ast_sha256": "c532669eead30834a237c7d38c90454c023f49b3f78a511d1d0ba09f6058421c"},
     "_holds_only": {"owner": "support", "baseline_lines": [1061, 1070], "ast_sha256": "f8d1a968a522afef3441c86f535b5529b9040dcfe0fb73c85bc2f66805c1be66"},
     "_checked_data_target": {"owner": "support", "baseline_lines": [1073, 1098], "ast_sha256": "afdcd76bc1a7ba02bd5d6a5951ac11cad439f6ba60a645fa3cb84b261eb4c73e"},
-    "materialize_checkpoint": {"owner": "materialize", "baseline_lines": [1101, 1215], "ast_sha256": "d93ed12ab047028603f795800dba209f14a37228e71bb45e2f46f107fa6e98c2"},
+    "materialize_checkpoint": {"owner": "materialize", "baseline_lines": [1101, 1215], "ast_sha256": "493952caa3ad660104619f2ab67cd33114e575a08e17745dc487ce3f905e4af5"},
     "_restored_run_journals": {"owner": "materialize", "baseline_lines": [1218, 1252], "ast_sha256": "9bbc864df2e43aa56b0201a9b1a1b816ffb0af91494a14db2346a680e4594e6a"},
     "_render_restored_journal": {"owner": "materialize", "baseline_lines": [1255, 1263], "ast_sha256": "38def3ec1702d23061ad4ce578ba3a036668b2ce4c0af7849627a2392fc7061e"},
     "_live_run_journals": {"owner": "materialize", "baseline_lines": [1266, 1283], "ast_sha256": "10ab372ff5b42d31fbe1b01ba7bcdbc37c386bd5f770e612277747df41c88e72"},
@@ -80,7 +80,7 @@
     "_product_root": {"owner": "commands", "baseline_lines": [1852, 1870], "ast_sha256": "f95532a8e5e6dda06b0eeafc8073b970cebe4f5dc5baa5e1d6d626f0627886dd"},
     "_restore_board_and_po": {"owner": "commands", "baseline_lines": null, "ast_sha256": "a3c144dd0347d7222003c0b65330fd2cde2b548622df6cd4e0e67b21a421356f"},
     "_restore_without_credentials": {"owner": "commands", "baseline_lines": [1873, 1944], "ast_sha256": "6d84fbeb14e649e0fb268fe7f0dd55833233254467a135003e159f2178d7e7a5"},
-    "install": {"owner": "commands", "baseline_lines": [1947, 2301], "ast_sha256": "aaf3e17df17ee0aa609e8b7d5e813e092ba456d7258eaba50c95a90d252d0598"},
+    "install": {"owner": "commands", "baseline_lines": [1947, 2301], "ast_sha256": "588abbeda099b74e68e1969d9d6c84a4e11fb3e027ab423ad20bd0647c41b145"},
     "run_install": {"owner": "commands", "baseline_lines": [2304, 2329], "ast_sha256": "6b36453de36e76db1bfe3e1df7ea528711edf31cc4d957805f2a5a1de82a16fc"},
     "add_bootstrap_credential_arguments": {"owner": "credentials", "baseline_lines": [2332, 2343], "ast_sha256": "e4af049da29bf1bd49bc45d48a6809d592f10511aae85b0edb7572500d7c7b43"},
     "add_install_commands": {"owner": "commands", "baseline_lines": [2346, 2389], "ast_sha256": "0ff459a0bc401b78f8584c006b907b7d7e91ca4695d083f2517124e20c501c59"}

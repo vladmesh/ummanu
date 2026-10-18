@@ -188,14 +188,20 @@ class ServiceFixture(unittest.TestCase):
             pass
 
     def kill_everything(self) -> None:
+        waiters = []
+        for service in self.services:
+            service.stop()
+            with service.runner._lock:
+                waiters.extend(service.runner._live.values())
         self.gate.touch()
         for turn in self.store().running_turns():
             if turn.pid:
                 self.kill_group(turn.pid)
-        for service in self.services:
-            service.stop()
-            for live in list(service.runner._live.values()):
-                self.kill_group(live.process.pid)
+        for live in waiters:
+            self.kill_group(live.process.pid)
+        for live in waiters:
+            live.thread.join(10)
+            self.assertFalse(live.thread.is_alive(), "PO fixture waiter did not stop before cleanup")
 
     def store(self) -> FakePoStore:
         return FakePoStore(self.board)

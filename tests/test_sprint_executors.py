@@ -14,7 +14,6 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 from tests.fakes.sprints import (
     KEEP_THE_ISSUE_OPEN,
@@ -38,7 +37,7 @@ from ummanu.sprint_observer import (
     parse_executor,
 )
 from ummanu.sprints import SprintReader, SprintWriter
-from ummanu.tasks import TaskError, TaskWriter
+from ummanu.tasks import TaskError, TaskReader, TaskWriter
 
 UNSET_BOTH = {"worker": executor_unset(), "reviewer": executor_unset()}
 
@@ -440,12 +439,18 @@ class SprintExecutorRecoveryTests(SprintBackendFixture, unittest.TestCase):
         export_board(
             source_data,
             instance_dir=instance,
-            # The export's publication gate is the card audit of the board it reads.
-            reader=mock.Mock(export=mock.Mock(return_value=[]), client=source),
+            reader=TaskReader(source),
             sprint_client=source,
         )
         for name in ("cards.json", "sprints.json"):
             shutil.copy(source_data / "board" / name, target_data / "board" / name)
+        # Pin recovery consumes the released legacy entity projection without close coverage.
+        (target_data / "board" / "cards.json").write_text(json.dumps({"version": 1, "cards": []}))
+        path = target_data / "board" / "sprints.json"
+        payload = json.loads(path.read_text())
+        for sprint in payload["sprints"]:
+            sprint.pop("close_facts")
+        path.write_text(json.dumps(payload))
         (target_data / "board" / "export.json").write_text(json.dumps({"version": 1}))
         exported = json.loads((target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
         client = self.make_empty_sprint_client()

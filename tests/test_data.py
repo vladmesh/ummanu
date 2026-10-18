@@ -18,6 +18,7 @@ from tests.owner_checkpoint_fixtures import bell_rows
 from tests.po_checkpoint_fixtures import FINISHED, MOMENT, po_records, seed_po
 from tests.sql_backend_fixtures import card_store
 from ummanu import memory_journal
+from ummanu.board.close_checkpoint import read_checkpoint_close_facts, require_close_set_parity
 from ummanu.board.origin_checkpoint import read_checkpoint_outbox, require_outbox_parity
 from ummanu.board.origin_outbox import OriginOutboxStore
 from ummanu.board.owner_checkpoint import read_checkpoint_owner_events, require_owner_parity
@@ -255,6 +256,46 @@ class ExportTests(unittest.TestCase):
             export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
             require_owner_parity(rows, read_checkpoint_owner_events(root / "board"))
         self.assertEqual(store.unread_count(), 0)
+
+    def test_close_and_reopen_between_card_and_sprint_reads_stay_outside_the_cut(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = _write_project_registry(root, "ummanu", "secretary-instance", "other")
+            client = sprint_store(self, instance_dir=instance)
+            writer = SprintWriter(client, data_dir=root, instance=instance)
+            reference = writer.create(
+                role="po", actor="po", goal="Coherent close facts", repositories=[str(root / "repo")],
+                product="ummanu", issues=["issue:open"], projects=["ummanu"], observer=none_choice(),
+                request_id="create-close-cut",
+            )["sprint"]["ref"]
+            other = SqlCardClient(client.credentials, instance)
+            self.addCleanup(other.close)
+            reader = TaskReader(client)
+            original = reader.export
+            expected = client.sprints.export_close_facts()
+
+            def read_then_close():
+                cards = original()
+                concurrent = SprintWriter(other, data_dir=root, instance=instance)
+                concurrent.close(
+                    role="po", actor="po", reference=reference, request_id="close-during-cut",
+                    decisions={"issues": [{"ref": "issue:open", "verdict": "open", "reason": "retained"}], "cards": []},
+                    reason="closed after cut",
+                )
+                concurrent.reopen(
+                    role="po", actor="po", reference=reference, observer=none_choice(),
+                    request_id="reopen-during-cut",
+                )
+                return cards
+
+            with mock.patch.object(reader, "export", side_effect=read_then_close):
+                export_board(root, instance_dir=instance, reader=reader, sprint_client=client)
+            require_close_set_parity(expected, read_checkpoint_close_facts(root / "board"))
+            current = other.sprints.export_close_facts()
+            self.assertEqual(current[reference]["close_reason"], "closed after cut")
+            self.assertEqual(len(current[reference]["decisions"]), 1)
+            export_board(root, instance_dir=instance, reader=reader, sprint_client=client)
+            require_close_set_parity(current, read_checkpoint_close_facts(root / "board"))
 
     def test_owner_answer_between_card_and_bell_reads_cannot_tear_attention(self):
         with tempfile.TemporaryDirectory() as tmp:

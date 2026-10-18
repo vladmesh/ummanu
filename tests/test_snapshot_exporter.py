@@ -26,6 +26,7 @@ from tests.restore_fixtures import _restore_card
 from tests.sql_backend_fixtures import card_store
 from ummanu import checkpoint, secret_store, state_repo
 from ummanu.board.checkpoint_layout import LOGICAL_FILES, open_checkpoint_board
+from ummanu.board.close_checkpoint import close_coverage
 from ummanu.board.origin_checkpoint import read_checkpoint_outbox, require_outbox_parity
 from ummanu.board.origin_outbox import OriginOutboxStore
 from ummanu.board.owner_checkpoint import (
@@ -216,6 +217,53 @@ class SnapshotCase(unittest.TestCase):
 
 
 class SnapshotRepositoryTests(SnapshotCase):
+    def test_declared_close_damage_and_escaped_secret_preserve_committed_tip_and_bytes(self):
+        board = self.data_dir / "board"
+        sprint = {
+            "reference": "sprint:retained", "goal": "Retained close", "definition_of_done": "",
+            "status": "open", "repositories": [], "current_task": "", "budget": {"by_type": {}},
+            "resume": None, "audit": {}, "comments": [],
+            "close_facts": {"close_reason": "retained", "closeout_document": None, "decisions": []},
+        }
+
+        def write(reason):
+            sprint["close_facts"]["close_reason"] = reason
+            payload = (json.dumps(sprint) + "\n").encode()
+            (board / "sprints.ndjson").write_bytes(payload)
+            (board / "export.json").write_text(json.dumps({
+                "version": 2, "card_count": 1, "sprint_count": 1,
+                "sprint_close": close_coverage([sprint], payload),
+            }))
+            write_outbox(board, [])
+
+        write("retained")
+        first = self.exporter().write()
+        self.assertEqual(first.status, "committed", first.reason)
+        checkout = self.root / "close-checkout"
+        git(self.root, "clone", str(self.repo), str(checkout))
+        self.assertEqual(
+            open_checkpoint_board(checkout / "state" / "board").read_bytes("sprints.ndjson"),
+            (board / "sprints.ndjson").read_bytes(),
+        )
+        saved = {path: self.committed(path) for path in self.tree() if path.startswith("state/board/")}
+        secret = 'known\n"private\tsecret'
+        for damage in ("missing", "fields", "secret"):
+            with self.subTest(damage=damage):
+                write(secret if damage == "secret" else "retained")
+                if damage == "missing":
+                    (board / "sprints.ndjson").unlink()
+                elif damage == "fields":
+                    value = (board / "sprints.ndjson").read_text().replace('"decisions": []', '"decisions": null')
+                    (board / "sprints.ndjson").write_text(value)
+                with mock.patch("ummanu.secret_store.redaction_values", return_value=(secret,)):
+                    result = self.exporter().write()
+                self.assertEqual(result.status, "blocked", result.reason)
+                self.assertEqual(self.tip(), first.commit)
+                self.assertEqual(
+                    {path: self.committed(path) for path in self.tree() if path.startswith("state/board/")}, saved,
+                )
+                self.assertNotIn("private", result.reason)
+
     def test_committed_owner_history_materializes_flat_and_split_and_imports_normally(self):
         rows = bell_rows(513)
         self.seed_board([_restore_card()])
