@@ -12,7 +12,12 @@ from unittest import mock
 from tests.po_checkpoint_fixtures import po_records, seed_po
 from tests.sql_backend_fixtures import PostgresBoard
 from ummanu.board.po_checkpoint import PO_COLUMNS, PoCheckpointError, export_po_records
-from ummanu.board.po_restore import PoRestoreStore, normalized_po_records, plan_po_restore, require_po_parity
+from ummanu.board.po_restore import (
+    PoRestoreStore,
+    normalized_po_records,
+    prepare_po_restore,
+    require_po_parity,
+)
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.board.sql_rows import rfc3339
 from ummanu.po.store import PoStore, RequestConflict, SessionClosed
@@ -39,7 +44,9 @@ class PoRestorePostgresTests(unittest.TestCase):
         with source.transaction():
             self.records = export_po_records(source)
         self.assertEqual(self.records, records)
-        self.plan = plan_po_restore(self.records, self.root / "data", interrupted_at=datetime(2026, 10, 1, tzinfo=UTC))
+        self.data = self.root / "data"
+        self.data.mkdir()
+        self.plan = prepare_po_restore(self.records, self.data, interrupted_at=datetime(2026, 10, 1, tzinfo=UTC))
         self.expected = normalized_po_records(self.records, self.plan)
 
     def readback(self):
@@ -85,6 +92,10 @@ class PoRestorePostgresTests(unittest.TestCase):
             self.restore.restore(self.records, self.plan)
             raise RuntimeError("owner rollback")
         self.assertEqual(self.readback(), {table: [] for table in PO_COLUMNS})
+        with mock.patch("uuid.uuid4", side_effect=AssertionError("retry generated an id")):
+            self.plan = prepare_po_restore(self.records, self.data,
+                                           interrupted_at=datetime(2026, 11, 1, tzinfo=UTC))
+        self.assertEqual(normalized_po_records(self.records, self.plan), self.expected)
         self.import_records()
         require_po_parity(self.expected, self.readback())
 
