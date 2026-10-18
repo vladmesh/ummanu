@@ -197,19 +197,24 @@ def _card(reference: str, *, closed: bool = False) -> dict[str, Any]:
 
 class RefusedCardBatchTests(unittest.TestCase):
     def test_existing_ownership_metadata_conflict_refuses_before_initialization(self) -> None:
-        store = PoisoningStore(refuse="saveTaskMetadata")
-        card = _card(ISSUE)
-        card["metadata"]["issue_priority"] = "P1"
-        store.metadata = {**card["metadata"], "issue_priority": "P2"}
-        existing = {ISSUE: store.call("getAllTasks", project_id=BOARD, status_id=1)[0]}
-        writer = SimpleNamespace(client=store, audit=_Audit())
-        with self.assertRaisesRegex(TaskError, "different metadata"):
-            restore_cards_batched(
-                writer, [card], board_id=BOARD, columns=COLUMNS, swimlanes={},
-                existing=existing, request_prefix="restore:t:",
-            )
-        self.assertEqual(store.metadata["issue_priority"], "P2")
-        self.assertEqual(store.calls[-1], "getTaskMetadata")
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                store = PoisoningStore(refuse="createTask" if missing else "saveTaskMetadata")
+                card = _card(ISSUE)
+                card["metadata"]["issue_priority"] = "P1"
+                cards = [card, _card("issue:fedcba9876543210fedc")] if missing else [card]
+                store.metadata = {**card["metadata"], "issue_priority": "P2"}
+                existing = {ISSUE: store.call("getAllTasks", project_id=BOARD, status_id=1)[0]}
+                writer = SimpleNamespace(client=store, audit=_Audit())
+                with self.assertRaisesRegex(TaskError, "different metadata"):
+                    restore_cards_batched(
+                        writer, cards, board_id=BOARD, columns=COLUMNS, swimlanes={},
+                        existing=existing, request_prefix="restore:t:",
+                    )
+                self.assertEqual(store.metadata["issue_priority"], "P2")
+                self.assertEqual(store.calls[-1], "getTaskMetadata")
+                self.assertEqual(writer.audit.staged, {})
+                self.assertEqual(writer.audit.committed, {})
 
     def _create(self, store: PoisoningStore) -> TaskError:
         writer = SimpleNamespace(client=store, audit=_Audit())

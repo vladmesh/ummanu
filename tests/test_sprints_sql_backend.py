@@ -126,6 +126,12 @@ class SqlSprintAtomicityTests(SprintFixture):
                     self.assertEqual(TaskReader(app).export(), conflicting)
                     self.assertEqual(app.sprints.export_close_facts(), {})
                     self.assertEqual(TaskWriter(app, data_dir=data).audit.events(), history)
+                    probe = SqlCardClient(config.for_role("app"), self.instance)
+                    self.addCleanup(probe.close)
+                    with probe.read_snapshot():
+                        self.assertEqual(TaskReader(probe).export(), conflicting)
+                        self.assertEqual(probe.sprints.export_close_facts(), {})
+                        self.assertEqual(TaskWriter(probe, data_dir=data).audit.events(), history)
                     with app.transaction():
                         app._execute("UPDATE issues SET priority='P1' WHERE issue_id='open'")
                 with self.assertRaisesRegex(RuntimeError, "caller rollback"), app.transaction():
