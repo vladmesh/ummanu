@@ -536,6 +536,10 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertGreater(actual[SPRINTS[1]]["decisions"][0]["decision_id"], actual[SPRINTS[0]]["decisions"][0]["decision_id"])
 
     def test_committed_native_close_facts_materialize_flat_and_split_before_normal_import(self):
+        installation_commands.materialize_head_registry(
+            self.fixture.source, PRODUCT_ROOT,
+            installation_commands._validated_instance(self.fixture.source), None,
+        )
         checkout = self.root / "selected-checkpoint"
         git(self.root, "clone", "--branch", SNAPSHOT_REF.removeprefix("refs/heads/"), str(self.fixture.remote), str(checkout))
         board = open_checkpoint_board(checkout / "state" / "board")

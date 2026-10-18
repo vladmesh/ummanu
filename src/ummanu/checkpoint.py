@@ -61,7 +61,11 @@ from ummanu.board.checkpoint_layout import (
     part_name,
     publish_split_board,
 )
-from ummanu.board.close_checkpoint import CloseCheckpointError, read_checkpoint_close_facts, scan_close_secrets
+from ummanu.board.close_checkpoint import (
+    CloseCheckpointError,
+    read_checkpoint_close_facts,
+    scan_close_secrets,
+)
 from ummanu.board.models import Event
 from ummanu.board.origin_checkpoint import OUTBOX_FILE
 from ummanu.board.owner_checkpoint import (

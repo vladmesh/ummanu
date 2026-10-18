@@ -517,6 +517,18 @@ class CheckpointUnitTests(unittest.TestCase):
 
 
 class BoardCutTests(unittest.TestCase):
+    def test_export_refuses_a_separate_sprint_connection_before_reading_either_store(self):
+        client = mock.Mock(spec=SqlCardClient)
+        other = mock.Mock(spec=SqlCardClient)
+        reader = SimpleNamespace(client=client, export=mock.Mock())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(RuntimeError, "coherent board snapshot connection"):
+                data.export_board(root, instance_dir=root, reader=reader, sprint_client=other)
+        reader.export.assert_not_called()
+        client.read_snapshot.assert_not_called()
+        other._query.assert_not_called()
+
     def test_backend_failure_is_an_export_refusal(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             data, "board_client", side_effect=TaskError("backend_error", "board unavailable", 1)

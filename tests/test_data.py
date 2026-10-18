@@ -282,7 +282,10 @@ class ExportTests(unittest.TestCase):
                     decisions={"issues": [{"ref": "issue:open", "verdict": "open", "reason": "retained"}], "cards": []},
                     reason="closed after cut",
                 )
-                concurrent.reopen(role="po", actor="po", reference=reference, request_id="reopen-during-cut")
+                concurrent.reopen(
+                    role="po", actor="po", reference=reference, observer=none_choice(),
+                    request_id="reopen-during-cut",
+                )
                 return cards
 
             with mock.patch.object(reader, "export", side_effect=read_then_close):

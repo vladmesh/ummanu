@@ -234,6 +234,7 @@ class SnapshotRepositoryTests(SnapshotCase):
                 "version": 2, "card_count": 1, "sprint_count": 1,
                 "sprint_close": close_coverage([sprint], payload),
             }))
+            write_outbox(board, [])
 
         write("retained")
         first = self.exporter().write()

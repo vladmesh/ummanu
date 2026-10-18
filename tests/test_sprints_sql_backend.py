@@ -26,7 +26,7 @@ from ummanu.board.sql_sprints import sprint_key
 from ummanu.data import export_board, init_layout
 from ummanu.product_issues import ProductIssueStore
 from ummanu.restore import RestoreError, import_normalized_board
-from ummanu.sprint_observer import head_choice
+from ummanu.sprint_observer import head_choice, none_choice
 from ummanu.sprints import SprintReader, SprintWriter
 from ummanu.tasks import TaskError, TaskReader, TaskWriter
 
@@ -77,10 +77,11 @@ class SqlSprintAtomicityTests(SprintFixture):
         )["sprint"]["ref"]
         products.close_issue(reference=issue, reason="invalid", actor="operator", request_id="close-confirmed-issue")
         tasks = TaskWriter(self.client, data_dir=self.tmp.name)
-        cards = [tasks.create(
-            role="po", actor="operator", project="ummanu", task_type="code", title=name,
-            target="ready", sprint=reference, request_id=f"create-mixed-{name}",
-        )["task"]["ref"] for name in ("drop", "confirm")]
+        with as_observer(reference):
+            cards = [tasks.create(
+                role="observer", actor="observer", project="ummanu", task_type="code", title=name,
+                target="ready", sprint=reference, request_id=f"create-mixed-{name}",
+            )["task"]["ref"] for name in ("drop", "confirm")]
         with mock.patch.object(sql_sprints, "_now", return_value=datetime(2026, 9, 1, 0, 0, 0, 12, tzinfo=UTC)):
             self.writer.close(
                 role="po", actor="operator", reference=reference, request_id="close-mixed",
@@ -94,7 +95,13 @@ class SqlSprintAtomicityTests(SprintFixture):
         data = Path(self.tmp.name) / "capture"
         init_layout(data)
         export_board(data, instance_dir=self.instance, reader=TaskReader(self.client), sprint_client=self.client)
-        return data, self.client.sprints.export_close_facts()
+        facts = self.client.sprints.export_close_facts()
+        rows = facts[reference]["decisions"]
+        self.assertEqual(len(rows), 4)
+        self.assertEqual({row["request_id"] for row in rows}, {"close-mixed"})
+        self.assertEqual({row["decided_at"] for row in rows}, {"2026-09-01T00:00:00.000012Z"})
+        self.assertEqual({row["actual"] for row in rows}, {None, "invalid", "ready"})
+        return data, facts
 
     def test_native_mixed_close_import_remaps_ids_and_caller_rollback_removes_all_facts(self):
         data, expected = self._export_mixed_close()
@@ -145,7 +152,10 @@ class SqlSprintAtomicityTests(SprintFixture):
             decisions={"issues": [{"ref": "issue:open", "verdict": "open", "reason": "retained"}], "cards": []},
             reason="retained close reason",
         )
-        self.writer.reopen(role="po", actor="operator", reference="sprint:atomic", request_id="reopen-with-facts")
+        self.writer.reopen(
+            role="po", actor="operator", reference="sprint:atomic", observer=head_choice("codex-observer"),
+            request_id="reopen-with-facts",
+        )
         data = Path(self.tmp.name) / "capture"
         init_layout(data)
         export_board(data, instance_dir=self.instance, reader=TaskReader(self.client), sprint_client=self.client)
@@ -155,7 +165,10 @@ class SqlSprintAtomicityTests(SprintFixture):
         self.assertEqual(SprintReader(target).show("sprint:atomic")["status"], "open")
 
     def test_native_legacy_sprint_close_with_zero_decisions_has_explicit_coverage(self):
-        self.writer.restore_create(reference="sprint:legacy", goal="Legacy sprint", request_id="restore-legacy-sprint")
+        self.writer.restore_create(
+            reference="sprint:legacy", goal="Legacy sprint", observer=none_choice(),
+            request_id="restore-legacy-sprint",
+        )
         self.writer.close(role="po", actor="operator", reference="sprint:legacy", request_id="close-legacy-sprint")
         data = Path(self.tmp.name) / "capture"
         init_layout(data)
