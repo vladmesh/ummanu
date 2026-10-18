@@ -10,7 +10,11 @@ from unittest import mock
 from tests.po_checkpoint_fixtures import po_records
 from ummanu.board.po_checkpoint import PoCheckpointError
 from ummanu.board.po_restore import (
-    INTERRUPTION_REASON, PoRestorePlan, PoRestoreStore, normalized_po_records, plan_po_restore,
+    INTERRUPTION_REASON,
+    PoRestorePlan,
+    PoRestoreStore,
+    normalized_po_records,
+    plan_po_restore,
     require_po_parity,
 )
 from ummanu.po.runner import PoRunner

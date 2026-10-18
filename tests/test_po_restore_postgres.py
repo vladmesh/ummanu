@@ -81,10 +81,9 @@ class PoRestorePostgresTests(unittest.TestCase):
         self.assertEqual(self.po.session("closed").state, "closed")
 
     def test_import_does_not_commit_its_callers_work(self):
-        with self.assertRaisesRegex(RuntimeError, "owner rollback"):
-            with self.client.transaction():
-                self.restore.restore(self.records, self.plan)
-                raise RuntimeError("owner rollback")
+        with self.assertRaisesRegex(RuntimeError, "owner rollback"), self.client.transaction():
+            self.restore.restore(self.records, self.plan)
+            raise RuntimeError("owner rollback")
         self.assertEqual(self.readback(), {table: [] for table in PO_COLUMNS})
         self.import_records()
         require_po_parity(self.expected, self.readback())
@@ -94,7 +93,7 @@ class PoRestorePostgresTests(unittest.TestCase):
         for stop in (1, 4, 9, 20):
             count = 0
 
-            def interrupt(sql, params=(), **kwargs):
+            def interrupt(sql, params=(), *, stop=stop, **kwargs):
                 nonlocal count
                 result = execute(sql, params, **kwargs)
                 if sql.startswith("INSERT INTO po_"):
@@ -103,9 +102,12 @@ class PoRestorePostgresTests(unittest.TestCase):
                         raise RuntimeError("interrupted")
                 return result
 
-            with self.subTest(stop=stop), mock.patch.object(self.client, "_execute", side_effect=interrupt):
-                with self.assertRaisesRegex(RuntimeError, "interrupted"):
-                    self.import_records()
+            with (
+                self.subTest(stop=stop),
+                mock.patch.object(self.client, "_execute", side_effect=interrupt),
+                self.assertRaisesRegex(RuntimeError, "interrupted"),
+            ):
+                self.import_records()
             self.assertEqual(self.readback(), {table: [] for table in PO_COLUMNS})
         self.import_records()
         self.import_records()
@@ -157,15 +159,18 @@ class PoRestorePostgresTests(unittest.TestCase):
                                      ("po_turns", "reason", "private-reason"),
                                      ("po_feed", "text", "private-message"),
                                      ("po_requests", "fingerprint", "f" * 64)):
-            def corrupt(sql, params=(), **kwargs):
+            def corrupt(sql, params=(), *, table=table, column=column, value=value, **kwargs):
                 result = execute(sql, params, **kwargs)
                 if sql.startswith(f"INSERT INTO {table} "):
                     execute(f"UPDATE {table} SET {column} = %s", (value,))
                 return result
 
-            with self.subTest(table=table), mock.patch.object(self.client, "_execute", side_effect=corrupt):
-                with self.assertRaises(PoCheckpointError) as failed:
-                    self.import_records()
+            with (
+                self.subTest(table=table),
+                mock.patch.object(self.client, "_execute", side_effect=corrupt),
+                self.assertRaises(PoCheckpointError) as failed,
+            ):
+                self.import_records()
             self.assertIn(f"field {column}:", str(failed.exception))
             self.assertNotIn(value, str(failed.exception))
             self.assertEqual(self.readback(), {name: [] for name in PO_COLUMNS})
