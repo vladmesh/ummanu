@@ -143,10 +143,8 @@ def may_name(text: str, fragments: tuple[str, ...]) -> bool:
 
 
 def imports(tree: ast.AST) -> tuple[ast.Import | ast.ImportFrom, ...]:
-    """All import statements, without walking expression trees that cannot contain them.
-
-    Python statement bodies include exception handlers and match cases. Imports cannot
-    occur inside an expression, decorator, argument, annotation or pattern.
+    """All imports in statement bodies, including exception handlers and match cases.
+    Expressions, decorators, arguments, annotations and patterns cannot contain imports.
     """
     pending = deque([tree])
     found = []
@@ -154,8 +152,9 @@ def imports(tree: ast.AST) -> tuple[ast.Import | ast.ImportFrom, ...]:
         node = pending.popleft()
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             found.append(node)
-        pending.extend(child for child in ast.iter_child_nodes(node)
-                       if isinstance(child, (ast.stmt, ast.ExceptHandler, ast.match_case)))
+        for field, children in ast.iter_fields(node):
+            if field in {"body", "orelse", "finalbody", "handlers", "cases"} and isinstance(children, list):
+                pending.extend(children)
     return tuple(found)
 
 

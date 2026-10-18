@@ -230,8 +230,8 @@ split, so a checkpoint's Git cost follows what changed instead of the size of th
   that does not extend the committed one (the first split checkpoint after a flat one, or rewritten
   history) is replaced from its first segment. Segments are cut at line ends and hold at most 32 MiB
   unless one line is longer, so no blob reaches the 100 MB file limit of the GitHub remote.
-- `export.json` and `origin_returns.ndjson` stay single files. The outbox contains mutable delivery
-  state and is read through the same flat/split reader.
+- `export.json`, `origin_returns.ndjson` and `po_sql.json` stay single files. The outbox and PO SQL
+  contain mutable state and are read through the same flat/split reader.
 - A logical file's bytes are the concatenation of its parts in index order; a gap in the sequence or
   an unexpected entry is a broken checkpoint, not a shorter one.
 
@@ -484,12 +484,12 @@ malformed or unreadable new file cannot revive legacy success. The production ti
 checkpoint work nor its failures into its own outcome.
 
 The board cut is one read-only REPEATABLE READ transaction over cards, Product/Issue rows, batched
-metadata and comments, request/audit history, sprints and the complete origin-return outbox on the same
-client. Completed deliveries are included and the dispatcher's 500-row pending limit does not apply.
-`board-bulk.lock` is
-shared only for these reads, preventing overlap with bulk recovery; normal transactional board
-writers can commit while the cut sees its earlier snapshot. Dispatcher state and run JSON files can
-be replaced while exported: a read sees one complete version through atomic rename, and append-only
+metadata and comments, request/audit history, sprints, the complete origin-return outbox and all four
+PO SQL tables on the same client. Completed deliveries and closed PO sessions are included without
+UI or dispatcher limits. `board-bulk.lock` is shared only for these reads, preventing overlap with
+bulk recovery; normal transactional board writers can commit while the cut sees its earlier snapshot.
+Dispatcher state and run JSON files can be replaced while exported: a read sees one complete version
+through atomic rename, and append-only
 run history is checked against the preceding checkpoint. The cut need not coincide with a whole tick
 boundary. Recovery treats run/claim state as inert bookkeeping and reconciles it against the coherent
 board projection, so a completed board transaction or complete state-file version remains a valid
@@ -981,7 +981,7 @@ order before the transaction commits. Existing conflicting, extra or reordered o
 the whole import. Retries cannot requeue a delivered/skipped row. Audit replay keeps
 `restoring=True`; neither current card state nor replay generates obligations. Reopened and archived
 cards retain their saved returns. Restore sends no external effects and revives no processes or
-claims. PO session/request state is outside this portable contract, so a pending obligation alone
+claims. PO SQL capture does not import sessions or request bindings, so a pending obligation alone
 does not establish that its origin session can receive it.
 
 Released version-1 checkpoints without an outbox remain readable. Recovery's `origin-outbox` result
@@ -989,6 +989,47 @@ and `restore-board` output explicitly report unavailable coverage; `restore-stat
 `origin_outbox_coverage` and `origin_outbox_diagnostic`. Existing target obligations remain untouched,
 and unknown deliveries are never reconstructed from audit. This coverage diagnostic does not turn a
 valid legacy recovery into a failure.
+
+### PO SQL capture
+
+`export.json` is required before interpreting any coverage. Its optional `po_sql` object declares
+version `1`, `counts` keyed by all four table names, and `sha256` of the exact `po_sql.json` bytes.
+The file is one object with four complete arrays, including explicitly empty arrays:
+
+| Array | Stored fields | Identity and order |
+| --- | --- | --- |
+| `po_sessions` | `session_id`, `cli`, `model`, `cwd`, `created_at`, `state`, `cli_session_id`, `closed_at`, `closed_by`, `effort`, `title` | `session_id`, ordered by its UTF-8 bytes |
+| `po_turns` | `session_id`, `seq`, `started_at`, `finished_at`, `state`, `stdout_path`, `pid`, `process_identity`, `reason`, `resolved_model` | `(session_id, seq)`, ordered by session then sequence |
+| `po_feed` | `entry_id`, `session_id`, `turn_seq`, `role`, `text`, `created_at`, `metadata` | source `entry_id`, increasing globally, including repeated text |
+| `po_requests` | `request_id`, `operation`, `fingerprint`, `session_id`, `seq`, `created_at` | `request_id`, ordered by its UTF-8 bytes |
+
+All nullable fields remain explicit nulls; times use UTC RFC 3339 with microseconds. Feed metadata
+retains the full object, including source, summary and accepted sprint comment position. Request
+operations `po_session_create`, `po_send` and `po_sprint_session` retain their exact fingerprints and
+bindings; only sends have a non-null turn sequence. This ledger is distinct from board requests and
+`origin_returns.po_request_id`.
+
+Staging, snapshot verification and materialization check exact field types, table counts, digest,
+identity uniqueness/order, session/turn foreign keys, close audit, turn completion state and the
+single running turn per session invariant. A declared missing or corrupt file is fatal, including
+when all counts are zero; it cannot become legacy absence. The export summary binds the PO digest
+through the analytics seal, and the snapshot manifest covers the physical file. PO fields pass the
+existing secret scan before commit/push; diagnostics name only table, record ordinal and field.
+
+Materialization writes inert files into `<data>/board`; the board importer leaves all four live PO
+tables untouched. Recovery's `po-sql` result and `restore-board`'s `po_sql_coverage` and
+`po_sql_diagnostic` distinguish captured source data from imported state. Running turns, provider
+session ids, cwd/stdout paths and process bindings are source records only: they start no process,
+signal no pid and send no events. SQL import/rebind and provider-context normalization are not
+implemented. Pending/refused inputs in `<data>/po-queue/` and images under
+`<data>/po/sessions/<id>/attachments/` are not transported by this capture. It establishes neither PO
+parity nor full PO recovery readiness or protection against every duplicate external effect.
+
+Released v1/v2 checkpoints lacking both declaration and file remain supported and report
+`checkpoint has no PO SQL coverage; sessions, turns, feed and request bindings are unavailable`.
+Sprint `po_session` and card `po_origin` metadata cannot reconstruct the absent conversation.
+
+### Sprint and card import
 
 The import restores sprint entities whole (goal, Definition of Done, repositories, product, issues,
 reservations, status, budget, current card, resume, entries, source audit metadata). A restored entity

@@ -13,10 +13,12 @@ from unittest import mock
 import ummanu.data as data_module
 from tests.fakes.tasks import empty_seed
 from tests.origin_checkpoint_fixtures import obligations
+from tests.po_checkpoint_fixtures import FINISHED, MOMENT, po_records, seed_po
 from tests.sql_backend_fixtures import card_store
 from ummanu import memory_journal
 from ummanu.board.origin_checkpoint import read_checkpoint_outbox, require_outbox_parity
 from ummanu.board.origin_outbox import OriginOutboxStore
+from ummanu.board.po_checkpoint import PO_FILE, read_checkpoint_po
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.data import (
@@ -149,6 +151,65 @@ class DataLayoutTests(unittest.TestCase):
 class ExportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.store = card_store(self, empty_seed())
+
+    def test_board_cut_preserves_complete_po_sql_above_display_limits_without_writes(self):
+        records = po_records(603)
+        records["po_feed"][0]["text"] = "whole message\n" * 4000
+        records["po_feed"][0]["metadata"]["summary"] = "whole metadata\n" * 2000
+        seed_po(self.store, records)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reader = TaskExportReader(client=self.store)
+            export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
+            self.assertEqual(read_checkpoint_po(root / "board"), records)
+            first = (root / "board" / PO_FILE).read_bytes()
+            export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
+            self.assertEqual((root / "board" / PO_FILE).read_bytes(), first)
+        self.assertEqual(self.store._query("SELECT count(*) FROM po_feed"), [(603,)])
+        self.assertEqual(self.store._query("SELECT state FROM po_turns WHERE session_id = 'open' AND seq = 4"), [("running",)])
+
+    def test_turn_completion_and_acceptance_between_po_reads_stay_outside_the_cut(self):
+        records = po_records()
+        seed_po(self.store, records)
+        other = SqlCardClient(self.store.credentials, self.store.instance_dir)
+        self.addCleanup(other.close)
+        original = self.store._query
+        changed = False
+
+        def read_then_accept(query, *args, **kwargs):
+            nonlocal changed
+            rows = original(query, *args, **kwargs)
+            if "FROM po_sessions ORDER BY" in query and not changed:
+                changed = True
+                with other.transaction():
+                    other._execute("UPDATE po_sessions SET title = 'new title', cli_session_id = 'new context' WHERE session_id = 'open'")
+                    other._execute("UPDATE po_turns SET state = 'completed', finished_at = %s WHERE session_id = 'open' AND seq = 4", (FINISHED,))
+                    other._execute("INSERT INTO po_turns (session_id, seq, started_at, state, stdout_path) VALUES ('open', 5, %s, 'running', '/new/stdout')", (MOMENT,))
+                    other._execute("INSERT INTO po_requests (request_id, operation, fingerprint, session_id, seq, created_at) VALUES ('next-send', 'po_send', %s, 'open', 5, %s)", ("a" * 64, MOMENT))
+                    other._execute("INSERT INTO po_feed (entry_id, session_id, turn_seq, role, text, created_at) OVERRIDING SYSTEM VALUE VALUES (999, 'open', 5, 'owner', 'accepted after cut', %s)", (MOMENT,))
+            return rows
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(self.store, "_query", side_effect=read_then_accept):
+            root = Path(tmp)
+            export_board(root, instance_dir=root, reader=TaskExportReader(client=self.store), sprint_client=self.store)
+            self.assertEqual(read_checkpoint_po(root / "board"), records)
+        self.assertTrue(changed)
+        self.assertEqual(other._query("SELECT seq FROM po_requests WHERE request_id = 'next-send'"), [(5,)])
+
+    def test_invalid_po_capture_preserves_previous_export_bytes_and_safe_diagnostic(self):
+        seed_po(self.store, po_records())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reader = TaskExportReader(client=self.store)
+            export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
+            before = {path.name: path.read_bytes() for path in (root / "board").iterdir() if path.is_file()}
+            with self.store.transaction():
+                self.store._execute("UPDATE po_requests SET fingerprint = 'sensitive-invalid-binding' WHERE request_id = 'send'")
+            with self.assertRaisesRegex(RuntimeError, "po_requests record 1: fingerprint") as failure:
+                export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
+            self.assertNotIn("sensitive-invalid-binding", str(failure.exception))
+            after = {path.name: path.read_bytes() for path in (root / "board").iterdir() if path.is_file()}
+            self.assertEqual(before, after)
 
     def _seed_obligations(self, count):
         rows, history = obligations(count)

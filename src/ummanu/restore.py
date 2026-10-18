@@ -46,6 +46,12 @@ from ummanu.board.origin_checkpoint import (
 )
 from ummanu.board.origin_outbox import OriginOutboxStore
 from ummanu.board.owner_decisions import FIELD as OWNER_DECISIONS_FIELD, stored_decisions
+from ummanu.board.po_checkpoint import (
+    CAPTURED_PO_COVERAGE,
+    LEGACY_PO_COVERAGE,
+    PoCheckpointError,
+    read_checkpoint_po,
+)
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.task_routing import TaskMetadata
 from ummanu.config import DataDirError, instance_data_dir, validate_instance
@@ -134,7 +140,7 @@ def import_normalized_board(
                 with client.transaction():
                     return _import_normalized_board(data_dir, client=client, instance=instance)
             return _import_normalized_board(data_dir, client=client, instance=instance)
-    except OriginCheckpointError as exc:
+    except (OriginCheckpointError, PoCheckpointError) as exc:
         raise RestoreError(str(exc)) from None
     except TaskError as exc:
         raise RestoreError(exc.message) from None
@@ -147,6 +153,7 @@ def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance:
     )
     sprints = _normalized_sprints(data_dir)
     outbox = read_checkpoint_outbox(data_dir / "board")
+    po = read_checkpoint_po(data_dir / "board")
     # Validate both sets before the first backend write.
     _check_sql_sprint_current_tasks(cards, sprints)
     _check_restored_observers(sprints, instance)
@@ -232,6 +239,8 @@ def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance:
         sprint_count=len(sprints),
         origin_outbox_coverage="complete" if outbox is not None else "unavailable",
         origin_outbox_diagnostic="" if outbox is not None else LEGACY_COVERAGE,
+        po_sql_coverage="captured" if po is not None else "unavailable",
+        po_sql_diagnostic=CAPTURED_PO_COVERAGE if po is not None else LEGACY_PO_COVERAGE,
     )
     return len(cards)
 

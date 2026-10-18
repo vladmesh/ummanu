@@ -20,11 +20,14 @@ from unittest import mock
 from tests.fakes.installation import split_board
 from tests.fakes.tasks import empty_seed
 from tests.origin_checkpoint_fixtures import obligations, write_outbox
+from tests.po_checkpoint_fixtures import po_records, write_po
 from tests.restore_fixtures import _restore_card
 from tests.sql_backend_fixtures import card_store
 from ummanu import checkpoint, secret_store, state_repo
+from ummanu.board.checkpoint_layout import LOGICAL_FILES, open_checkpoint_board
 from ummanu.board.origin_checkpoint import read_checkpoint_outbox, require_outbox_parity
 from ummanu.board.origin_outbox import OriginOutboxStore
+from ummanu.board.po_checkpoint import PO_FILE, PoCheckpointError, read_checkpoint_po
 from ummanu.checkpoint import (
     SNAPSHOT_ALLOWLIST,
     SNAPSHOT_AUTHOR_EMAIL,
@@ -205,6 +208,128 @@ class SnapshotCase(unittest.TestCase):
 
 
 class SnapshotRepositoryTests(SnapshotCase):
+    def test_committed_po_capture_materializes_flat_and_split_without_live_effects(self):
+        records = po_records()
+        self.seed_board([_restore_card()])
+        write_outbox(self.data_dir / "board", [])
+        write_po(self.data_dir / "board", records)
+        result = self.exporter().write()
+        self.assertEqual(result.status, "committed", result.reason)
+        self.assertEqual(self.committed(f"state/board/{PO_FILE}"), (self.data_dir / "board" / PO_FILE).read_bytes())
+        checkout = self.root / "po-checkout"
+        git(self.root, "clone", str(self.repo), str(checkout))
+        source = checkout / "state" / "board"
+        checkpoint.verify_analytics_checkpoint(source)
+        self.assertEqual(read_checkpoint_po(source), records)
+        flat = self.root / "po-flat"
+        flat_source = flat / "state" / "board"
+        flat_source.mkdir(parents=True)
+        reader = open_checkpoint_board(source)
+        for name in LOGICAL_FILES:
+            if reader.has(name):
+                (flat_source / name).write_bytes(reader.read_bytes(name))
+        shutil.copytree(checkout / "state" / "runs", flat / "state" / "runs")
+        git(flat, "init", "--quiet")
+        git(flat, "add", "state")
+        git(flat, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "Flat checkpoint")
+        for label, instance in (("split", checkout), ("flat", flat)):
+            with self.subTest(layout=label):
+                target = self.root / f"po-data-{label}"
+                with (
+                    mock.patch("ummanu.installation.materialize.board_client", side_effect=AssertionError("SQL access")),
+                    mock.patch("ummanu.po.store.PoStore._transaction", side_effect=AssertionError("PO access")),
+                    mock.patch("ummanu.po.client.PoServiceClient", side_effect=AssertionError("PO event")),
+                    mock.patch("os.kill", side_effect=AssertionError("process signal")),
+                    mock.patch("subprocess.Popen", side_effect=AssertionError("process start")),
+                ):
+                    self.assertEqual(materialize_checkpoint(instance, target, dry_run=True), (1, 0))
+                    self.assertFalse(target.exists())
+                    self.assertEqual(materialize_checkpoint(instance, target), (1, 0))
+                self.assertEqual(read_checkpoint_po(target / "board"), records)
+                self.assertEqual((target / "board" / PO_FILE).read_bytes(), self.committed(f"state/board/{PO_FILE}"))
+        (source / PO_FILE).write_bytes(b"{}\n")
+        with self.assertRaises(checkpoint.AnalyticsManifestError):
+            checkpoint.verify_analytics_checkpoint(source)
+
+    def test_po_empty_legacy_missing_digest_and_symlink_boundaries_in_both_layouts(self):
+        self.seed_board([_restore_card()])
+        write_outbox(self.data_dir / "board", [])
+        write_po(self.data_dir / "board", {table: [] for table in po_records()})
+        source = self.live / "state" / "board"
+        shutil.copytree(self.data_dir / "board", source, dirs_exist_ok=True)
+        shutil.copytree(self.data_dir / "runs", self.live / "state" / "runs")
+        for layout in ("flat", "split"):
+            if layout == "split":
+                split_board(source)
+            valid = (source / PO_FILE).read_bytes()
+            summary = (source / "export.json").read_bytes()
+            self.assertEqual(read_checkpoint_po(source), {table: [] for table in po_records()})
+            for defect in ("missing", "empty-file", "digest", "count", "coverage-null", "undeclared", "missing-export", "symlink", "dangling-symlink"):
+                with self.subTest(layout=layout, defect=defect):
+                    (source / PO_FILE).unlink(missing_ok=True)
+                    (source / PO_FILE).write_bytes(valid)
+                    (source / "export.json").write_bytes(summary)
+                    if defect in {"missing", "symlink", "dangling-symlink"}:
+                        (source / PO_FILE).unlink()
+                        if defect != "missing":
+                            (source / PO_FILE).symlink_to(self.data_dir / "board" / (PO_FILE if defect == "symlink" else "missing"))
+                    elif defect == "empty-file":
+                        (source / PO_FILE).write_bytes(b"")
+                    elif defect == "missing-export":
+                        (source / "export.json").unlink()
+                    else:
+                        changed = json.loads(summary)
+                        if defect == "digest":
+                            changed["po_sql"]["sha256"] = "0" * 64
+                        elif defect == "count":
+                            changed["po_sql"]["counts"]["po_feed"] = 1
+                        elif defect == "coverage-null":
+                            changed["po_sql"] = None
+                        else:
+                            changed.pop("po_sql")
+                        (source / "export.json").write_text(json.dumps(changed))
+                    with self.assertRaises(PoCheckpointError):
+                        read_checkpoint_po(source)
+                    target = self.root / f"bad-po-{layout}-{defect}"
+                    with self.assertRaises(InstallError):
+                        materialize_checkpoint(self.live, target)
+                    self.assertFalse(target.exists())
+            (source / PO_FILE).unlink()
+            legacy = json.loads(summary)
+            legacy.pop("po_sql")
+            (source / "export.json").write_text(json.dumps(legacy))
+            self.assertIsNone(read_checkpoint_po(source))
+            self.assertEqual(materialize_checkpoint(self.live, self.root / f"legacy-po-{layout}"), (1, 0))
+            write_po(source, {table: [] for table in po_records()})
+
+    def test_invalid_po_or_secret_cannot_replace_committed_snapshot_bytes_or_tip(self):
+        self.seed_board([_restore_card()])
+        write_outbox(self.data_dir / "board", [])
+        records = po_records()
+        write_po(self.data_dir / "board", records)
+        first = self.exporter().write()
+        self.assertEqual(first.status, "committed", first.reason)
+        committed = self.committed(f"state/board/{PO_FILE}")
+        for defect in ("missing", "orphan", "secret-message", "secret-metadata"):
+            with self.subTest(defect=defect):
+                changed = po_records()
+                if defect == "orphan":
+                    changed["po_feed"][0]["turn_seq"] = 90
+                elif defect == "secret-message":
+                    changed["po_feed"][0]["text"] = TOKEN
+                elif defect == "secret-metadata":
+                    changed["po_feed"][0]["metadata"] = {"summary": TOKEN}
+                write_po(self.data_dir / "board", changed)
+                if defect == "missing":
+                    (self.data_dir / "board" / PO_FILE).unlink()
+                result = self.exporter().write()
+                self.assertEqual(result.status, "blocked", result.reason)
+                self.assertEqual(self.tip(), first.commit)
+                self.assertEqual(self.committed(f"state/board/{PO_FILE}"), committed)
+                self.assertNotIn(TOKEN, result.reason)
+                if defect.startswith("secret"):
+                    self.assertIn("po_feed record 0 field", result.reason)
+
     def test_flat_checkpoint_distinguishes_empty_outbox_from_missing_and_legacy_coverage(self):
         self.seed_board([_restore_card()])
         write_outbox(self.data_dir / "board", [])
@@ -776,6 +901,24 @@ class SnapshotLegacyCompatibilityTests(SnapshotCase):
 
     def legacy_write(self):
         return CheckpointWriter(self.data_dir, self.live).write()
+
+    def test_legacy_writer_captures_po_and_refuses_secret_metadata_before_replacing_state(self):
+        self.seed_board([_restore_card()])
+        write_outbox(self.data_dir / "board", [])
+        records = po_records()
+        write_po(self.data_dir / "board", records)
+        first = self.legacy_write()
+        self.assertEqual(first.status, "committed", first.reason)
+        self.assertEqual(read_checkpoint_po(self.live / "state" / "board"), records)
+        saved = (self.live / "state" / "board" / PO_FILE).read_bytes()
+        records["po_feed"][0]["metadata"]["summary"] = TOKEN
+        write_po(self.data_dir / "board", records)
+        result = self.legacy_write()
+        self.assertEqual(result.status, "blocked", result.reason)
+        self.assertIn("po_feed record 0 field metadata", result.reason)
+        self.assertNotIn(TOKEN, result.reason)
+        self.assertEqual(git(self.live, "rev-parse", "HEAD").strip(), first.commit)
+        self.assertEqual((self.live / "state" / "board" / PO_FILE).read_bytes(), saved)
 
     def test_the_exporter_tree_equals_the_legacy_tracked_tree_on_the_canon_paths(self):
         for audit in ('{"line": 1}\n', '{"line": 1}\n{"line": 2}\n'):

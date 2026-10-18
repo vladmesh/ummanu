@@ -26,6 +26,13 @@ from ummanu.board import sprint_dod
 from ummanu.board.backend import CARD, SPRINT, board_client
 from ummanu.board.local_run import parse_local_run_exceptions
 from ummanu.board.owner_decisions import stored_decisions
+from ummanu.board.po_checkpoint import (
+    PO_FILE,
+    PoCheckpointError,
+    export_po_records,
+    po_coverage,
+    read_checkpoint_po,
+)
 from ummanu.config import validate
 from ummanu.kernel.errors import TaskError
 from ummanu.memory_journal import export_memory_snapshot
@@ -105,7 +112,7 @@ def export_board(
     data_dir = data_dir.expanduser().resolve()
     board_dir = data_dir / "board"
     _ensure_dir(board_dir, "board data dir")
-    cards, history, sprints, outbox = _read_board_cut(data_dir, instance_dir, reader, sprint_client)
+    cards, history, sprints, outbox, po = _read_board_cut(data_dir, instance_dir, reader, sprint_client)
     normalized = []
     for card in sorted(cards, key=lambda item: str(item.get("reference", ""))):
         if not isinstance(card, dict):
@@ -137,6 +144,9 @@ def export_board(
             summary["origin_return_sha256"] = hashlib.sha256(
                 (staging / "origin_returns.ndjson").read_bytes()
             ).hexdigest()
+        if po is not None:
+            _write_json(staging / PO_FILE, po)
+            summary["po_sql"] = po_coverage(po, (staging / PO_FILE).read_bytes())
         _write_json(staging / "export.json", summary)
         # Validate the exact pair restore consumes before replacing the last good live export.
         from ummanu.board.normalized_checkpoint import NormalizedBoardError, validated_normalized_cards
@@ -145,7 +155,8 @@ def export_board(
         try:
             validated_normalized_cards(staging)
             read_checkpoint_outbox(staging)
-        except (NormalizedBoardError, OriginCheckpointError) as exc:
+            read_checkpoint_po(staging)
+        except (NormalizedBoardError, OriginCheckpointError, PoCheckpointError) as exc:
             raise RuntimeError(f"board export is not restorable: {exc}") from None
         _publish_component_entries(
             staging,
@@ -154,6 +165,7 @@ def export_board(
                 "cards.json", "cards.ndjson", "sprints.json", "sprints.ndjson",
                 "audit.json", "audit.ndjson", "export.json",
                 *(["origin_returns.ndjson"] if outbox is not None else []),
+                *([PO_FILE] if po is not None else []),
             ],
             "board export",
         )
@@ -209,8 +221,11 @@ def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) 
 
 def _read_board_cut(
     data_dir: Path, instance_dir: Path, reader: TaskReader | None, sprint_client: Any,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]] | None]:
-    """Read cards, audit, sprints and origin obligations under one SQL snapshot.
+) -> tuple[
+    list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]] | None,
+    dict[str, list[dict[str, Any]]] | None,
+]:
+    """Read cards, audit, sprints, origin obligations and PO SQL under one snapshot.
 
     The shared bulk lane covers reads only; publication and Git occur after releasing it.
     """
@@ -234,6 +249,7 @@ def _read_board_cut(
             from ummanu.board.origin_outbox import OriginOutboxStore
 
             outbox = OriginOutboxStore(client).export() if isinstance(client, SqlCardClient) else None
+            po = export_po_records(client) if isinstance(client, SqlCardClient) else None
             if not isinstance(cards, list):
                 raise RuntimeError("ummanu task export did not return a card list")  # noqa: TRY004 - export refusals share RuntimeError
             if sprint_client is None and isinstance(client, SqlCardClient):
@@ -248,7 +264,7 @@ def _read_board_cut(
                     sprints = export_sprint_entities(instance_dir, sprint_board)
                 finally:
                     sprint_board.connection.close()
-            return cards, history, sprints, outbox
+            return cards, history, sprints, outbox, po
     except TaskError as exc:
         raise RuntimeError(f"ummanu task export failed: {exc.message}") from None
     finally:

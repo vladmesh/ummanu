@@ -222,6 +222,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         # Only the normalized export travels; the target backend starts from nothing else.
         for name in ("cards.json", "sprints.json"):
             shutil.copy(self.source_data / "board" / name, self.target_data / "board" / name)
+        (self.target_data / "board" / "export.json").write_text(json.dumps({"version": 1}))
 
     def _exported_sprint(self) -> dict:
         payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
