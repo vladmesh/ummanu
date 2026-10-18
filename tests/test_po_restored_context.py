@@ -237,9 +237,11 @@ class RestoredContextTests(unittest.TestCase):
 
     def test_required_history_read_failure_and_changed_history_prevent_launch(self):
         self.setup_provider()
-        with mock.patch.object(self.runner.store, "feed", side_effect=PoStoreError("history unavailable")):
-            with self.assertRaisesRegex(RestoreContextError, "PoStoreError"):
-                self.send()
+        with (
+            mock.patch.object(self.runner.store, "feed", side_effect=PoStoreError("history unavailable")),
+            self.assertRaisesRegex(RestoreContextError, "PoStoreError"),
+        ):
+            self.send()
         self.assertEqual(self.calls, [])
         self.board.feed[0] = replace(self.board.feed[0], text="changed source")
         self.assert_no_new_launch(text="retry", request="retry")
@@ -262,9 +264,8 @@ class RestoredContextTests(unittest.TestCase):
                 raise OSError("prompt unavailable")
             return write(path, *args, **kwargs)
 
-        with mock.patch.object(Path, "write_text", prompt_failure):
-            with self.assertRaises(OSError):
-                self.send()
+        with mock.patch.object(Path, "write_text", prompt_failure), self.assertRaises(OSError):
+            self.send()
         self.assertEqual(self.calls, [])
         transcript = next(directory.glob("*.txt"))
         next_path = transcript.with_name(transcript.name.replace("-5.txt", "-6.txt"))
