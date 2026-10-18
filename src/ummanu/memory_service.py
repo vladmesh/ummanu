@@ -1,6 +1,6 @@
 """Memory MCP server, shared semantic memory for any MCP-speaking agent.
 
-SQLite + sqlite-vec for storage/ANN, fastembed (bge-m3, multilingual) for embeddings,
+SQLite + sqlite-vec for storage/ANN, fastembed for multilingual embeddings,
 exposed over streamable-HTTP so Claude / Codex / Hermes all share ONE warm instance.
 """
 
@@ -13,13 +13,6 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
-
-# Every process that builds the embedder imports this module first: the memory service, the reindex
-# and recover's memory step. huggingface_hub reads this once, when it is imported (`constants.py`),
-# so it is set before fastembed pulls the hub in. Shared blobs put `model.onnx` and
-# `model.onnx_data` in different directories, and onnxruntime refuses that on a fresh cache
-# ("External data path escapes model directory").
-os.environ["HF_HUB_DISABLE_SHARED_BLOBS"] = "1"
 
 import numpy as np
 import sqlite_vec
@@ -38,6 +31,7 @@ from ummanu.memory.canon import (  # noqa: F401  # Service-level names of the ca
     parse_frontmatter,
     scope_for_relative,
 )
+from ummanu.memory.model import load_text_embedding
 from ummanu.runtime.paths import default_instance_path
 
 DEFAULT_MEMORY_DIR = Path.home() / "ummanu-data" / "memory"
@@ -74,11 +68,7 @@ def embedder() -> TextEmbedding:
     if _embedder is None:
         with _lock:
             if _embedder is None:
-                _embedder = TextEmbedding(
-                    model_name=MODEL,
-                    cache_dir=str(MODEL_CACHE_DIR),
-                    threads=THREADS,
-                )
+                _embedder = load_text_embedding(MODEL, MODEL_CACHE_DIR, THREADS)
     return _embedder
 
 
@@ -369,11 +359,7 @@ def canon_signature() -> tuple:
 
 def build_document_embedder(model: str, cache_dir: str | Path, threads: int):
     """Return a normalized document embedder for an explicit model."""
-    embedding_model = TextEmbedding(
-        model_name=model,
-        cache_dir=str(cache_dir),
-        threads=threads,
-    )
+    embedding_model = load_text_embedding(model, cache_dir, threads)
 
     class DocumentEmbedder:
         def __call__(self, text: str) -> np.ndarray:

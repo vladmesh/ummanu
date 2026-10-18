@@ -236,16 +236,14 @@ class IncrementalMemoryIndexTests(unittest.TestCase):
         fake_embedding = mock.Mock()
         with (
             mock.patch.object(memory_service, "_embedder", None),
-            mock.patch.object(memory_service, "TextEmbedding", return_value=fake_embedding) as embedding,
+            mock.patch.object(memory_service, "load_text_embedding", return_value=fake_embedding) as embedding,
             mock.patch.object(memory_service, "MODEL", "test-model"),
             mock.patch.object(memory_service, "MODEL_CACHE_DIR", self.root / "fastembed-cache"),
             mock.patch.object(memory_service, "THREADS", 1),
         ):
             self.assertIs(memory_service.embedder(), fake_embedding)
 
-        embedding.assert_called_once_with(
-            model_name="test-model", cache_dir=str(self.root / "fastembed-cache"), threads=1
-        )
+        embedding.assert_called_once_with("test-model", self.root / "fastembed-cache", 1)
 
     def test_offline_rebuild_fallback_uses_configured_cache_and_thread_limit(self):
         self.write_export([("global/a", "alpha")])
