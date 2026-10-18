@@ -38,15 +38,21 @@ SPLIT = "split"
 
 #: The logical files of a board checkpoint, in either layout.
 LOGICAL_FILES = (
-    "cards.ndjson", "sprints.ndjson", "events.ndjson", "audit.ndjson", "export.json", "origin_returns.ndjson",
+    "cards.ndjson",
+    "sprints.ndjson",
+    "events.ndjson",
+    "audit.ndjson",
+    "export.json",
+    "origin_returns.ndjson",
     "po_sql.json",
+    "owner_events.ndjson",
 )
 #: Logical files stored one record per file in the split layout: records change in place.
 RECORD_FILES = {"cards.ndjson": ("cards", ".json"), "sprints.ndjson": ("sprints", ".json")}
 #: Logical files stored as immutable segments in the split layout: they only ever grow.
 SEGMENT_FILES = {"audit.ndjson": ("audit", ".ndjson"), "events.ndjson": ("events", ".ndjson")}
 #: Logical files that stay single files in the split layout.
-SINGLE_FILES = ("export.json", "origin_returns.ndjson", "po_sql.json")
+SINGLE_FILES = ("export.json", "origin_returns.ndjson", "po_sql.json", "owner_events.ndjson")
 
 # Parts are grouped a thousand to a directory so no single Git tree grows with the board.
 _PER_DIRECTORY = 1000
@@ -190,10 +196,19 @@ def open_checkpoint_board(directory: Path) -> CheckpointBoard:
     return CheckpointBoard(root, SPLIT)
 
 
+def _summary_fields(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise CheckpointLayoutError("board export.json contains a duplicate field")
+        result[key] = value
+    return result
+
+
 def read_export_summary(board: CheckpointBoard) -> dict:
     """Require export.json before interpreting coverage, including released v1/v2 absence."""
     try:
-        summary = json.loads(board.read_text("export.json"))
+        summary = json.loads(board.read_text("export.json"), object_pairs_hook=_summary_fields)
     except (OSError, UnicodeError, ValueError):
         raise CheckpointLayoutError("board export.json is required and must be readable JSON") from None
     if not isinstance(summary, dict) or type(summary.get("version", 1)) is not int or summary.get("version", 1) not in (1, 2):

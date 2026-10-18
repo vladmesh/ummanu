@@ -314,6 +314,50 @@ class OwnerEventStore:
             ).fetchone()
         return row is not None
 
+    def export(self) -> list[dict[str, Any]]:
+        """Every stored bell fact in source ID order on the caller's snapshot, without UI limits."""
+        sql = f"SELECT {_COLUMNS} FROM {TABLE} ORDER BY id"
+        if self.client is not None:
+            rows = self.client._query(sql)
+        else:
+            with self._connection() as connection:
+                rows = connection.execute(sql).fetchall()
+        fields = ("id", "kind", "class", "subject_ref", "text", "created_at", "read_at", "dedup_key")
+        result = []
+        for values in rows:
+            row = dict(zip(fields, values, strict=True))
+            row["created_at"] = _iso(row["created_at"])
+            row["read_at"] = _iso(row["read_at"])
+            result.append(row)
+        return result
+
+    def restore(self, rows: list[dict[str, Any]]) -> None:
+        """Merge saved dedup identities and prove semantic parity inside the caller's transaction."""
+        from ummanu.board.owner_checkpoint import (
+            OWNER_FIELDS,
+            OwnerCheckpointError,
+            require_owner_parity,
+            validate_owner_records,
+        )
+
+        validate_owner_records(rows)
+        if self.client is None or not self.client._depth:
+            raise OwnerCheckpointError("owner events restore requires a transaction")
+        self.client._execute(f"LOCK TABLE {TABLE} IN SHARE ROW EXCLUSIVE MODE")
+        existing = {row["dedup_key"]: row for row in self.export()}
+        fields = OWNER_FIELDS[1:]
+        columns = ", ".join('"class"' if field == "class" else field for field in fields)
+        for row in rows:
+            prior = existing.get(row["dedup_key"])
+            if prior is not None:
+                require_owner_parity([row], [prior])
+                continue
+            self.client._execute(
+                f"INSERT INTO {TABLE} ({columns}) VALUES ({', '.join('%s' for _ in fields)})",
+                tuple(row[field] for field in fields),
+            )
+        require_owner_parity(rows, self.export())
+
     def events(self, *, unread_only: bool = False, limit: int = LIST_LIMIT) -> list[OwnerEvent]:
         """Open `needs_owner` events first, then everything newest first; `unread_only` keeps the unread."""
         where = "WHERE e.read_at IS NULL " if unread_only else ""

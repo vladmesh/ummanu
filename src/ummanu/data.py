@@ -112,7 +112,9 @@ def export_board(
     data_dir = data_dir.expanduser().resolve()
     board_dir = data_dir / "board"
     _ensure_dir(board_dir, "board data dir")
-    cards, history, sprints, outbox, po = _read_board_cut(data_dir, instance_dir, reader, sprint_client)
+    cards, history, sprints, outbox, po, owner_events = _read_board_cut(
+        data_dir, instance_dir, reader, sprint_client
+    )
     normalized = []
     for card in sorted(cards, key=lambda item: str(item.get("reference", ""))):
         if not isinstance(card, dict):
@@ -144,6 +146,11 @@ def export_board(
             summary["origin_return_sha256"] = hashlib.sha256(
                 (staging / "origin_returns.ndjson").read_bytes()
             ).hexdigest()
+        if owner_events is not None:
+            from ummanu.board.owner_checkpoint import OWNER_FILE, owner_coverage
+
+            _write_ndjson(staging / OWNER_FILE, owner_events)
+            summary["owner_events"] = owner_coverage(owner_events, (staging / OWNER_FILE).read_bytes())
         if po is not None:
             _write_json(staging / PO_FILE, po)
             summary["po_sql"] = po_coverage(po, (staging / PO_FILE).read_bytes())
@@ -151,20 +158,28 @@ def export_board(
         # Validate the exact pair restore consumes before replacing the last good live export.
         from ummanu.board.normalized_checkpoint import NormalizedBoardError, validated_normalized_cards
         from ummanu.board.origin_checkpoint import OriginCheckpointError, read_checkpoint_outbox
+        from ummanu.board.owner_checkpoint import OwnerCheckpointError, read_checkpoint_owner_events
 
         try:
             validated_normalized_cards(staging)
             read_checkpoint_outbox(staging)
+            read_checkpoint_owner_events(staging)
             read_checkpoint_po(staging)
-        except (NormalizedBoardError, OriginCheckpointError, PoCheckpointError) as exc:
+        except (NormalizedBoardError, OriginCheckpointError, OwnerCheckpointError, PoCheckpointError) as exc:
             raise RuntimeError(f"board export is not restorable: {exc}") from None
         _publish_component_entries(
             staging,
             board_dir,
             [
-                "cards.json", "cards.ndjson", "sprints.json", "sprints.ndjson",
-                "audit.json", "audit.ndjson", "export.json",
+                "cards.json",
+                "cards.ndjson",
+                "sprints.json",
+                "sprints.ndjson",
+                "audit.json",
+                "audit.ndjson",
+                "export.json",
                 *(["origin_returns.ndjson"] if outbox is not None else []),
+                *(["owner_events.ndjson"] if owner_events is not None else []),
                 *([PO_FILE] if po is not None else []),
             ],
             "board export",
@@ -220,12 +235,19 @@ def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) 
 
 
 def _read_board_cut(
-    data_dir: Path, instance_dir: Path, reader: TaskReader | None, sprint_client: Any,
+    data_dir: Path,
+    instance_dir: Path,
+    reader: TaskReader | None,
+    sprint_client: Any,
 ) -> tuple[
-    list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]] | None,
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]] | None,
     dict[str, list[dict[str, Any]]] | None,
+    list[dict[str, Any]] | None,
 ]:
-    """Read cards, audit, sprints, origin obligations and PO SQL under one snapshot.
+    """Read cards, audit, sprints, origin obligations, PO SQL and owner events under one snapshot.
 
     The shared bulk lane covers reads only; publication and Git occur after releasing it.
     """
@@ -249,6 +271,13 @@ def _read_board_cut(
             from ummanu.board.origin_outbox import OriginOutboxStore
 
             outbox = OriginOutboxStore(client).export() if isinstance(client, SqlCardClient) else None
+            from ummanu.board.owner_events import OwnerEventStore
+
+            owner_events = (
+                OwnerEventStore(client.credentials, client=client).export()
+                if isinstance(client, SqlCardClient)
+                else None
+            )
             po = export_po_records(client) if isinstance(client, SqlCardClient) else None
             if not isinstance(cards, list):
                 raise RuntimeError("ummanu task export did not return a card list")  # noqa: TRY004 - export refusals share RuntimeError
@@ -264,7 +293,7 @@ def _read_board_cut(
                     sprints = export_sprint_entities(instance_dir, sprint_board)
                 finally:
                     sprint_board.connection.close()
-            return cards, history, sprints, outbox, po
+            return cards, history, sprints, outbox, po, owner_events
     except TaskError as exc:
         raise RuntimeError(f"ummanu task export failed: {exc.message}") from None
     finally:

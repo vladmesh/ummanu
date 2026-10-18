@@ -13,11 +13,14 @@ from unittest import mock
 import ummanu.data as data_module
 from tests.fakes.tasks import empty_seed
 from tests.origin_checkpoint_fixtures import obligations
+from tests.owner_checkpoint_fixtures import bell_rows
 from tests.po_checkpoint_fixtures import FINISHED, MOMENT, po_records, seed_po
 from tests.sql_backend_fixtures import card_store
 from ummanu import memory_journal
 from ummanu.board.origin_checkpoint import read_checkpoint_outbox, require_outbox_parity
 from ummanu.board.origin_outbox import OriginOutboxStore
+from ummanu.board.owner_checkpoint import read_checkpoint_owner_events, require_owner_parity
+from ummanu.board.owner_events import OwnerEventStore
 from ummanu.board.po_checkpoint import PO_FILE, read_checkpoint_po
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import SqlCardClient
@@ -47,7 +50,7 @@ from ummanu.memory_write import (
     supersede_memory_fact,
 )
 from ummanu.sprints import SPRINT_BOARD_NAME
-from ummanu.tasks import TaskError
+from ummanu.tasks import TaskError, TaskReader, TaskWriter
 
 
 class TaskExportReader:
@@ -208,6 +211,122 @@ class ExportTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "po_requests record 1: fingerprint") as failure:
                 export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
             self.assertNotIn("sensitive-invalid-binding", str(failure.exception))
+            after = {path.name: path.read_bytes() for path in (root / "board").iterdir() if path.is_file()}
+            self.assertEqual(before, after)
+
+    def test_board_cut_preserves_all_bell_rows_with_stable_tie_order(self):
+        rows = bell_rows(513)
+        store = OwnerEventStore(self.store.credentials, client=self.store)
+        with self.store.transaction():
+            store.restore(rows)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reader = TaskExportReader(client=self.store)
+            export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
+            require_owner_parity(rows, read_checkpoint_owner_events(root / "board"))
+            first = (root / "board" / "owner_events.ndjson").read_bytes()
+            export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
+            self.assertEqual(first, (root / "board" / "owner_events.ndjson").read_bytes())
+
+    def test_owner_mark_read_between_card_and_bell_reads_is_outside_the_coherent_cut(self):
+        rows = bell_rows(1)
+        rows[0].update(kind="sprint_closed", **{"class": "notice"})
+        store = OwnerEventStore(self.store.credentials, client=self.store)
+        with self.store.transaction():
+            store.restore(rows)
+        other = SqlCardClient(self.store.credentials, self.store.instance_dir)
+        self.addCleanup(other.close)
+        reader = TaskExportReader(client=self.store)
+        original = reader.export
+
+        def read_then_mark():
+            cards = original()
+            other_store = OwnerEventStore(other.credentials, client=other)
+            other_store.mark_read(other_store.events()[0].id)
+            return cards
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(reader, "export", side_effect=read_then_mark),
+        ):
+            root = Path(tmp)
+            export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
+            require_owner_parity(rows, read_checkpoint_owner_events(root / "board"))
+        self.assertEqual(store.unread_count(), 0)
+
+    def test_owner_answer_between_card_and_bell_reads_cannot_tear_attention(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            client = card_store(self, empty_seed(), instance_dir=root)
+            writer = TaskWriter(client, data_dir=root)
+            writer.create(
+                role="po",
+                actor="po",
+                project="ummanu",
+                task_type="decision",
+                title="Owner decision",
+                target="ready",
+                reference="ummanu-9",
+                request_id="create-owner-cut",
+            )
+            writer.claim(
+                role="dispatcher",
+                actor="test",
+                reference="ummanu-9",
+                worker="fixture",
+                request_id="claim-owner-cut",
+            )
+            handover = writer.handover(
+                role="po",
+                actor="po",
+                reference="ummanu-9",
+                to="owner",
+                reason="Choose an option",
+                request_id="handover-owner-cut",
+            )
+            reader = TaskReader(client)
+            original = reader.export
+            before = OwnerEventStore(client.credentials, client=client).export()
+            other = SqlCardClient(client.credentials, root)
+            self.addCleanup(other.close)
+
+            def read_then_answer():
+                cards = original()
+                TaskWriter(other, data_dir=root).record_owner_answer(
+                    role="po",
+                    actor="po",
+                    reference="ummanu-9",
+                    handover_event=handover["event_id"],
+                    quotation="Choose option A",
+                    request_id="answer-during-cut",
+                )
+                return cards
+
+            with mock.patch.object(reader, "export", side_effect=read_then_answer):
+                export_board(root, instance_dir=root, reader=reader, sprint_client=client)
+            require_owner_parity(before, read_checkpoint_owner_events(root / "board"))
+            cards = json.loads((root / "board" / "cards.json").read_text())["cards"]
+            self.assertTrue(cards[0]["metadata"]["waiting_owner"])
+            self.assertTrue(
+                all(
+                    row["read_at"] is not None
+                    for row in OwnerEventStore(other.credentials, client=other).export()
+                )
+            )
+
+    def test_invalid_owner_export_keeps_the_previous_good_live_cut(self):
+        rows = bell_rows()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reader = TaskExportReader(client=self.store)
+            export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
+            before = {path.name: path.read_bytes() for path in (root / "board").iterdir() if path.is_file()}
+            rows[0]["class"] = "notice"
+            with (
+                mock.patch.object(OwnerEventStore, "export", return_value=rows),
+                self.assertRaisesRegex(RuntimeError, "class"),
+            ):
+                export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
             after = {path.name: path.read_bytes() for path in (root / "board").iterdir() if path.is_file()}
             self.assertEqual(before, after)
 

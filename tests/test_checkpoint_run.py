@@ -527,6 +527,7 @@ class BoardCutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             client = mock.Mock(spec=SqlCardClient)
+            client.credentials = mock.sentinel.credentials
             reader = SimpleNamespace(client=client)
             reading = []
             audit = mock.Mock()
@@ -567,14 +568,20 @@ class BoardCutTests(unittest.TestCase):
                 ),
                 mock.patch("ummanu.sprints.sprint_client") as sprint_factory,
             ):
-                cards, history, sprints, outbox, po = data._read_board_cut(root, root, reader, None)
+                cards, history, sprints, outbox, po, owner_events = data._read_board_cut(
+                    root, root, reader, None
+                )
             self.assertEqual(cards, [{"reference": "demo-1"}])
             self.assertEqual(history, [])
             self.assertIs(sprints[0]["client"], client)
+            self.assertEqual(owner_events, [])
             self.assertEqual(len(outbox), 1)
             self.assertEqual(outbox[0]["event_id"], "transition")
             self.assertEqual(po, {table: [] for table in ("po_sessions", "po_turns", "po_feed", "po_requests")})
-            self.assertCountEqual(queried, ["origin_returns", "po_sessions", "po_turns", "po_feed", "po_requests"])
+            self.assertCountEqual(
+                queried,
+                ["origin_returns", "owner_events", "po_sessions", "po_turns", "po_feed", "po_requests"],
+            )
             sprint_factory.assert_not_called()
             client.read_snapshot.assert_called_once_with()
             with try_file_lock(root / "dispatcher" / "board-bulk.lock") as acquired:

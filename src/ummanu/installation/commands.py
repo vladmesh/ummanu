@@ -428,7 +428,16 @@ def install(args: argparse.Namespace) -> InstallResult:
                 checkpoint_root, data_dir, dry_run=args.dry_run or checkpoint_complete, own=written
             )
             from ummanu.board.origin_checkpoint import LEGACY_COVERAGE, read_checkpoint_outbox
+            from ummanu.board.owner_checkpoint import LEGACY_OWNER_COVERAGE, read_checkpoint_owner_events
 
+            owner_events = read_checkpoint_owner_events(checkpoint_root / "state" / "board")
+            result.add(
+                "owner-events",
+                "unchanged",
+                LEGACY_OWNER_COVERAGE
+                if owner_events is None
+                else f"complete checkpoint coverage: {len(owner_events)} bell fact(s)",
+            )
             outbox = read_checkpoint_outbox(checkpoint_root / "state" / "board")
             result.add(
                 "origin-outbox", "unchanged",
