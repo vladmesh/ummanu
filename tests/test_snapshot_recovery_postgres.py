@@ -46,6 +46,12 @@ from tests.sql_backend_fixtures import PostgresBoard, insert_card_row
 from tests.support.snapshot_recovery import recover_patches
 from ummanu import bootstrap as bootstrap_module
 from ummanu.board import store
+from ummanu.board.checkpoint_layout import LOGICAL_FILES, open_checkpoint_board
+from ummanu.board.close_checkpoint import (
+    LEGACY_CLOSE_COVERAGE,
+    read_checkpoint_close_facts,
+    require_close_set_parity,
+)
 from ummanu.board.owner_checkpoint import (
     LEGACY_OWNER_COVERAGE,
     OWNER_FILE,
@@ -57,18 +63,26 @@ from ummanu.board.po_checkpoint import RESTORED_PO_COVERAGE, export_po_records, 
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.board.store import BoardStoreConfig
-from ummanu.checkpoint import SNAPSHOT_BASE_REF, SNAPSHOT_REF, SnapshotExporter, tick_checkpoint_writer
+from ummanu.checkpoint import (
+    SNAPSHOT_BASE_REF,
+    SNAPSHOT_REF,
+    SnapshotExporter,
+    _write_analytics_manifest,
+    tick_checkpoint_writer,
+    verify_analytics_checkpoint,
+)
 from ummanu.cli import main as cli_main
 from ummanu.data import export_board, init_layout
 from ummanu.head_registry import installed_heads, installed_pair
 from ummanu.installation import commands as installation_commands
+from ummanu.installation.materialize import materialize_checkpoint
 from ummanu.memory_journal import export_memory_snapshot, verify_memory_journal
 from ummanu.po.recovery_admission import PoRecoveryAdmission
 from ummanu.po.runner import PoRunner
 from ummanu.po.store import COMPLETED, INTERRUPTED, PoStore
 from ummanu.po.workspace import workspace_dir
 from ummanu.product_issues import ProductIssueStore
-from ummanu.restore import restore_state
+from ummanu.restore import import_normalized_board, restore_state
 from ummanu.secret_recover import SecretRecovery
 from ummanu.sprint_observer import none_choice
 from ummanu.sprints import SprintReader, SprintWriter, sprint_client
@@ -250,7 +264,7 @@ class _SnapshotRecoveryCase(unittest.TestCase):
             body="closed sprint comment",
             request_id="comment-snapshot-sprint",
         )
-        sprint_writer.close(
+        self.source_close_result = sprint_writer.close(
             role="po",
             actor="test",
             reference=sprint,
@@ -259,6 +273,7 @@ class _SnapshotRecoveryCase(unittest.TestCase):
                 "cards": [],
             },
             reason="snapshot fixture closed",
+            closeout="The issue stays open; recovery preserves the recorded decision and document.",
             request_id="close-snapshot-sprint",
         )
         # Production holds an open sprint beside its closed ones; the installation admits one.
@@ -418,6 +433,19 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         summary_path = board / "export.json"
         summary = json.loads(summary_path.read_text())
         summary.pop("owner_events")
+        summary.pop("sprint_close")
+        for name in ("sprints.json", "sprints.ndjson"):
+            path = board / name
+            if name.endswith(".ndjson"):
+                rows = [json.loads(line) for line in path.read_text().splitlines()]
+                for row in rows:
+                    row.pop("close_facts")
+                path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            else:
+                payload = json.loads(path.read_text())
+                for row in payload["sprints"]:
+                    row.pop("close_facts")
+                path.write_text(json.dumps(payload))
         summary_path.write_text(json.dumps(summary))
         (board / OWNER_FILE).unlink()
         self.assertIsNone(read_checkpoint_owner_events(board))
@@ -452,6 +480,11 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
                 self.assertEqual(state["owner_events_coverage"], "unavailable")
                 self.assertEqual(state["owner_events_parity"], "unavailable")
                 self.assertEqual(state["owner_events_diagnostic"], LEGACY_OWNER_COVERAGE)
+                self.assertEqual(state["sprint_close_coverage"], "unavailable")
+                self.assertEqual(state["sprint_close_parity"], "unavailable")
+                self.assertEqual(state["sprint_close_diagnostic"], LEGACY_CLOSE_COVERAGE)
+                self.assertEqual(next(step for step in machine["steps"] if step["name"] == "sprint-close")["detail"], LEGACY_CLOSE_COVERAGE)
+                self.assertTrue(all(not value["decisions"] and value["close_reason"] is None for value in client.sprints.export_close_facts().values()))
                 self.assertEqual(OwnerEventStore(client.credentials, client=client).export(), [])
                 current = self._kinds(target, data_dir, self.target_config)
                 if previous is not None:
@@ -462,6 +495,73 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
                     code = cli_main(["doctor", "--offline", "--json", "--instance", str(target)])
                 self.assertEqual(code, 0, output.getvalue())
                 self.assertTrue(json.loads(output.getvalue())["ok"])
+
+    def test_native_close_facts_recover_with_audit_result_knowledge_and_new_app_close(self):
+        source = SqlCardClient(self.source_config.for_role("app"), self.fixture.source)
+        self.addCleanup(source.close)
+        expected = source.sprints.export_close_facts()
+        document = expected[SPRINTS[0]]["closeout_document"]
+        original_bytes = (self.fixture.source / "state" / "knowledge" / document).read_bytes()
+        code, output = self._bootstrap()
+        self.assertEqual(code, 0, output)
+        result, refused = self._recover()
+        self.assertEqual(result.status, "ok", f"{result.render()} {refused}")
+        target, data_dir = self.fixture.target, self.fixture.data_dir
+        client = SqlCardClient(self.target_config.for_role("app"), target)
+        self.addCleanup(client.close)
+        require_close_set_parity(expected, client.sprints.export_close_facts())
+        self.assertEqual((target / "state" / "knowledge" / document).read_bytes(), original_bytes)
+        state = restore_state(data_dir)
+        self.assertEqual((state["sprint_close_coverage"], state["sprint_close_parity"]), ("restored", "complete"))
+        require_close_set_parity(expected, read_checkpoint_close_facts(data_dir / "board"))
+        writer = SprintWriter(client, data_dir=data_dir, instance=target)
+        before = self._kinds(target, data_dir, self.target_config)
+        bell = OwnerEventStore(client.credentials, client=client).export()
+        replay = writer.close(role="po", actor="test", reference=SPRINTS[0], request_id="close-snapshot-sprint")
+        for field in ("event_id", "issue_decisions", "card_dispositions", "closed_issues", "disposed_tasks", "reason", "closeout"):
+            self.assertEqual(replay[field], self.source_close_result[field])
+        self.assertEqual(self._kinds(target, data_dir, self.target_config), before)
+        self.assertEqual(OwnerEventStore(client.credentials, client=client).export(), bell)
+        self.assertEqual((target / "state" / "knowledge" / document).read_bytes(), original_bytes)
+        result, refused = self._recover()
+        self.assertEqual(result.status, "ok", f"{result.render()} {refused}")
+        require_close_set_parity(expected, client.sprints.export_close_facts())
+        written = writer.close(
+            role="po", actor="test", reference=SPRINTS[1], request_id="new-close-after-recovery",
+            decisions={"issues": [{"ref": self.issue, "verdict": "open", "reason": "retained for the next sprint"}], "cards": []},
+        )
+        self.assertEqual(written["sprint"]["status"], "closed")
+        actual = client.sprints.export_close_facts()
+        self.assertEqual(actual[SPRINTS[1]]["decisions"][0]["request_id"], "new-close-after-recovery")
+        self.assertGreater(actual[SPRINTS[1]]["decisions"][0]["decision_id"], actual[SPRINTS[0]]["decisions"][0]["decision_id"])
+
+    def test_committed_native_close_facts_materialize_flat_and_split_before_normal_import(self):
+        checkout = self.root / "selected-checkpoint"
+        git(self.root, "clone", "--branch", SNAPSHOT_REF.removeprefix("refs/heads/"), str(self.fixture.remote), str(checkout))
+        board = open_checkpoint_board(checkout / "state" / "board")
+        expected = read_checkpoint_close_facts(board.directory)
+        flat = self.root / "flat-checkpoint"
+        flat_board = flat / "state" / "board"
+        flat_board.mkdir(parents=True)
+        for name in LOGICAL_FILES:
+            if board.has(name):
+                (flat_board / name).write_bytes(board.read_bytes(name))
+        _write_analytics_manifest(flat_board)
+        shutil.copytree(checkout / "state" / "runs", flat / "state" / "runs")
+        git(flat, "init", "--quiet")
+        git(flat, "add", "state")
+        git(flat, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "Flat checkpoint")
+        for layout, instance in (("flat", flat), ("split", checkout)):
+            with self.subTest(layout=layout):
+                verify_analytics_checkpoint(instance / "state" / "board")
+                data = self.root / f"materialized-{layout}"
+                materialize_checkpoint(instance, data)
+                config = PostgresBoard.shared().fresh_database()
+                client = SqlCardClient(config.for_role("app"), self.fixture.source)
+                self.addCleanup(client.close)
+                for _ in range(2):
+                    import_normalized_board(data, client=client, instance=self.fixture.source)
+                    require_close_set_parity(expected, client.sprints.export_close_facts())
 
     def test_normal_recovery_preserves_held_settled_and_read_bell_facts_and_accepts_new_answer(self):
         source, source_data = self.fixture.source, self.fixture.source_data

@@ -33,6 +33,13 @@ from ummanu.backup_verify import _unsafe_member, _verify_plain_tar
 from ummanu.board import sprint_dod
 from ummanu.board.backend import CARD, SPRINT, board_client
 from ummanu.board.checkpoint_layout import CheckpointLayoutError, open_checkpoint_board
+from ummanu.board.close_checkpoint import (
+    LEGACY_CLOSE_COVERAGE,
+    CloseCheckpointError,
+    read_checkpoint_close_facts,
+    require_close_set_parity,
+    validate_close_merge,
+)
 from ummanu.board.extension_bag import EXTENSION_BAG, fold_extension_bags
 from ummanu.board.legacy_codec import (
     TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
@@ -151,7 +158,7 @@ def import_normalized_board(
                 with client.transaction():
                     return _import_normalized_board(data_dir, client=client, instance=instance)
             return _import_normalized_board(data_dir, client=client, instance=instance)
-    except (OriginCheckpointError, OwnerCheckpointError) as exc:
+    except (OriginCheckpointError, OwnerCheckpointError, CloseCheckpointError) as exc:
         raise RestoreError(str(exc)) from None
     except TaskError as exc:
         raise RestoreError(exc.message) from None
@@ -167,6 +174,9 @@ def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance:
     _checkpoint_po(data_dir / "board")
     outbox = read_checkpoint_outbox(data_dir / "board")
     owner_events = read_checkpoint_owner_events(data_dir / "board")
+    close_facts = read_checkpoint_close_facts(data_dir / "board")
+    if close_facts is not None:
+        validate_close_merge(close_facts, client.sprints.export_close_facts())
     # Validate both sets before the first backend write.
     _check_sql_sprint_current_tasks(cards, sprints)
     _check_restored_observers(sprints, instance)
@@ -233,6 +243,9 @@ def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance:
         _update_restore_state(data_dir, board="failed", board_parity="failed")
         raise RestoreError("board parity check failed: restored card order")
     _import_sprints(data_dir, client, sprints, existing_sprints, prefix)
+    if close_facts is not None:
+        set_restore_phase(client, "sprint_close")
+        client.sprints.restore_close_facts(close_facts)
     if outbox is not None:
         set_restore_phase(client, "origin_returns")
         OriginOutboxStore(client).restore(outbox)
@@ -253,6 +266,9 @@ def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance:
         sprints="complete",
         sprint_parity="complete",
         sprint_count=len(sprints),
+        sprint_close_coverage="restored" if close_facts is not None else "unavailable",
+        sprint_close_parity="complete" if close_facts is not None else "unavailable",
+        sprint_close_diagnostic="" if close_facts is not None else LEGACY_CLOSE_COVERAGE,
         owner_events_coverage="restored" if owner_events is not None else "unavailable",
         owner_events_parity="complete" if owner_events is not None else "unavailable",
         owner_events_diagnostic="" if owner_events is not None else LEGACY_OWNER_COVERAGE,
@@ -1019,6 +1035,8 @@ def restore_findings(data_dir: Path) -> list[str]:
     elif "sprints" in state and state.get("sprints") != "complete":
         # Older recovery state without sprints has no sprint step to diagnose.
         findings.append("sprint restore is incomplete")
+    if state.get("sprint_close_coverage") == "restored" and state.get("sprint_close_parity") != "complete":
+        findings.append("sprint close facts restore parity failed")
     if state.get("po_sql_coverage") == "captured" and state.get("po_sql_restore") != "finished":
         findings.append(f"PO SQL restore is incomplete at {state.get('po_sql_restore')}")
     if state.get("owner_events_coverage") == "restored" and state.get("owner_events_parity") != "complete":
@@ -1652,6 +1670,9 @@ def _verify_postgres_normalized_parity(data_dir: Path, instance_dir: Path) -> No
         expected_history = history_payload.get("events") if isinstance(history_payload, dict) else None
         actual_history = SqlTaskAudit(client).events()
         expected_owner = read_checkpoint_owner_events(data_dir / "board")
+        expected_close = read_checkpoint_close_facts(data_dir / "board")
+        if expected_close is not None:
+            require_close_set_parity(expected_close, client.sprints.export_close_facts())
         if expected_owner is not None:
             require_owner_parity(expected_owner, OwnerEventStore(client.credentials, client=client).export())
         expected_outbox = read_checkpoint_outbox(data_dir / "board")
@@ -1667,7 +1688,7 @@ def _verify_postgres_normalized_parity(data_dir: Path, instance_dir: Path) -> No
     by_ref = lambda rows: sorted(rows, key=lambda row: str(row.get("reference") or ""))
     if (
         by_ref(actual_cards) != by_ref(expected_cards)
-        or by_ref(actual_sprints) != by_ref(expected_sprints)
+        or by_ref(actual_sprints) != by_ref([{key: value for key, value in sprint.items() if key != "close_facts"} for sprint in expected_sprints])
         or actual_history != expected_history
     ):
         raise RestoreError("restored PostgreSQL store does not match the portable normalized export")

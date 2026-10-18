@@ -21,6 +21,7 @@ from ummanu._fsutil import (
 )
 from ummanu.board.backend import CARD, board_client
 from ummanu.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
+from ummanu.board.close_checkpoint import CloseCheckpointError, read_checkpoint_close_facts
 from ummanu.board.owner_checkpoint import OWNER_FILE, OwnerCheckpointError, read_checkpoint_owner_events
 from ummanu.board.po_checkpoint import PO_FILE, PoCheckpointError, read_checkpoint_po
 from ummanu.config import ConfigError, load_config, validate_instance
@@ -152,8 +153,9 @@ def materialize_checkpoint(
     try:
         read_checkpoint_outbox(board_source)
         read_checkpoint_owner_events(board_source)
+        read_checkpoint_close_facts(board_source)
         read_checkpoint_po(board_source)
-    except (OriginCheckpointError, OwnerCheckpointError, PoCheckpointError) as exc:
+    except (OriginCheckpointError, OwnerCheckpointError, PoCheckpointError, CloseCheckpointError) as exc:
         raise InstallError(str(exc)) from None
     for name in CHECKPOINT_RUNS:
         if not (runs_source / name).is_file():

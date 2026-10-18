@@ -997,6 +997,39 @@ and `restore-board` output explicitly report unavailable coverage; `restore-stat
 and unknown deliveries are never reconstructed from audit. This coverage diagnostic does not turn a
 valid legacy recovery into a failure.
 
+### Sprint close facts
+
+`export.json.sprint_close` declares version 1, `sprint_count`, `decision_count` and the SHA-256
+of `sprints.ndjson`. Each normalized sprint carries `close_facts`: nullable `close_reason` and
+`closeout_document`, plus every stored decision in source `decision_id` order. Decisions retain
+their sprint, subject kind, nullable issue/card subjects, verdict, nullable confirmation `actual`,
+reason, shared close request and microsecond timestamp. Open or reopened sprints can retain close
+facts. Declared zero decisions and zero sprints are complete captures.
+
+SqlSprintRecords reads the aggregate on the same board snapshot as cards, audit, sprint metadata,
+outbox, PO SQL and owner events. Existing sprint records carry it through staging, the analytics
+seal, flat/split checkpoints and materialization. Validation binds decisions to included sprint
+memberships, card sprint ownership and source audit requests before publication or restore writes.
+Duplicate JSON fields, malformed types, subjects, verdicts, confirmations, timestamps, identities,
+counts, digests and layouts refuse the capture. Secret scanning examines decoded close prose.
+
+Normal board import restores close facts through SqlSprintRecords after history, cards, sprints
+and memberships, inside the caller's app transaction. Missing semantic subjects are inserted with
+database-local identities. Complete readback proves columns, all decision fields and global order,
+including timestamp ties. Exact retry preserves existing rows; conflicting or extra typed state
+is refused without replacement. No close, reopen, issue disposition, notification or knowledge
+writer is replayed. The restored close request's audit still answers the ordinary close-result
+consumer. `closeout_document` remains relative to the existing transferred `state/knowledge` tree.
+New closes use the ordinary app role and identity sequence.
+
+Released checkpoints without close coverage recover successfully with `sprint_close_coverage`,
+`sprint_close_parity` and `sprint_close_diagnostic` reporting unavailable in restore state and
+`restore-board` output. The install/recover result retains that diagnostic. Audit close results
+remain available, but exact SQL facts are never inferred from them. Doctor and the final status
+gate accept legacy absence; a successful status does not prove typed close parity. Declared
+restored coverage requires complete parity. This scope excludes filesystem PO state and pending
+effect reconciliation.
+
 ### Owner events
 
 The optional `export.json.owner_events` object declares `version: 1`, `count` and `sha256` of

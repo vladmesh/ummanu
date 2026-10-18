@@ -394,15 +394,19 @@ class SqlSprintRecords:
                     (paths, reference),
                 )
         if "sprint_issues" in values:
-            self.client._execute("DELETE FROM sprint_issues WHERE sprint_ref = %s", (reference,))
             issues = [
                 str(issue).removeprefix("issue:")
                 for issue in json.loads(str(values["sprint_issues"]) or "[]")
             ]
+            self.client._execute(
+                "DELETE FROM sprint_issues WHERE sprint_ref = %s AND NOT (issue_id = ANY(%s::text[]))",
+                (reference, issues),
+            )
             if issues:
                 self.client._execute(
                     "INSERT INTO sprint_issues (sprint_ref, issue_id, ordinal) "
-                    "SELECT %s, issue_id, ordinal - 1 FROM unnest(%s::text[]) WITH ORDINALITY AS i(issue_id, ordinal)",
+                    "SELECT %s, issue_id, ordinal - 1 FROM unnest(%s::text[]) WITH ORDINALITY AS i(issue_id, ordinal) "
+                    "ON CONFLICT (sprint_ref, issue_id) DO UPDATE SET ordinal=EXCLUDED.ordinal",
                     (reference, issues),
                 )
         if "sprint_reservations" in values:
@@ -712,6 +716,60 @@ class SqlSprintRecords:
             ),
         )
         return int(rows[0][0])
+
+    def export_close_facts(self) -> dict[str, dict[str, Any]]:
+        """Every stored close column and decision, on the caller's connection and snapshot."""
+        from ummanu.board.close_checkpoint import DECISION_FIELDS
+
+        result = {str(ref): {"close_reason": reason, "closeout_document": document, "decisions": []}
+                  for ref, reason, document in self.client._query(
+                      "SELECT ref, close_reason, closeout_document FROM sprints ORDER BY ref"
+                  )}
+        for values in self.client._query(
+            f"SELECT {', '.join(DECISION_FIELDS)} FROM sprint_decisions ORDER BY decision_id"
+        ):
+            row = dict(zip(DECISION_FIELDS, values, strict=True))
+            row["decided_at"] = _rfc3339(row["decided_at"])
+            result[row["sprint_ref"]]["decisions"].append(row)
+        return result
+
+    def restore_close_facts(self, facts: dict[str, dict[str, Any]]) -> None:
+        """Merge missing semantic identities and prove complete parity in the caller's transaction."""
+        from ummanu.board.close_checkpoint import (
+            DECISION_FIELDS,
+            CloseCheckpointError,
+            decision_key,
+            require_close_set_parity,
+            validate_close_facts,
+            validate_close_merge,
+        )
+
+        if not self.client._depth:
+            raise CloseCheckpointError("sprint close restore requires a transaction")
+        for value in facts.values():
+            validate_close_facts(value)
+        self.client._execute("LOCK TABLE sprints, sprint_decisions IN SHARE ROW EXCLUSIVE MODE")
+        existing = self.export_close_facts()
+        if set(existing) != set(facts):
+            raise CloseCheckpointError("sprint close sprint_ref parity mismatch")
+        validate_close_merge(facts, existing)
+        pending = []
+        for reference, value in facts.items():
+            prior = existing[reference]
+            present = {decision_key(row) for row in prior["decisions"]}
+            pending.extend(row for row in value["decisions"] if decision_key(row) not in present)
+        for reference, value in facts.items():
+            self.client._execute(
+                "UPDATE sprints SET close_reason=%s, closeout_document=%s WHERE ref=%s",
+                (value["close_reason"], value["closeout_document"], reference),
+            )
+        fields = DECISION_FIELDS[1:]
+        for row in sorted(pending, key=lambda row: row["decision_id"]):
+            self.client._execute(
+                f"INSERT INTO sprint_decisions ({', '.join(fields)}) VALUES ({', '.join('%s' for _ in fields)})",
+                tuple(row[field] for field in fields),
+            )
+        require_close_set_parity(facts, self.export_close_facts())
 
     def save_close(
         self,

@@ -207,9 +207,12 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
 
         Its client is the board the export reads, whose card audit is the export's gate.
         """
+        client = client if client is not None else self.source
+        decisions = [row for facts in client.sprints.export_close_facts().values() for row in facts["decisions"]]
+        parents = {"product:ummanu", *("issue:" + row["issue_id"] for row in decisions if row["issue_id"])} if decisions else set()
         return mock.Mock(
-            export=mock.Mock(return_value=[CARD_EXPORT]),
-            client=client if client is not None else self.source,
+            export=mock.Mock(return_value=[CARD_EXPORT, *(card for card in TaskReader(client).export() if card["reference"] in parents)]),
+            client=client,
         )
 
     def _export(self) -> None:
@@ -219,9 +222,15 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
             reader=self._card_reader(),  # type: ignore[arg-type]
             sprint_client=self.source,
         )
-        # Only the normalized export travels; the target backend starts from nothing else.
-        for name in ("cards.json", "sprints.json"):
-            shutil.copy(self.source_data / "board" / name, self.target_data / "board" / name)
+        # These entity/admission fixtures consume the released legacy projection, without close coverage.
+        board = self.source_data / "board"
+        cards = json.loads((board / "cards.json").read_text())
+        cards["cards"] = [card for card in cards["cards"] if card["reference"] == CARD_EXPORT["reference"]]
+        (self.target_data / "board" / "cards.json").write_text(json.dumps(cards))
+        sprints = json.loads((board / "sprints.json").read_text())
+        for sprint in sprints["sprints"]:
+            sprint.pop("close_facts")
+        (self.target_data / "board" / "sprints.json").write_text(json.dumps(sprints))
         (self.target_data / "board" / "export.json").write_text(json.dumps({"version": 1}))
 
     def _exported_sprint(self) -> dict:
@@ -238,7 +247,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
 
     def test_export_carries_the_sprint_set_next_to_the_cards(self) -> None:
         summary = json.loads((self.source_data / "board" / "export.json").read_text(encoding="utf-8"))
-        self.assertEqual(summary["card_count"], 1)
+        self.assertEqual(summary["card_count"], 3)
         self.assertEqual(summary["sprint_count"], 1)
         lines = (self.source_data / "board" / "sprints.ndjson").read_text(encoding="utf-8").splitlines()
         self.assertEqual([json.loads(line)["reference"] for line in lines], [self.ref])
@@ -281,7 +290,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         # as explicit provenance. Timestamps are rendered to whole seconds, so two distinct
         # writes in the same second are allowed to have the same displayed value.
         self.assertEqual(live["audit"]["source"], exported["audit"])
-        self.assertEqual(normalize_sprint_entity(live), exported)
+        self.assertEqual(normalize_sprint_entity(live), {key: value for key, value in exported.items() if key != "close_facts"})
         self.assertEqual(restore_state(self.target_data)["sprint_count"], 1)
         self.assertEqual(restore_state(self.target_data)["sprint_parity"], "complete")
         self.assertEqual(restore_state(self.target_data)["owner_events_coverage"], "unavailable")
@@ -705,7 +714,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
             [comment["body"] for comment in live["comments"]],
             [comment["text"] for comment in exported["comments"]],
         )
-        self.assertEqual(normalize_sprint_entity(live), exported)
+        self.assertEqual(normalize_sprint_entity(live), {key: value for key, value in exported.items() if key != "close_facts"})
         self.assertEqual(restore_state(second_data)["sprint_parity"], "complete")
         self.assertEqual(
             [task["reference"] for task in second.tasks if task["reference"] == self.ref],

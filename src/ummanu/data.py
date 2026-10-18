@@ -138,6 +138,10 @@ def export_board(
         _write_ndjson(staging / "cards.ndjson", normalized)
         _write_json(staging / "sprints.json", {"version": 1, "sprints": sprints})
         _write_ndjson(staging / "sprints.ndjson", sprints)
+        from ummanu.board.close_checkpoint import close_coverage
+
+        if owner_events is not None or any("close_facts" in sprint for sprint in sprints):
+            summary["sprint_close"] = close_coverage(sprints, (staging / "sprints.ndjson").read_bytes())
         _write_json(staging / "audit.json", {"version": 1, "events": history})
         _write_ndjson(staging / "audit.ndjson", history)
         if outbox is not None:
@@ -156,6 +160,7 @@ def export_board(
             summary["po_sql"] = po_coverage(po, (staging / PO_FILE).read_bytes())
         _write_json(staging / "export.json", summary)
         # Validate the exact pair restore consumes before replacing the last good live export.
+        from ummanu.board.close_checkpoint import CloseCheckpointError, read_checkpoint_close_facts
         from ummanu.board.normalized_checkpoint import NormalizedBoardError, validated_normalized_cards
         from ummanu.board.origin_checkpoint import OriginCheckpointError, read_checkpoint_outbox
         from ummanu.board.owner_checkpoint import OwnerCheckpointError, read_checkpoint_owner_events
@@ -164,8 +169,9 @@ def export_board(
             validated_normalized_cards(staging)
             read_checkpoint_outbox(staging)
             read_checkpoint_owner_events(staging)
+            read_checkpoint_close_facts(staging)
             read_checkpoint_po(staging)
-        except (NormalizedBoardError, OriginCheckpointError, OwnerCheckpointError, PoCheckpointError) as exc:
+        except (NormalizedBoardError, OriginCheckpointError, OwnerCheckpointError, PoCheckpointError, CloseCheckpointError) as exc:
             raise RuntimeError(f"board export is not restorable: {exc}") from None
         _publish_component_entries(
             staging,
@@ -259,6 +265,8 @@ def _read_board_cut(
     try:
         task_reader = reader if reader is not None else TaskReader(board_client(instance_dir, serves=(CARD, SPRINT)))
         client = getattr(task_reader, "client", None)
+        if isinstance(client, SqlCardClient) and sprint_client is not None and sprint_client is not client:
+            raise RuntimeError("sprint export requires the coherent board snapshot connection")
         with bulk_lane(data_dir), (
             client.read_snapshot() if isinstance(client, SqlCardClient) else contextlib.nullcontext()
         ):
@@ -309,7 +317,16 @@ def export_sprint_entities(instance_dir: Path, client: Any = None) -> list[dict[
     try:
         sprint_board = client if client is not None else board_client(instance_dir, serves=(SPRINT,))
         reader = SprintReader(sprint_board)
-        return [normalize_sprint_entity(sprint) for sprint in reader.export()]
+        sprints = reader.export()
+        from ummanu.board.sql_cards import SqlCardClient
+
+        if isinstance(sprint_board, SqlCardClient):
+            facts = sprint_board.sprints.export_close_facts()
+            if set(facts) != {sprint["ref"] for sprint in sprints}:
+                raise RuntimeError("sprint close export sprint_ref parity mismatch")
+            for sprint in sprints:
+                sprint["close_facts"] = facts[sprint["ref"]]
+        return [normalize_sprint_entity(sprint) for sprint in sprints]
     except TaskError as exc:
         raise RuntimeError(f"sprint export failed: {exc.message}") from None
 
@@ -349,6 +366,7 @@ def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
     ]
     return {
         "reference": str(sprint.get("ref") or ""),
+        **({"close_facts": sprint["close_facts"]} if "close_facts" in sprint else {}),
         "goal": str(sprint.get("goal") or ""),
         "definition_of_done": str(sprint.get("definition_of_done") or ""),
         "repositories": [str(repo) for repo in sprint.get("repositories") or []],

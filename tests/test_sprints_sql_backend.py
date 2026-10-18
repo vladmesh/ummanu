@@ -17,12 +17,18 @@ from unittest import mock
 from tests.fakes.sprints import SprintFixture
 from tests.observer_identity import as_observer
 from tests.sprint_close_fixtures import close_decisions
+from tests.sql_backend_fixtures import PostgresBoard
 from ummanu import sprints
 from ummanu.board import sql_sprints
+from ummanu.board.close_checkpoint import CloseCheckpointError, require_close_set_parity
+from ummanu.board.sql_cards import SqlCardClient
 from ummanu.board.sql_sprints import sprint_key
+from ummanu.data import export_board, init_layout
+from ummanu.product_issues import ProductIssueStore
+from ummanu.restore import RestoreError, import_normalized_board
 from ummanu.sprint_observer import head_choice
 from ummanu.sprints import SprintReader, SprintWriter
-from ummanu.tasks import TaskError, TaskWriter
+from ummanu.tasks import TaskError, TaskReader, TaskWriter
 
 
 class SqlSprintAtomicityTests(SprintFixture):
@@ -57,6 +63,107 @@ class SqlSprintAtomicityTests(SprintFixture):
             self.client._query("SELECT count(*) FROM board_events WHERE request_id=%s", (request_id,)),
             [(0,)],
         )
+
+    def _export_mixed_close(self):
+        products = ProductIssueStore(self.client, data_dir=self.tmp.name, instance=self.instance)
+        issue = products.create_issue(
+            product="ummanu", issue_kind="feature", priority="P1", title="Confirmed issue",
+            description="Closed independently", actor="operator", request_id="create-confirmed-issue",
+        )["ref"]
+        reference = self.writer.create(
+            role="po", actor="operator", goal="Preserve mixed close", reference="sprint:mixed",
+            repositories=[str(Path(self.tmp.name) / "repo")], product="ummanu", issues=["issue:open", issue],
+            projects=["ummanu"], observer=head_choice("codex-observer"), request_id="create-mixed-close",
+        )["sprint"]["ref"]
+        products.close_issue(reference=issue, reason="invalid", actor="operator", request_id="close-confirmed-issue")
+        tasks = TaskWriter(self.client, data_dir=self.tmp.name)
+        cards = [tasks.create(
+            role="po", actor="operator", project="ummanu", task_type="code", title=name,
+            target="ready", sprint=reference, request_id=f"create-mixed-{name}",
+        )["task"]["ref"] for name in ("drop", "confirm")]
+        with mock.patch.object(sql_sprints, "_now", return_value=datetime(2026, 9, 1, 0, 0, 0, 12, tzinfo=UTC)):
+            self.writer.close(
+                role="po", actor="operator", reference=reference, request_id="close-mixed",
+                decisions={
+                    "issues": [{"ref": "issue:open", "verdict": "open", "reason": "carry forward"},
+                               {"ref": issue, "verdict": "already_closed", "actual": "invalid", "reason": "confirmed"}],
+                    "cards": [{"ref": cards[0], "verdict": "drop", "reason": "deferred"},
+                              {"ref": cards[1], "verdict": "already_moved", "actual": "ready", "reason": "confirmed"}],
+                },
+            )
+        data = Path(self.tmp.name) / "capture"
+        init_layout(data)
+        export_board(data, instance_dir=self.instance, reader=TaskReader(self.client), sprint_client=self.client)
+        return data, self.client.sprints.export_close_facts()
+
+    def test_native_mixed_close_import_remaps_ids_and_caller_rollback_removes_all_facts(self):
+        data, expected = self._export_mixed_close()
+        target = self.make_empty_sprint_client()
+        app = SqlCardClient(PostgresBoard.shared().config(target.credentials.dbname).for_role("app"), self.instance)
+        self.addCleanup(app.close)
+        with self.assertRaisesRegex(RuntimeError, "caller rollback"), app.transaction():
+            import_normalized_board(data, client=app, instance=self.instance)
+            require_close_set_parity(expected, app.sprints.export_close_facts())
+            raise RuntimeError("caller rollback")
+        self.assertEqual(app.sprints.export_close_facts(), {})
+        import_normalized_board(data, client=app, instance=self.instance)
+        actual = app.sprints.export_close_facts()
+        require_close_set_parity(expected, actual)
+        self.assertNotEqual(expected["sprint:mixed"]["decisions"][0]["decision_id"], actual["sprint:mixed"]["decisions"][0]["decision_id"])
+        import_normalized_board(data, client=app, instance=self.instance)
+        self.assertEqual(app.sprints.export_close_facts(), actual)
+
+    def test_close_import_refuses_conflicting_extra_or_changed_columns_without_overwriting(self):
+        data, expected = self._export_mixed_close()
+        target = self.make_empty_sprint_client()
+        app = SqlCardClient(PostgresBoard.shared().config(target.credentials.dbname).for_role("app"), self.instance)
+        self.addCleanup(app.close)
+        import_normalized_board(data, client=app, instance=self.instance)
+        for damage in ("reason", "column", "extra"):
+            with self.subTest(damage=damage), self.assertRaisesRegex(RuntimeError, "undo fixture"), app.transaction():
+                if damage == "reason":
+                    app._execute("UPDATE sprint_decisions SET reason='conflicting stored reason' WHERE subject_kind='card'")
+                elif damage == "column":
+                    app._execute("UPDATE sprints SET closeout_document='retained-document'")
+                else:
+                    app._execute("INSERT INTO sprint_issues(sprint_ref,issue_id,ordinal) VALUES ('sprint:mixed','done',99)")
+                    app._execute(
+                        "INSERT INTO sprint_decisions(sprint_ref,subject_kind,issue_id,verdict,actual,reason,request_id,decided_at) "
+                        "VALUES ('sprint:mixed','issue','done','already_closed','resolved','retained extra','close-mixed',now())"
+                    )
+                before = app.sprints.export_close_facts()
+                with self.assertRaises((RestoreError, CloseCheckpointError)), app.transaction():
+                    import_normalized_board(data, client=app, instance=self.instance)
+                self.assertEqual(app.sprints.export_close_facts(), before)
+                raise RuntimeError("undo fixture")
+        require_close_set_parity(expected, app.sprints.export_close_facts())
+
+    def test_reopened_sprint_retains_close_facts_through_normal_import(self):
+        self._create()
+        self.writer.close(
+            role="po", actor="operator", reference="sprint:atomic", request_id="close-before-reopen",
+            decisions={"issues": [{"ref": "issue:open", "verdict": "open", "reason": "retained"}], "cards": []},
+            reason="retained close reason",
+        )
+        self.writer.reopen(role="po", actor="operator", reference="sprint:atomic", request_id="reopen-with-facts")
+        data = Path(self.tmp.name) / "capture"
+        init_layout(data)
+        export_board(data, instance_dir=self.instance, reader=TaskReader(self.client), sprint_client=self.client)
+        target = self.make_empty_sprint_client()
+        import_normalized_board(data, client=target, instance=self.instance)
+        require_close_set_parity(self.client.sprints.export_close_facts(), target.sprints.export_close_facts())
+        self.assertEqual(SprintReader(target).show("sprint:atomic")["status"], "open")
+
+    def test_native_legacy_sprint_close_with_zero_decisions_has_explicit_coverage(self):
+        self.writer.restore_create(reference="sprint:legacy", goal="Legacy sprint", request_id="restore-legacy-sprint")
+        self.writer.close(role="po", actor="operator", reference="sprint:legacy", request_id="close-legacy-sprint")
+        data = Path(self.tmp.name) / "capture"
+        init_layout(data)
+        export_board(data, instance_dir=self.instance, reader=TaskReader(self.client), sprint_client=self.client)
+        target = self.make_empty_sprint_client()
+        import_normalized_board(data, client=target, instance=self.instance)
+        facts = target.sprints.export_close_facts()["sprint:legacy"]
+        self.assertEqual(facts, {"close_reason": None, "closeout_document": None, "decisions": []})
 
     def test_staged_persisted_projection_and_comment_marker_actor_stamp(self) -> None:
         reference = "sprint:1000"

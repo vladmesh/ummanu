@@ -431,6 +431,13 @@ def install(args: argparse.Namespace) -> InstallResult:
             from ummanu.board.owner_checkpoint import LEGACY_OWNER_COVERAGE, read_checkpoint_owner_events
 
             owner_events = read_checkpoint_owner_events(checkpoint_root / "state" / "board")
+            from ummanu.board.close_checkpoint import LEGACY_CLOSE_COVERAGE, read_checkpoint_close_facts
+
+            close_facts = read_checkpoint_close_facts(checkpoint_root / "state" / "board")
+            result.add(
+                "sprint-close", "unchanged", LEGACY_CLOSE_COVERAGE if close_facts is None
+                else f"complete checkpoint coverage: {len(close_facts)} sprint close aggregate(s)",
+            )
             result.add(
                 "owner-events",
                 "unchanged",
