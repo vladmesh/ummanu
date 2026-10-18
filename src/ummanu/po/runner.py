@@ -21,13 +21,14 @@ from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ummanu._fsutil import fsync_directory
 from ummanu.head_health import HeadHealth, failure_status, failure_until, until_text
 from ummanu.head_registry import HeadRegistryConfigError, installed_pair
 from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV
 from ummanu.po.models import DEFAULT_EFFORTS, EffortRefused, require_explicit_effort
+from ummanu.po.restore_context import UNCERTAIN, RestoredContexts
 from ummanu.po.store import (
     CLIS,
     COMPLETED,
@@ -61,6 +62,9 @@ from ummanu.runtime.provider_errors import (
     summarize_provider_error,
 )
 from ummanu.runtime.provider_models import codex_rollout_path, codex_session_models
+
+if TYPE_CHECKING:
+    from ummanu.board.po_restore import PoRestorePlan
 
 RUNS_DIR_NAME = "po-runs"
 STOPPED_REASON = "stopped by the owner"
@@ -324,6 +328,7 @@ class PoRunner:
         # Told (session id, seq) after a waiter settled a turn: the PO service starts the next input.
         self.on_settled = on_settled
         self.data_dir = Path(data_dir)
+        self.restored_contexts = RestoredContexts(self.data_dir, store)
         self.workspace = workspace_dir(self.data_dir)
         self.runs = runs_dir(self.data_dir)
         self.executables = {"claude": "claude", "codex": "codex", **dict(executables or {})}
@@ -464,11 +469,22 @@ class PoRunner:
         state = outcome["state"]
         resolved = outcome.get("resolved_model")
         if state == COMPLETED:
-            return self.store.complete_turn(session_id, seq, outcome["answer"], resolved_model=resolved)
-        extra = {"resolved_model": resolved} if resolved is not None else {}
-        return self.store.finish_turn(session_id, seq, state, outcome["reason"], **extra)
+            changed = self.store.complete_turn(session_id, seq, outcome["answer"], resolved_model=resolved)
+        else:
+            extra = {"resolved_model": resolved} if resolved is not None else {}
+            changed = self.store.finish_turn(session_id, seq, state, outcome["reason"], **extra)
+        if changed:
+            self.restored_contexts.settled(session_id, seq, outcome)
+        return changed
 
     # --- sessions ---------------------------------------------------------------------------
+
+    def prepare_restored_context(
+        self, records: dict[str, list[dict[str, Any]]], plan: PoRestorePlan,
+    ) -> None:
+        """Prepare imported sessions against their persisted frozen plan; never import or launch."""
+        with self._lock:
+            self.restored_contexts.prepare(records, plan)
 
     def create_session(
         self, cli: str, model: str, effort: str, *, efforts: Mapping[str, tuple[str, ...]] | None = None
@@ -660,11 +676,14 @@ class PoRunner:
         files = self.files(session_id, seq)
         # Read after the claim: the previous turn may have recorded Codex's thread id.
         session = self.store.session(session_id)
-        # Claude is resumed only once a turn completed; after a stopped or failed first turn
-        # the conversation may or may not exist, and the waiter settles that (`_resume_instead`).
-        established = any(
-            earlier.state == COMPLETED for earlier in self.store.turns(session_id) if earlier.seq < seq
-        )
+        restored = self.restored_contexts.prompt(session, seq, text)
+        if restored is None:
+            # Ordinary sessions can probe an uncertain first attempt with `_resume_instead`.
+            established = any(
+                earlier.state == COMPLETED for earlier in self.store.turns(session_id) if earlier.seq < seq
+            )
+        else:
+            established, text = restored
         argv = self.argv(session, files, established=established)
         files.directory.mkdir(parents=True, exist_ok=True)
         files.prompt.write_text(text, encoding="utf-8")
@@ -701,6 +720,7 @@ class PoRunner:
         Output is appended, so a turn relaunched by `_resume_instead` keeps both attempts' raw output.
         """
         try:
+            self.restored_contexts.launching(session, seq)
             process = self._turn_launcher(
                 session, seq, argv, files, self.session_environment(session, seq),
                 self._head_spec(session),
@@ -851,11 +871,20 @@ class PoRunner:
     def _recover_one(self, turn: Turn, rerun: bool) -> bool:
         """Settle or re-run one turn this runner does not own; False when nothing changed. Holds `_lock`."""
         key = (turn.session_id, turn.seq)
+        restored = self.restored_contexts.context(turn.session_id)
+        if restored is not None and turn.seq <= restored["boundary"]:
+            raise RunnerError("captured source turns cannot be recovered or re-run")
         outcome = self._pending_outcome(turn.session_id, turn.seq)
         if outcome is not None:
             return self._terminal(turn.session_id, turn.seq, None)
         alive = still_running(turn.pid, turn.process_identity)
         scoped = self._cleanup_turn_scope(turn.session_id, turn.seq)
+        if restored is not None:
+            if alive and not scoped:
+                _kill_group(int(turn.pid))
+            reason = ("completion and external effects are unknown; no automatic retry"
+                      if restored["phase"] == "established" else UNCERTAIN)
+            return self._finish(turn.session_id, turn.seq, INTERRUPTED, f"{RECOVERED_REASON}; {reason}")
         if not rerun or turn.reason is not None:
             failed = self._rerun_failures.get(key)
             if failed is not None:
@@ -996,6 +1025,8 @@ class PoRunner:
         """
         if session.cli != "claude" or code != 1 or "--session-id" not in argv:
             return None
+        if self.restored_contexts.context(session.session_id) is not None:
+            return None
         if CLAUDE_SESSION_IN_USE not in self._stderr_tail(files):
             return None
         with self._lock:
@@ -1034,9 +1065,20 @@ class PoRunner:
                 session.session_id, seq, FAILED, missing or "no final answer", resolved_model=resolved
             )
         else:
-            self._terminal(session.session_id, seq, {
-                "state": COMPLETED, "answer": answer, "resolved_model": resolved,
-            })
+            outcome: dict[str, Any] = {"state": COMPLETED, "answer": answer, "resolved_model": resolved}
+            restored = self.restored_contexts.context(session.session_id)
+            if restored is not None and restored["phase"] == "launching":
+                native = codex_thread_id(stdout) if session.cli == "codex" else next((
+                    document.get("session_id") for document in _json_documents(stdout)
+                    if isinstance(document, dict) and document.get("type") == "result"
+                ), None)
+                if (not isinstance(native, str) or not native
+                        or (session.cli == "claude" and native != session.cli_session_id)
+                        or native != self.store.session(session.session_id).cli_session_id):
+                    self._finish(session.session_id, seq, INTERRUPTED, UNCERTAIN)
+                    return
+                outcome["restore_native_id"] = native
+            self._terminal(session.session_id, seq, outcome)
 
     # --- provider fallback (ummanu-108) -------------------------------------------------------
 
@@ -1087,6 +1129,8 @@ class PoRunner:
         stdout offset, or None when fallback is unavailable.
         """
         if self.fallback_choice is None:
+            return None
+        if self.restored_contexts.context(session.session_id) is not None:
             return None
         failure = self._provider_failure(session, code, files, record=True)
         if failure is None:
