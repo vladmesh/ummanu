@@ -420,6 +420,7 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
                 task_type="decision",
                 title="Owner decision",
                 target="ready",
+                sprint=SPRINTS[1],
                 reference=ref,
                 request_id=f"create-owner-{number}",
             )

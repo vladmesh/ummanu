@@ -234,7 +234,21 @@ class SnapshotRepositoryTests(SnapshotCase):
         for name in LOGICAL_FILES:
             if reader.has(name):
                 (flat_source / name).write_bytes(reader.read_bytes(name))
+        shutil.copyfile(source / checkpoint.ANALYTICS_MANIFEST, flat_source / checkpoint.ANALYTICS_MANIFEST)
         shutil.copytree(checkout / "state" / "runs", flat / "state" / "runs")
+        git(flat, "init", "--quiet")
+        git(flat, "add", "state")
+        git(
+            flat,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "Flat checkpoint",
+        )
         for layout, instance in (("flat", flat), ("split", checkout)):
             with self.subTest(layout=layout):
                 checkpoint.verify_analytics_checkpoint(instance / "state" / "board")

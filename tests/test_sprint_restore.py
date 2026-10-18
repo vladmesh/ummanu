@@ -20,6 +20,7 @@ from unittest import mock
 from tests.fakes.sprints import SprintBackendFixture, _write_project_registry
 from tests.observer_identity import as_observer
 from tests.sprint_close_fixtures import close_decisions
+from ummanu.board.owner_checkpoint import LEGACY_OWNER_COVERAGE
 from ummanu.data import export_board, init_layout, normalize_sprint_entity
 from ummanu.restore import (
     RestoreError,
@@ -284,9 +285,14 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         self.assertEqual(normalize_sprint_entity(live), exported)
         self.assertEqual(restore_state(self.target_data)["sprint_count"], 1)
         self.assertEqual(restore_state(self.target_data)["sprint_parity"], "complete")
+        self.assertEqual(restore_state(self.target_data)["owner_events_coverage"], "unavailable")
         self.assertEqual(
             restore_findings(self.target_data),
-            ["memory index has not been rebuilt", "managed reconcile has not been applied"],
+            [
+                LEGACY_OWNER_COVERAGE,
+                "memory index has not been rebuilt",
+                "managed reconcile has not been applied",
+            ],
         )
 
     def test_the_observer_declaration_survives_a_round_trip(self) -> None:

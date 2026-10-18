@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import NamedTuple
 from unittest import mock
 
+from tests.owner_checkpoint_fixtures import write_bell
 from tests.restore_fixtures import (
     _producer_exports,
     _restore_card,
@@ -137,6 +138,7 @@ def _seed_producer(data_dir: Path, instance_dir: Path) -> tuple[list[dict[str, o
     (board / "cards.ndjson").write_text("".join(json.dumps(card) + "\n" for card in cards), encoding="utf-8")
     (board / "export.json").write_text("{}", encoding="utf-8")
     _write_board_history(board)
+    write_bell(board, [])
 
     _seed_instance_facts(instance_dir, CANON_FACTS)
     facts = export_memory(data_dir, instance_dir).count
@@ -297,6 +299,8 @@ class RestoreEndToEndTests(unittest.TestCase):
             self.assertEqual(restore_findings(data_dir), [])
             self.assertEqual(main(["doctor", "--offline", "--instance", str(instance)]), 0)
             state = restore_state(data_dir)
+            self.assertEqual(state["owner_events_coverage"], "restored")
+            self.assertEqual(state["owner_events_parity"], "complete")
             self.assertEqual(state["board_count"], fixture.manifest["components"]["board"]["count"])
             self.assertEqual(state["memory_index_count"], fixture.facts)
             # The archive carries the derived export, not a journal: canon came

@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 import ummanu.data as data_module
+from tests.fakes.sprints import _write_project_registry, sprint_store
 from tests.fakes.tasks import empty_seed
 from tests.origin_checkpoint_fixtures import obligations
 from tests.owner_checkpoint_fixtures import bell_rows
@@ -49,7 +50,8 @@ from ummanu.memory_write import (
     propose_memory_fact,
     supersede_memory_fact,
 )
-from ummanu.sprints import SPRINT_BOARD_NAME
+from ummanu.sprint_observer import none_choice
+from ummanu.sprints import SPRINT_BOARD_NAME, SprintWriter
 from ummanu.tasks import TaskError, TaskReader, TaskWriter
 
 
@@ -257,7 +259,19 @@ class ExportTests(unittest.TestCase):
     def test_owner_answer_between_card_and_bell_reads_cannot_tear_attention(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            client = card_store(self, empty_seed(), instance_dir=root)
+            instance = _write_project_registry(root, "ummanu", "secretary-instance", "other")
+            client = sprint_store(self, instance_dir=instance)
+            sprint = SprintWriter(client, data_dir=root, instance=instance).create(
+                role="po",
+                actor="po",
+                goal="Preserve pending owner attention",
+                repositories=[str(root / "project-repos" / "ummanu")],
+                product="ummanu",
+                issues=["issue:open"],
+                projects=["ummanu"],
+                observer=none_choice(),
+                request_id="create-owner-sprint",
+            )["sprint"]["ref"]
             writer = TaskWriter(client, data_dir=root)
             writer.create(
                 role="po",
@@ -266,6 +280,7 @@ class ExportTests(unittest.TestCase):
                 task_type="decision",
                 title="Owner decision",
                 target="ready",
+                sprint=sprint,
                 reference="ummanu-9",
                 request_id="create-owner-cut",
             )
@@ -287,7 +302,7 @@ class ExportTests(unittest.TestCase):
             reader = TaskReader(client)
             original = reader.export
             before = OwnerEventStore(client.credentials, client=client).export()
-            other = SqlCardClient(client.credentials, root)
+            other = SqlCardClient(client.credentials, instance)
             self.addCleanup(other.close)
 
             def read_then_answer():
@@ -303,10 +318,11 @@ class ExportTests(unittest.TestCase):
                 return cards
 
             with mock.patch.object(reader, "export", side_effect=read_then_answer):
-                export_board(root, instance_dir=root, reader=reader, sprint_client=client)
+                export_board(root, instance_dir=instance, reader=reader, sprint_client=client)
             require_owner_parity(before, read_checkpoint_owner_events(root / "board"))
             cards = json.loads((root / "board" / "cards.json").read_text())["cards"]
-            self.assertTrue(cards[0]["metadata"]["waiting_owner"])
+            captured = next(card for card in cards if card["reference"] == "ummanu-9")
+            self.assertTrue(captured["metadata"]["waiting_owner"])
             self.assertTrue(
                 all(
                     row["read_at"] is not None
