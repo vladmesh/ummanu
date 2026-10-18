@@ -547,10 +547,17 @@ class BoardCutTests(unittest.TestCase):
             reader.export = lambda: read([{"reference": "demo-1"}])
             audit.status.side_effect = lambda: read({"ok": True})
             audit.events.side_effect = lambda: read([])
-            client._query.side_effect = lambda *_: read([
-                (1, "demo-1", "transition", "audit-request", "done", datetime(2026, 1, 1, tzinfo=UTC),
-                 None, None, None, None, None),
-            ])
+            queried = []
+
+            def query(sql):
+                table = sql.split(" FROM ", 1)[1].split()[0]
+                queried.append(table)
+                return read([
+                    (1, "demo-1", "transition", "audit-request", "done", datetime(2026, 1, 1, tzinfo=UTC),
+                     None, None, None, None, None),
+                ] if table == "origin_returns" else [])
+
+            client._query.side_effect = query
             with (
                 mock.patch.object(data, "task_audit_for", return_value=audit),
                 mock.patch.object(
@@ -560,12 +567,14 @@ class BoardCutTests(unittest.TestCase):
                 ),
                 mock.patch("ummanu.sprints.sprint_client") as sprint_factory,
             ):
-                cards, history, sprints, outbox = data._read_board_cut(root, root, reader, None)
+                cards, history, sprints, outbox, po = data._read_board_cut(root, root, reader, None)
             self.assertEqual(cards, [{"reference": "demo-1"}])
             self.assertEqual(history, [])
             self.assertIs(sprints[0]["client"], client)
             self.assertEqual(len(outbox), 1)
             self.assertEqual(outbox[0]["event_id"], "transition")
+            self.assertEqual(po, {table: [] for table in ("po_sessions", "po_turns", "po_feed", "po_requests")})
+            self.assertCountEqual(queried, ["origin_returns", "po_sessions", "po_turns", "po_feed", "po_requests"])
             sprint_factory.assert_not_called()
             client.read_snapshot.assert_called_once_with()
             with try_file_lock(root / "dispatcher" / "board-bulk.lock") as acquired:
