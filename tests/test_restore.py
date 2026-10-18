@@ -28,7 +28,7 @@ from tests.sql_backend_fixtures import PostgresBoard, card_store
 from ummanu._fsutil import write_json, write_ndjson
 from ummanu.board.origin_checkpoint import read_checkpoint_outbox, require_outbox_parity
 from ummanu.board.origin_outbox import OriginOutboxStore
-from ummanu.board.owner_checkpoint import require_owner_parity
+from ummanu.board.owner_checkpoint import LEGACY_OWNER_COVERAGE, require_owner_parity
 from ummanu.board.owner_events import OwnerEventStore
 from ummanu.board.po_checkpoint import LEGACY_PO_COVERAGE, export_po_records
 from ummanu.board.sql_audit import SqlTaskAudit
@@ -215,7 +215,11 @@ class RestoreTests(unittest.TestCase):
             state = restore_state(data_dir)
             self.assertEqual(state["owner_events_coverage"], "unavailable")
             self.assertEqual(state["owner_events_parity"], "unavailable")
-            self.assertIn(state["owner_events_diagnostic"], restore_findings(data_dir))
+            self.assertEqual(state["owner_events_diagnostic"], LEGACY_OWNER_COVERAGE)
+            self.assertEqual(
+                restore_findings(data_dir),
+                ["memory index has not been rebuilt", "managed reconcile has not been applied"],
+            )
 
     def test_owner_missing_payload_refuses_before_any_board_writes(self):
         with tempfile.TemporaryDirectory() as tmp:

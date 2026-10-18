@@ -234,7 +234,7 @@ class SnapshotRepositoryTests(SnapshotCase):
         for name in LOGICAL_FILES:
             if reader.has(name):
                 (flat_source / name).write_bytes(reader.read_bytes(name))
-        shutil.copyfile(source / checkpoint.ANALYTICS_MANIFEST, flat_source / checkpoint.ANALYTICS_MANIFEST)
+        checkpoint._write_analytics_manifest(flat_source)
         shutil.copytree(checkout / "state" / "runs", flat / "state" / "runs")
         git(flat, "init", "--quiet")
         git(flat, "add", "state")
@@ -281,6 +281,8 @@ class SnapshotRepositoryTests(SnapshotCase):
                 "undeclared",
                 "symlink",
                 "duplicate-field",
+                "duplicate-summary",
+                "duplicate-coverage",
                 "duplicate-row",
                 "class",
             ):
@@ -296,7 +298,24 @@ class SnapshotRepositoryTests(SnapshotCase):
                     elif defect == "json":
                         (source / OWNER_FILE).write_text("broken")
                     elif defect == "duplicate-field":
-                        (source / OWNER_FILE).write_text('{"id":1,"id":2}\n')
+                        row = bell_rows(1)[0]
+                        payload = (json.dumps(row)[:-1] + ', "text": "private-duplicate-value"}\n').encode()
+                        (source / OWNER_FILE).write_bytes(payload)
+                        changed = json.loads(summary)
+                        changed["owner_events"].update(count=1, sha256=hashlib.sha256(payload).hexdigest())
+                        (source / "export.json").write_text(json.dumps(changed))
+                    elif defect == "duplicate-summary":
+                        changed = json.loads(summary)
+                        payload = (
+                            json.dumps(changed)[:-1]
+                            + ', "owner_events": '
+                            + json.dumps(changed["owner_events"])
+                            + "}"
+                        )
+                        (source / "export.json").write_text(payload)
+                    elif defect == "duplicate-coverage":
+                        payload = summary.decode().replace('"count": 0', '"count": 0, "count": 0')
+                        (source / "export.json").write_text(payload)
                     elif defect in {"duplicate-row", "class"}:
                         rows = bell_rows(2)
                         if defect == "duplicate-row":
@@ -315,8 +334,12 @@ class SnapshotRepositoryTests(SnapshotCase):
                         else:
                             changed.pop("owner_events")
                         (source / "export.json").write_text(json.dumps(changed))
-                    with self.assertRaises(OwnerCheckpointError):
+                    with self.assertRaises(OwnerCheckpointError) as failure:
                         read_checkpoint_owner_events(source)
+                    if defect in {"duplicate-field", "duplicate-summary", "duplicate-coverage"}:
+                        self.assertEqual(
+                            str(failure.exception), "owner events checkpoint is unreadable or invalid"
+                        )
                     target = self.root / f"bad-owner-{layout}-{defect}"
                     with self.assertRaises(InstallError):
                         materialize_checkpoint(self.live, target)

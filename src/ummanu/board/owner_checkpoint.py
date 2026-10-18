@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ummanu._fsutil import ndjson_lines
-from ummanu.board.checkpoint_layout import open_checkpoint_board, read_export_summary
+from ummanu.board.checkpoint_layout import open_checkpoint_board, read_export_summary, unique_json_fields
 from ummanu.board.owner_events import KIND_CLASS
 from ummanu.board.sql_rows import parse_rfc3339, rfc3339
 
@@ -85,7 +85,7 @@ def read_checkpoint_owner_events(directory: Path) -> list[dict[str, Any]] | None
             raise OwnerCheckpointError("unsupported owner events coverage")
         payload = board.read_bytes(OWNER_FILE)
         rows = [
-            json.loads(line, object_pairs_hook=_unique_fields)
+            json.loads(line, object_pairs_hook=unique_json_fields)
             for line in ndjson_lines(payload.decode("utf-8"))
             if line.strip()
         ]
@@ -97,15 +97,6 @@ def read_checkpoint_owner_events(directory: Path) -> list[dict[str, Any]] | None
         raise
     except (OSError, UnicodeError, ValueError):
         raise OwnerCheckpointError("owner events checkpoint is unreadable or invalid") from None
-
-
-def _unique_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise OwnerCheckpointError("owner events duplicate JSON field")
-        result[key] = value
-    return result
 
 
 def require_owner_parity(expected: list[dict[str, Any]], actual: list[dict[str, Any]]) -> None:

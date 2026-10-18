@@ -1021,9 +1021,7 @@ def restore_findings(data_dir: Path) -> list[str]:
         findings.append("sprint restore is incomplete")
     if state.get("po_sql_coverage") == "captured" and state.get("po_sql_restore") != "finished":
         findings.append(f"PO SQL restore is incomplete at {state.get('po_sql_restore')}")
-    if state.get("owner_events_coverage") == "unavailable":
-        findings.append(LEGACY_OWNER_COVERAGE)
-    elif state.get("owner_events_coverage") == "restored" and state.get("owner_events_parity") != "complete":
+    if state.get("owner_events_coverage") == "restored" and state.get("owner_events_parity") != "complete":
         findings.append("owner events restore parity is incomplete")
     if state.get("memory_index") != "complete":
         findings.append("memory index has not been rebuilt")

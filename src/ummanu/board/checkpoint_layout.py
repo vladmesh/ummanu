@@ -196,11 +196,12 @@ def open_checkpoint_board(directory: Path) -> CheckpointBoard:
     return CheckpointBoard(root, SPLIT)
 
 
-def _summary_fields(pairs: list[tuple[str, object]]) -> dict:
-    result = {}
+def unique_json_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Reject duplicate JSON fields at any nesting depth without exposing their contents."""
+    result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
-            raise CheckpointLayoutError("board export.json contains a duplicate field")
+            raise ValueError("duplicate JSON field")
         result[key] = value
     return result
 
@@ -208,7 +209,7 @@ def _summary_fields(pairs: list[tuple[str, object]]) -> dict:
 def read_export_summary(board: CheckpointBoard) -> dict:
     """Require export.json before interpreting coverage, including released v1/v2 absence."""
     try:
-        summary = json.loads(board.read_text("export.json"), object_pairs_hook=_summary_fields)
+        summary = json.loads(board.read_text("export.json"), object_pairs_hook=unique_json_fields)
     except (OSError, UnicodeError, ValueError):
         raise CheckpointLayoutError("board export.json is required and must be readable JSON") from None
     if not isinstance(summary, dict) or type(summary.get("version", 1)) is not int or summary.get("version", 1) not in (1, 2):

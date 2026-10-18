@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import importlib
+import json
 import re
 import tempfile
 import unittest
@@ -28,6 +29,7 @@ from tests.po_handover_fakes import REASON, MemoryAudit, OneCardClient, decision
 from tests.web_fakes import Recording
 from ummanu.board import owner_events, schema, schema_gate
 from ummanu.board.owner_checkpoint import (
+    LEGACY_OWNER_COVERAGE,
     OwnerCheckpointError,
     require_owner_parity,
     scan_owner_secrets,
@@ -807,10 +809,6 @@ class DispatcherRecordsLoadUnchangedTests(unittest.TestCase):
         self.assertEqual(loaded.state, "po_submitted")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class OwnerCheckpointTests(unittest.TestCase):
     def test_complete_history_accepts_historical_kinds_subjects_and_equal_timestamp_order(self):
         rows = bell_rows(513)
@@ -875,3 +873,32 @@ class OwnerCheckpointTests(unittest.TestCase):
                     payload, lambda value, secret=secret: redact(value, secret_values=(secret,))
                 )
             self.assertNotIn("private", str(failure.exception))
+
+    def test_legacy_coverage_does_not_block_status_but_incomplete_promised_parity_does(self):
+        from ummanu.restore import restore_findings, restore_state
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            path = data_dir / "restore-state.json"
+            state = {
+                "version": 1,
+                "board": "complete",
+                "board_parity": "complete",
+                "sprints": "complete",
+                "sprint_parity": "complete",
+                "memory_index": "complete",
+                "reconcile": "complete",
+                "owner_events_coverage": "unavailable",
+                "owner_events_parity": "unavailable",
+                "owner_events_diagnostic": LEGACY_OWNER_COVERAGE,
+            }
+            path.write_text(json.dumps(state))
+            self.assertEqual(restore_findings(data_dir), [])
+            self.assertEqual(restore_state(data_dir)["owner_events_diagnostic"], LEGACY_OWNER_COVERAGE)
+            state.update(owner_events_coverage="restored", owner_events_parity="failed")
+            path.write_text(json.dumps(state))
+            self.assertEqual(restore_findings(data_dir), ["owner events restore parity is incomplete"])
+
+
+if __name__ == "__main__":
+    unittest.main()
