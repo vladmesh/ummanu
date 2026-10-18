@@ -536,12 +536,13 @@ class PoTerminalOwnershipTests(unittest.TestCase):
     def concurrent_settlers(self, first: str) -> None:
         other = PoRunner(self.store, self.runner.data_dir)
         entered, release = threading.Event(), threading.Event()
+        competing, finished = threading.Event(), threading.Event()
         errors = []
         method = "finish_turn" if first == "stop" else "complete_turn"
         original = getattr(self.store, method)
         def delayed(*args, **kwargs):
             entered.set()
-            if not release.wait(5):
+            if not release.wait(1):
                 raise AssertionError("settlement fixture was not released")
             return original(*args, **kwargs)
         def settle_first():
@@ -552,22 +553,36 @@ class PoTerminalOwnershipTests(unittest.TestCase):
                     self.runner._settle(self.session, 1, 0, self.files)
             except Exception as exc:  # noqa: BLE001 - the worker thread hands every failure to the asserting thread
                 errors.append(exc)
+        def settle_other():
+            competing.set()
+            try:
+                if first == "stop":
+                    other._settle(self.session, 1, 0, self.files)
+                else:
+                    other.stop_turn("session", 1)
+            except Exception as exc:  # noqa: BLE001 - the asserting thread checks every competing outcome
+                errors.append(exc)
+            finally:
+                finished.set()
         with mock.patch.object(self.store, method, delayed):
             thread = threading.Thread(target=settle_first)
+            contender = threading.Thread(target=settle_other)
             thread.start()
             try:
-                self.assertTrue(entered.wait(5))
+                self.assertTrue(entered.wait(1))
                 self.assertEqual(self.state(), po_store.RUNNING)
                 self.assertTrue(ScopedHeadLifecycle.read_owner(self.owner.directory)["cleanup_complete"])
-                with self.assertRaisesRegex(MemoryScopeError, "retry cleanup"):
-                    if first == "stop":
-                        other._settle(self.session, 1, 0, self.files)
-                    else:
-                        other.stop_turn("session", 1)
+                contender.start()
+                self.assertTrue(competing.wait(1))
+                self.assertFalse(finished.wait(0.03))
+                self.assertEqual(self.state(), po_store.RUNNING)
             finally:
                 release.set()
-                thread.join(5)
+                thread.join(1)
+                if contender.ident is not None:
+                    contender.join(1)
         self.assertFalse(thread.is_alive())
+        self.assertTrue(finished.is_set())
         self.assertEqual(errors, [])
         if first == "stop":
             other._settle(self.session, 1, 0, self.files)
