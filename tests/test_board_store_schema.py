@@ -437,6 +437,44 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.assertEqual(privileges(), (True, True, True))
         self.assertEqual(grants(), before)
 
+        connection.exec_driver_sql(
+            "INSERT INTO po_sessions (session_id, cli, model, cwd, created_at, state) "
+            "VALUES ('restore-session', 'codex', 'model', '/po', now(), 'open')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO po_turns (session_id, seq, started_at, finished_at, state, stdout_path) "
+            "VALUES ('restore-session', 1, now(), now(), 'completed', '/turn.stdout')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO po_feed (session_id, turn_seq, role, text, created_at, metadata) "
+            "VALUES ('restore-session', 1, 'owner', 'saved input', now(), '{\"source\":\"owner\"}')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO po_requests (request_id, operation, fingerprint, session_id, seq, created_at) "
+            "VALUES ('restore-request', 'po_send', %s, 'restore-session', 1, now())", ("a" * 64,)
+        )
+        saved = {table: connection.exec_driver_sql(f"SELECT * FROM {table}").all()
+                 for table in ("po_sessions", "po_turns", "po_feed", "po_requests")}
+        sequence = connection.exec_driver_sql("SELECT last_value, is_called FROM po_feed_entry_id_seq").one()
+        connection.commit()
+
+        command.downgrade(migrate.alembic_config(connection=connection, passwords=self.passwords), REVISIONS[-2])
+        connection.commit()
+        self.assertEqual(migrate.current_revision(connection), REVISIONS[-2])
+        self.assertEqual(privileges(), (True, False, False))
+        self.assertEqual(grants(), before)
+        self.assertEqual(connection.exec_driver_sql("SELECT last_value, is_called FROM po_feed_entry_id_seq").one(),
+                         sequence)
+        for table, rows in saved.items():
+            self.assertEqual(connection.exec_driver_sql(f"SELECT * FROM {table}").all(), rows)
+        connection.commit()
+        with self.engine("app").begin() as app:
+            next_id = app.exec_driver_sql(
+                "INSERT INTO po_feed (session_id, turn_seq, role, text, created_at) "
+                "VALUES ('restore-session', 1, 'agent', 'new answer', now()) RETURNING entry_id"
+            ).scalar_one()
+        self.assertGreater(next_id, sequence[0])
+
     def test_0026_release_migration_defaults_existing_sprints_and_accepts_exact_vectors(self) -> None:
         from alembic import command
 

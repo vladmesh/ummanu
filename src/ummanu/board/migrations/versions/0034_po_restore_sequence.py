@@ -15,4 +15,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    raise NotImplementedError("board-store migrations are forward-only")
+    op.execute(f"REVOKE SELECT, UPDATE ON SEQUENCE po_feed_entry_id_seq FROM {APP_ROLE}")
