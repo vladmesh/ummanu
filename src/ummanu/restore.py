@@ -37,6 +37,14 @@ from ummanu.board.legacy_codec import (
 )
 from ummanu.board.local_run import LOCAL_RUN_EXCEPTIONS_FIELD, parse_local_run_exceptions
 from ummanu.board.normalized_checkpoint import NormalizedBoardError, validated_normalized_cards
+from ummanu.board.origin_checkpoint import (
+    LEGACY_COVERAGE,
+    OriginCheckpointError,
+    read_checkpoint_outbox,
+    require_outbox_parity,
+    validate_outbox_records,
+)
+from ummanu.board.origin_outbox import OriginOutboxStore
 from ummanu.board.owner_decisions import FIELD as OWNER_DECISIONS_FIELD, stored_decisions
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.task_routing import TaskMetadata
@@ -126,6 +134,8 @@ def import_normalized_board(
                 with client.transaction():
                     return _import_normalized_board(data_dir, client=client, instance=instance)
             return _import_normalized_board(data_dir, client=client, instance=instance)
+    except OriginCheckpointError as exc:
+        raise RestoreError(str(exc)) from None
     except TaskError as exc:
         raise RestoreError(exc.message) from None
 
@@ -136,6 +146,7 @@ def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance:
         data_dir, registered_project_ids=(registered_projects(instance) if instance else None)
     )
     sprints = _normalized_sprints(data_dir)
+    outbox = read_checkpoint_outbox(data_dir / "board")
     # Validate both sets before the first backend write.
     _check_sql_sprint_current_tasks(cards, sprints)
     _check_restored_observers(sprints, instance)
@@ -202,6 +213,10 @@ def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance:
         _update_restore_state(data_dir, board="failed", board_parity="failed")
         raise RestoreError("board parity check failed: restored card order")
     _import_sprints(data_dir, client, sprints, existing_sprints, prefix)
+    if outbox is not None:
+        set_restore_phase(client, "origin_returns")
+        OriginOutboxStore(client).restore(outbox)
+        validate_outbox_records(OriginOutboxStore(client).export(), cards, writer.audit.events())
     pending_comments = [
         event for event in writer.audit.pending_events() if event.get("kind") == "restored_comment"
     ]
@@ -215,6 +230,8 @@ def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance:
         sprints="complete",
         sprint_parity="complete",
         sprint_count=len(sprints),
+        origin_outbox_coverage="complete" if outbox is not None else "unavailable",
+        origin_outbox_diagnostic="" if outbox is not None else LEGACY_COVERAGE,
     )
     return len(cards)
 
@@ -1490,6 +1507,9 @@ def _verify_postgres_normalized_parity(data_dir: Path, instance_dir: Path) -> No
         history_payload = json.loads((data_dir / "board" / "audit.json").read_text(encoding="utf-8"))
         expected_history = history_payload.get("events") if isinstance(history_payload, dict) else None
         actual_history = SqlTaskAudit(client).events()
+        expected_outbox = read_checkpoint_outbox(data_dir / "board")
+        if expected_outbox is not None:
+            require_outbox_parity(expected_outbox, OriginOutboxStore(client).export())
     except TaskError as exc:
         raise RestoreError(f"restored PostgreSQL normalized verification failed: {exc.message}") from None
     except (OSError, ValueError) as exc:

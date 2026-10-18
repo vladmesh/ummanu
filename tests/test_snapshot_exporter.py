@@ -17,7 +17,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes.installation import split_board
+from tests.fakes.tasks import empty_seed
+from tests.origin_checkpoint_fixtures import obligations, write_outbox
+from tests.restore_fixtures import _restore_card
+from tests.sql_backend_fixtures import card_store
 from ummanu import checkpoint, secret_store, state_repo
+from ummanu.board.origin_checkpoint import read_checkpoint_outbox, require_outbox_parity
+from ummanu.board.origin_outbox import OriginOutboxStore
 from ummanu.checkpoint import (
     SNAPSHOT_ALLOWLIST,
     SNAPSHOT_AUTHOR_EMAIL,
@@ -36,8 +43,11 @@ from ummanu.checkpoint import (
 from ummanu.cli import main as cli_main
 from ummanu.data import DataExport
 from ummanu.infra.export_allowlist import is_exported
+from ummanu.installation.materialize import materialize_checkpoint
+from ummanu.installation.models import InstallError
 from ummanu.knowledge_write import write_knowledge_document
 from ummanu.memory_write import commit_memory_proposal, propose_memory_fact
+from ummanu.restore import import_normalized_board
 from ummanu.secret_store import initialize_store, remove_secret, set_secret
 from ummanu.secret_words import RECOVERY_WORDS
 
@@ -195,6 +205,83 @@ class SnapshotCase(unittest.TestCase):
 
 
 class SnapshotRepositoryTests(SnapshotCase):
+    def test_flat_checkpoint_distinguishes_empty_outbox_from_missing_and_legacy_coverage(self):
+        self.seed_board([_restore_card()])
+        write_outbox(self.data_dir / "board", [])
+        source = self.live / "state" / "board"
+        shutil.copytree(self.data_dir / "board", source, dirs_exist_ok=True)
+        shutil.copytree(self.data_dir / "runs", self.live / "state" / "runs")
+        complete = self.root / "complete-data"
+        self.assertEqual(materialize_checkpoint(self.live, complete), (1, 0))
+        self.assertEqual(read_checkpoint_outbox(complete / "board"), [])
+        (source / "origin_returns.ndjson").unlink()
+        missing = self.root / "missing-data"
+        with self.assertRaisesRegex(InstallError, "origin return checkpoint"):
+            materialize_checkpoint(self.live, missing)
+        self.assertFalse(missing.exists())
+        split_instance = self.root / "split-instance"
+        shutil.copytree(self.live, split_instance)
+        split_source = split_instance / "state" / "board"
+        split_board(split_source)
+        split_missing = self.root / "split-missing-data"
+        with self.assertRaisesRegex(InstallError, "origin return checkpoint"):
+            materialize_checkpoint(split_instance, split_missing)
+        self.assertFalse(split_missing.exists())
+        (source / "export.json").write_text(json.dumps({"version": 1, "card_count": 1, "sprint_count": 0}))
+        legacy = self.root / "legacy-data"
+        self.assertEqual(materialize_checkpoint(self.live, legacy), (1, 0))
+        self.assertIsNone(read_checkpoint_outbox(legacy / "board"))
+        (split_source / "export.json").write_bytes((source / "export.json").read_bytes())
+        split_legacy = self.root / "split-legacy-data"
+        self.assertEqual(materialize_checkpoint(split_instance, split_legacy), (1, 0))
+        self.assertIsNone(read_checkpoint_outbox(split_legacy / "board"))
+
+    def test_committed_snapshot_materializes_and_restores_ordered_origin_delivery_state(self):
+        rows, history = obligations(6)
+        cards = [
+            _restore_card(task_id=index + 1, reference=f"ummanu-{index + 1}", position=index + 1)
+            for index in range(2)
+        ]
+        cards[1]["closed"] = True
+        for index, (row, event) in enumerate(zip(rows, history, strict=True)):
+            row["task_ref"] = event["ref"] = cards[index % 2]["reference"]
+        self.seed_board(cards, audit="".join(json.dumps(event) + "\n" for event in history))
+        write_outbox(self.data_dir / "board", rows)
+        result = self.exporter().write()
+        self.assertEqual(result.status, "committed", result.reason)
+        self.assertEqual(
+            self.committed("state/board/origin_returns.ndjson"),
+            (self.data_dir / "board" / "origin_returns.ndjson").read_bytes(),
+        )
+        checkout = self.root / "recovered-instance"
+        git(self.root, "clone", str(self.repo), str(checkout))
+        target = self.root / "recovered-data"
+        self.assertEqual(materialize_checkpoint(checkout, target), (2, 0))
+        require_outbox_parity(rows, read_checkpoint_outbox(target / "board"))
+        client = card_store(self, empty_seed())
+        for _ in range(2):
+            self.assertEqual(import_normalized_board(target, client=client), 2)
+            require_outbox_parity(rows, OriginOutboxStore(client).export())
+        saved = checkout / "state" / "board" / "origin_returns.ndjson"
+        saved.unlink()
+        invalid_target = self.root / "invalid-data"
+        with self.assertRaisesRegex(InstallError, "origin return checkpoint"):
+            materialize_checkpoint(checkout, invalid_target)
+        self.assertFalse(invalid_target.exists())
+
+    def test_bad_outbox_cannot_replace_the_previous_committed_snapshot(self):
+        rows, history = obligations()
+        self.seed_board([_restore_card()], audit="".join(json.dumps(event) + "\n" for event in history))
+        write_outbox(self.data_dir / "board", rows)
+        first = self.exporter().write()
+        self.assertEqual(first.status, "committed", first.reason)
+        committed = self.committed("state/board/origin_returns.ndjson")
+        (self.data_dir / "board" / "origin_returns.ndjson").unlink()
+        failed = self.exporter().write()
+        self.assertEqual(failed.status, "blocked", failed.reason)
+        self.assertEqual(self.tip(), first.commit)
+        self.assertEqual(self.committed("state/board/origin_returns.ndjson"), committed)
+
     def test_first_window_initialises_the_default_bare_repository_with_a_root_commit(self):
         result = self.exporter(snapshot_repo=None).write()
 

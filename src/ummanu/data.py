@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import shutil
@@ -104,7 +105,7 @@ def export_board(
     data_dir = data_dir.expanduser().resolve()
     board_dir = data_dir / "board"
     _ensure_dir(board_dir, "board data dir")
-    cards, history, sprints = _read_board_cut(data_dir, instance_dir, reader, sprint_client)
+    cards, history, sprints, outbox = _read_board_cut(data_dir, instance_dir, reader, sprint_client)
     normalized = []
     for card in sorted(cards, key=lambda item: str(item.get("reference", ""))):
         if not isinstance(card, dict):
@@ -114,7 +115,7 @@ def export_board(
         normalized.append(normalize_board_card(card, card))
 
     summary = {
-        "version": 1,
+        "version": 2 if outbox is not None else 1,
         "source": "ummanu task",
         "card_count": len(normalized),
         "sprint_count": len(sprints),
@@ -130,13 +131,21 @@ def export_board(
         _write_ndjson(staging / "sprints.ndjson", sprints)
         _write_json(staging / "audit.json", {"version": 1, "events": history})
         _write_ndjson(staging / "audit.ndjson", history)
+        if outbox is not None:
+            _write_ndjson(staging / "origin_returns.ndjson", outbox)
+            summary["origin_return_count"] = len(outbox)
+            summary["origin_return_sha256"] = hashlib.sha256(
+                (staging / "origin_returns.ndjson").read_bytes()
+            ).hexdigest()
         _write_json(staging / "export.json", summary)
         # Validate the exact pair restore consumes before replacing the last good live export.
         from ummanu.board.normalized_checkpoint import NormalizedBoardError, validated_normalized_cards
+        from ummanu.board.origin_checkpoint import OriginCheckpointError, read_checkpoint_outbox
 
         try:
             validated_normalized_cards(staging)
-        except NormalizedBoardError as exc:
+            read_checkpoint_outbox(staging)
+        except (NormalizedBoardError, OriginCheckpointError) as exc:
             raise RuntimeError(f"board export is not restorable: {exc}") from None
         _publish_component_entries(
             staging,
@@ -144,6 +153,7 @@ def export_board(
             [
                 "cards.json", "cards.ndjson", "sprints.json", "sprints.ndjson",
                 "audit.json", "audit.ndjson", "export.json",
+                *(["origin_returns.ndjson"] if outbox is not None else []),
             ],
             "board export",
         )
@@ -199,12 +209,10 @@ def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) 
 
 def _read_board_cut(
     data_dir: Path, instance_dir: Path, reader: TaskReader | None, sprint_client: Any,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Hold the shared bulk lane only while reading, never while publishing or committing.
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]] | None]:
+    """Read cards, audit, sprints and origin obligations under one SQL snapshot.
 
-    Production uses one SQL client for the card, sprint and audit projection. Its enumeration
-    and batched satellites contain several statements, all under one REPEATABLE READ snapshot.
-    Non-SQL clients are retained for offline test/export compatibility.
+    The shared bulk lane covers reads only; publication and Git occur after releasing it.
     """
     from ummanu.board.sql_cards import SqlCardClient
     from ummanu.dispatch.ownership import bulk_lane
@@ -223,6 +231,9 @@ def _read_board_cut(
                 raise RuntimeError(f"board export blocked by {audit['pending']} unresolved pending audit record(s)")
             cards = task_reader.export()
             history = audit_owner.events()
+            from ummanu.board.origin_outbox import OriginOutboxStore
+
+            outbox = OriginOutboxStore(client).export() if isinstance(client, SqlCardClient) else None
             if not isinstance(cards, list):
                 raise RuntimeError("ummanu task export did not return a card list")  # noqa: TRY004 - export refusals share RuntimeError
             if sprint_client is None and isinstance(client, SqlCardClient):
@@ -237,7 +248,7 @@ def _read_board_cut(
                     sprints = export_sprint_entities(instance_dir, sprint_board)
                 finally:
                     sprint_board.connection.close()
-            return cards, history, sprints
+            return cards, history, sprints, outbox
     except TaskError as exc:
         raise RuntimeError(f"ummanu task export failed: {exc.message}") from None
     finally:

@@ -377,6 +377,13 @@ def install(args: argparse.Namespace) -> InstallResult:
             cards, runs = materialize_checkpoint(
                 checkpoint_root, data_dir, dry_run=args.dry_run or checkpoint_complete, own=written
             )
+            from ummanu.board.origin_checkpoint import LEGACY_COVERAGE, read_checkpoint_outbox
+
+            outbox = read_checkpoint_outbox(checkpoint_root / "state" / "board")
+            result.add(
+                "origin-outbox", "unchanged",
+                LEGACY_COVERAGE if outbox is None else f"complete checkpoint coverage: {len(outbox)} obligation(s)",
+            )
             if args.dry_run:
                 result.add(
                     "checkpoint",

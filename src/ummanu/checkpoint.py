@@ -98,6 +98,7 @@ ANALYTICS_FILES = (
     "export.json",
 )
 BOARD_ENTRIES = (
+    "origin_returns.ndjson",
     "cards.ndjson",
     "sprints.ndjson",
     "events.ndjson",
@@ -348,7 +349,7 @@ def _analytics_checkpoint_id(entries: list[dict[str, Any]]) -> str:
 
 def _verify_analytics_directory_files(root: Path, board: CheckpointBoard, files: tuple[str, ...]) -> None:
     if board.layout == FLAT:
-        allowed = {*files, ANALYTICS_MANIFEST, ".gitignore"}
+        allowed = {*files, "origin_returns.ndjson", ANALYTICS_MANIFEST, ".gitignore"}
     else:
         allowed = {*board.physical_entries(), ANALYTICS_MANIFEST, ".gitignore"}
     try:
@@ -361,6 +362,12 @@ def _verify_analytics_directory_files(root: Path, board: CheckpointBoard, files:
 
 
 def _verify_analytics_export_summary(board: CheckpointBoard) -> None:
+    from ummanu.board.origin_checkpoint import OriginCheckpointError, read_checkpoint_outbox
+
+    try:
+        read_checkpoint_outbox(board.directory)
+    except OriginCheckpointError as exc:
+        raise AnalyticsManifestError(str(exc)) from None
     export_path = board.path("export.json")
     try:
         summary = json.loads(board.read_text("export.json"))
@@ -2464,6 +2471,12 @@ def _validate_board(
     instance: Path | None = None,
     registered_project_ids: set[str] | None = None,
 ) -> None:
+    from ummanu.board.origin_checkpoint import OriginCheckpointError, read_checkpoint_outbox
+
+    try:
+        read_checkpoint_outbox(staging)
+    except OriginCheckpointError as exc:
+        raise CheckpointBlocked(str(exc)) from None
     summary = _read_json(staging / "export.json", "board export.json")
     declared = _int_field(summary, "card_count", "board export.json")
     actual = _count_lines(staging / "cards.ndjson", "board cards.ndjson")

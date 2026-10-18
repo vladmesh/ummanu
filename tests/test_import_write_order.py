@@ -158,6 +158,7 @@ _STEPS = (
     (task_restore, "close_restored_cards_batched", "closure"),
     (restore, "_reconcile_restored_order", "order"),
     (restore, "_import_sprints", "sprints"),
+    (restore.OriginOutboxStore, "restore", "origin_returns"),
 )
 
 
@@ -177,6 +178,7 @@ class ImportFollowsTheOrderTests(unittest.TestCase):
         writer = mock.Mock()
         writer.reconcile.return_value = (0, [])
         writer.audit.pending_events.return_value = []
+        writer.audit.events.return_value = []
         reader = mock.Mock()
         reader._board.return_value = (1, {}, {})
         reader.restore_snapshot.return_value = {}
@@ -186,6 +188,8 @@ class ImportFollowsTheOrderTests(unittest.TestCase):
                 ("ummanu.sprints.sprint_admission_lock", mock.Mock(return_value=nullcontext())),
                 ("ummanu.restore._normalized_cards", mock.Mock(return_value=[])),
                 ("ummanu.restore._normalized_sprints", mock.Mock(return_value=[])),
+                ("ummanu.restore.read_checkpoint_outbox", mock.Mock(return_value=[])),
+                ("ummanu.restore.OriginOutboxStore.export", mock.Mock(return_value=[])),
                 ("ummanu.restore._check_sql_sprint_current_tasks", mock.Mock()),
                 ("ummanu.restore._check_restored_observers", mock.Mock()),
                 ("ummanu.restore._check_restored_executors", mock.Mock()),

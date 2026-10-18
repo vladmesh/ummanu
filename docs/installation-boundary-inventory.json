@@ -4,7 +4,7 @@
   "provenance": "Workspace Git source capture, no independent baseline execution. Hashes include signatures, decorators and full definition bodies, without AST location attributes.",
   "definitions": {
     "MaterializeError": {"owner": "materialize", "baseline_lines": [360, 366], "ast_sha256": "738e131ddf894c1596f24d296a2e0e5b7a09eb3ed5707d9856c67d50468a9f78"},
-    "CHECKPOINT_BOARD": {"owner": "materialize", "baseline_lines": [128, 128], "ast_sha256": "c00e7f2ce53ff18154dd1aa56b0d9090dd6778ebe1455c24bf30214f0eb71f82"},
+    "CHECKPOINT_BOARD": {"owner": "materialize", "baseline_lines": [128, 128], "ast_sha256": "2b8d40fc7504508021eaf0d8fad362decc70ddfb2cc382cd4eaca1675cd982b2"},
     "CHECKPOINT_RUNS": {"owner": "materialize", "baseline_lines": [129, 129], "ast_sha256": "7a66c1eb298ce3acd40e590dfee4bab05f58523c528f8f1e4c9b94a05db87baf"},
     "WEB_FRONT_COMPONENT": {"owner": "materialize", "baseline_lines": [131, 131], "ast_sha256": "ced834fd5e515c39408f437a55e052615a29d6107d7f9b7f3965a65d221784fe"},
     "CADDY_BINARY": {"owner": "materialize", "baseline_lines": [132, 132], "ast_sha256": "d751a726825da82652337416494e7a4ee037bf2f585da6f1ae73acf23a5518a6"},
@@ -54,7 +54,7 @@
     "_named_path": {"owner": "support", "baseline_lines": [1055, 1058], "ast_sha256": "c532669eead30834a237c7d38c90454c023f49b3f78a511d1d0ba09f6058421c"},
     "_holds_only": {"owner": "support", "baseline_lines": [1061, 1070], "ast_sha256": "f8d1a968a522afef3441c86f535b5529b9040dcfe0fb73c85bc2f66805c1be66"},
     "_checked_data_target": {"owner": "support", "baseline_lines": [1073, 1098], "ast_sha256": "afdcd76bc1a7ba02bd5d6a5951ac11cad439f6ba60a645fa3cb84b261eb4c73e"},
-    "materialize_checkpoint": {"owner": "materialize", "baseline_lines": [1101, 1215], "ast_sha256": "594449ca36246667f0b4cf0c7a09bc75995e8280fef22cba84bd799f3d7d682c"},
+    "materialize_checkpoint": {"owner": "materialize", "baseline_lines": [1101, 1215], "ast_sha256": "7f8c250ecbd6a2a338e24fd522fc032e56662bd9c9986459ad702a5abafbcff7"},
     "_restored_run_journals": {"owner": "materialize", "baseline_lines": [1218, 1252], "ast_sha256": "9bbc864df2e43aa56b0201a9b1a1b816ffb0af91494a14db2346a680e4594e6a"},
     "_render_restored_journal": {"owner": "materialize", "baseline_lines": [1255, 1263], "ast_sha256": "38def3ec1702d23061ad4ce578ba3a036668b2ce4c0af7849627a2392fc7061e"},
     "_live_run_journals": {"owner": "materialize", "baseline_lines": [1266, 1283], "ast_sha256": "10ab372ff5b42d31fbe1b01ba7bcdbc37c386bd5f770e612277747df41c88e72"},
@@ -79,7 +79,7 @@
     "PRODUCT_MARKERS": {"owner": "commands", "baseline_lines": [1849, 1849], "ast_sha256": "4546f8b037eb5858d271fe31ddfeb4e4f2ebb0565072891340b141e0f3dfe781"},
     "_product_root": {"owner": "commands", "baseline_lines": [1852, 1870], "ast_sha256": "f95532a8e5e6dda06b0eeafc8073b970cebe4f5dc5baa5e1d6d626f0627886dd"},
     "_restore_without_credentials": {"owner": "commands", "baseline_lines": [1873, 1944], "ast_sha256": "7d946bad7d3e40965d3798ce7050c0ec81bc3f3e9c77b34d79a8692fc7161795"},
-    "install": {"owner": "commands", "baseline_lines": [1947, 2301], "ast_sha256": "1bdbeb5066aff41d770f525a1d9a823fd29912c3af914f298ac44c48d8b41c36"},
+    "install": {"owner": "commands", "baseline_lines": [1947, 2301], "ast_sha256": "bbd23310dcb33d0953955c3e8a705aec205b793fa8e9453ce4f6defb46b38c32"},
     "run_install": {"owner": "commands", "baseline_lines": [2304, 2329], "ast_sha256": "6b36453de36e76db1bfe3e1df7ea528711edf31cc4d957805f2a5a1de82a16fc"},
     "add_bootstrap_credential_arguments": {"owner": "credentials", "baseline_lines": [2332, 2343], "ast_sha256": "e4af049da29bf1bd49bc45d48a6809d592f10511aae85b0edb7572500d7c7b43"},
     "add_install_commands": {"owner": "commands", "baseline_lines": [2346, 2389], "ast_sha256": "0ff459a0bc401b78f8584c006b907b7d7e91ca4695d083f2517124e20c501c59"}
