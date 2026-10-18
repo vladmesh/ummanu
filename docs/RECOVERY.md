@@ -1036,7 +1036,11 @@ canonical target and phase. Same-source/target retries preserve that phase witho
 or native ids; a finished retry returns `finished`. Foreign, corrupt, unsafe or unreadable authority
 is never overwritten or interpreted as absence. A `.po-restore` directory without admission
 authority, including an interrupted mkdir before plan publication, fails closed with `recovery_invalid`.
-Ordinary targets with neither recovery artifact admit mutations normally.
+Supported ordinary targets must also be canonical, owned by the effective user and deny group/other
+writes. Targets meeting these bounds with neither recovery artifact admit mutations normally.
+Calling plan preparation before begin is an ordering error. Stop the coordinator before any import
+and preserve the target and authority for diagnosis; do not delete recovery files or edit SQL to
+restart that attempt. There is no automatic reconstruction of missing or corrupt authority.
 
 The native target directory lock serializes begin, finish, frozen plan publication and ingress
 through SQL mutation and process launch. Lock order is service lock, target directory, runner lock,
@@ -1064,6 +1068,9 @@ close and rename all enforce admission before a SQL claim, session metadata writ
 this retryable no-write refusal from invalid input and from damaged authority. An existing queue
 item remains pending with identical request id, text, card, note and metadata. The service neither
 refuses/removes it nor creates a failed turn; after finish the usual request ledger claims it once.
+Dispatcher PO-card and owner-answer deliveries retain their request/attempt identity and stay
+unanswered during retryable recovery holds; they retry through the existing ledger after the hold
+clears. Invalid recovery authority remains terminal and fails closed.
 Service status and queued dialogue reads expose the recovery reason. Conversation reads remain
 available. New sessions, rerun recovery and provider fallback cannot bypass an active hold.
 

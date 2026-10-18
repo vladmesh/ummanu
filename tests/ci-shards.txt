@@ -281,6 +281,7 @@ unit tests/test_po_restore.py
 unit tests/test_po_restore_plan.py
 unit tests/test_po_restored_context.py
 unit tests/test_po_recovery_admission.py
+unit tests/test_po_card_recovery.py
 integration-recovery tests/test_po_restore_postgres.py
 unit tests/test_restore_refused_batch.py
 component tests/test_onboarding_snapshot.py
