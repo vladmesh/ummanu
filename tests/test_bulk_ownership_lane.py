@@ -85,6 +85,7 @@ def restore_under_limit() -> None:
                 card["fields"]["claim"] = card["metadata"]["claim"]
                 cards.append(card)
             (board / "cards.json").write_text(json.dumps({"version": 1, "cards": cards}))
+            (board / "export.json").write_text(json.dumps({"version": 1}))
             store = RestoreStore(root)
             audit = RestoreAudit(root)
             with mock.patch("ummanu.board.sql_audit.SqlTaskAudit", return_value=audit):
@@ -287,6 +288,7 @@ class BulkLaneTests(unittest.TestCase):
     def test_pre_import_board_read_task_error_is_restore_error(self):
         (self.data / "board").mkdir(parents=True, exist_ok=True)
         (self.data / "board" / "cards.json").write_text(json.dumps({"version": 1, "cards": []}))
+        (self.data / "board" / "export.json").write_text(json.dumps({"version": 1}))
         error = TaskError("backend_unavailable", "board read unavailable", 1)
         with mock.patch("ummanu.restore.TaskReader._board", side_effect=error), \
                 self.assertRaisesRegex(restore.RestoreError, "board read unavailable"):

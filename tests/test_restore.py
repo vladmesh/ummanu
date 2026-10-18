@@ -16,6 +16,7 @@ from unittest import mock
 import ummanu.restore as restore_module
 from tests.fakes.tasks import empty_seed
 from tests.origin_checkpoint_fixtures import obligations, write_outbox
+from tests.po_checkpoint_fixtures import po_records, seed_po, write_po
 from tests.restore_fixtures import (
     _restore_card,
     _seed_instance_facts,
@@ -26,6 +27,7 @@ from tests.sql_backend_fixtures import card_store
 from ummanu._fsutil import write_json, write_ndjson
 from ummanu.board.origin_checkpoint import read_checkpoint_outbox, require_outbox_parity
 from ummanu.board.origin_outbox import OriginOutboxStore
+from ummanu.board.po_checkpoint import CAPTURED_PO_COVERAGE, LEGACY_PO_COVERAGE, export_po_records
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.checkpoint import _validate_board
 from ummanu.cli import main as cli_main
@@ -70,8 +72,37 @@ def _seed_legacy_facts(data_dir: Path) -> Path:
 
 
 class RestoreTests(unittest.TestCase):
+    def test_board_restore_reports_po_capture_without_importing_or_altering_live_po_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self._portable_origin_board(data_dir)
+            write_po(data_dir / "board", po_records())
+            client = card_store(self, empty_seed())
+            existing = po_records()
+            existing["po_sessions"][0]["title"] = "live PO title"
+            seed_po(client, existing)
+            for _ in range(2):
+                self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+                self.assertEqual(export_po_records(client), existing)
+                state = restore_state(data_dir)
+                self.assertEqual(state["po_sql_coverage"], "captured")
+                self.assertEqual(state["po_sql_diagnostic"], CAPTURED_PO_COVERAGE)
+                self.assertEqual(state["origin_outbox_coverage"], "complete")
+
+    def test_board_restore_reports_legacy_po_absence_without_synthesizing_sessions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self._portable_origin_board(data_dir)
+            client = card_store(self, empty_seed())
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+            self.assertEqual(export_po_records(client), {table: [] for table in po_records()})
+            state = restore_state(data_dir)
+            self.assertEqual(state["po_sql_coverage"], "unavailable")
+            self.assertEqual(state["po_sql_diagnostic"], LEGACY_PO_COVERAGE)
+
     def _portable_origin_board(self, data_dir):
         init_layout(data_dir)
+        write_json(data_dir / "board" / "export.json", {"version": 1})
         card = _restore_card(reference="ummanu-1", column="Ready")
         card["closed"] = True
         rows, history = obligations()
@@ -200,6 +231,7 @@ class RestoreTests(unittest.TestCase):
             with self.subTest(source=source), tempfile.TemporaryDirectory() as tmpdir:
                 data_dir = Path(tmpdir) / "ummanu-data"
                 init_layout(data_dir)
+                write_json(data_dir / "board" / "export.json", {"version": 1})
                 self._write_restore_cards(data_dir, [_restore_card(reference="ummanu-1")])
                 if source == "json":
                     (data_dir / "board" / "audit.json").write_text(
@@ -253,6 +285,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             export = export_board(
                 data_dir,
                 instance_dir=Path(tmpdir),
@@ -286,6 +319,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             card = _restore_card(reference="ummanu-42", comments=[{"text": "[worker]\nkept"}])
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
@@ -312,6 +346,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             card = _restore_card()
             card["comments"] = [
                 {"ts": "1", "text": "first"},
@@ -334,6 +369,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [_restore_card()]}), encoding="utf-8"
             )
@@ -351,6 +387,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [_restore_card()]}), encoding="utf-8"
             )
@@ -391,6 +428,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": []}) + "\n", encoding="utf-8"
             )
@@ -416,6 +454,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             card = _restore_card()
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
@@ -429,6 +468,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             card = _restore_card(reference="ummanu-7")
             del card["metadata"]["record_type"]
             (data_dir / "board" / "cards.json").write_text(
@@ -447,6 +487,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             card = _restore_card(column="Issues")
             card["metadata"] = {"record_type": "epic"}
             (data_dir / "board" / "cards.json").write_text(
@@ -463,6 +504,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             card = _restore_card(reference="ummanu-1")
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
@@ -486,6 +528,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             duplicate = self._product_card()
             duplicate["reference"] = "product:other"
             duplicate["metadata"] = {
@@ -514,6 +557,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             issue = _restore_card(reference="issue:12", column="Issues")
             issue["metadata"] = {
                 "record_type": "issue",
@@ -575,6 +619,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             mark_reconcile_applied(data_dir)
             self.assertFalse((data_dir / "restore-state.json").exists())
 
@@ -582,6 +627,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             exported = normalize_board_card(
                 {
                     "id": 12,
@@ -643,6 +689,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             # No instance dir here, so the rebuild falls back to legacy canon.
             _seed_legacy_facts(data_dir)
             (data_dir / "memory" / "index.sqlite").write_bytes(b"broken")
@@ -661,6 +708,7 @@ class RestoreTests(unittest.TestCase):
             root = Path(tmpdir)
             data_dir = root / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             instance = _write_instance_to(root / "instance", "test", data_dir, heads=True)
             (data_dir / "restore-state.json").write_text(
                 json.dumps(
@@ -684,6 +732,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             (data_dir / "restore-state.json").write_text(
                 json.dumps(
                     {
@@ -705,6 +754,7 @@ class RestoreTests(unittest.TestCase):
             root = Path(tmpdir)
             data_dir = root / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             instance = _write_instance_to(root / "instance", "test", data_dir)
             _seed_instance_facts(instance, {"global/one.md": "fact\n"})
             embed = object()
@@ -732,6 +782,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             cards = []
             # A card reference ends in its number (§9); the three keep the same order by name.
             for reference, position in (("ummanu-30", 1), ("ummanu-10", 2), ("ummanu-20", 3)):
@@ -763,6 +814,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             card = _restore_card()
             card["swimlane"] = ""
             card["position"] = 1
@@ -784,6 +836,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [_restore_card()]}), encoding="utf-8"
             )
@@ -827,6 +880,7 @@ class RestoreTests(unittest.TestCase):
             root = Path(tmpdir)
             data_dir = root / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             instance = _write_instance_to(root / "instance", "test", data_dir)
             facts = _seed_instance_facts(instance, {"global/one.md": "fact\n"})
             script = Path(tmpdir) / "reindex.py"
@@ -865,6 +919,7 @@ class RestoreTests(unittest.TestCase):
             root = Path(tmpdir)
             data_dir = root / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             instance = _write_instance_to(root / "instance", "test", data_dir)
             _seed_instance_facts(instance, {"global/one.md": "fact\n"})
             script = Path(tmpdir) / "reindex.py"
@@ -889,6 +944,7 @@ class RestoreTests(unittest.TestCase):
             root = Path(tmpdir)
             data_dir = root / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             instance = _write_instance_to(root / "instance", "test", data_dir)
             _seed_instance_facts(instance, {"global/one.md": "fact\n"})
             script = Path(tmpdir) / "reindex.py"
@@ -911,6 +967,7 @@ class RestoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(os.environ, {}, clear=True):
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [_restore_card()]}), encoding="utf-8"
             )
@@ -1077,6 +1134,7 @@ class PreUpgradeCheckpointBagTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             cards = self._pre_upgrade_cards()
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": cards}), encoding="utf-8"
@@ -1140,6 +1198,7 @@ class RestoredNonTaskSwimlaneTests(unittest.TestCase):
 
     def _seed(self, data_dir: Path) -> None:
         init_layout(data_dir)
+        write_json(data_dir / "board" / "export.json", {"version": 1})
         issue = _restore_card(reference="issue:12", column="Issues", position=2)
         issue["fields"]["task_type"] = ""
         issue["fields"]["project"] = ""
@@ -1206,6 +1265,7 @@ class RestoredCodexLaunchModeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
+            write_json(data_dir / "board" / "export.json", {"version": 1})
             board = data_dir / "board"
             (board / "cards.json").write_text(json.dumps({"version": 1, "cards": [card]}), encoding="utf-8")
             (board / "cards.ndjson").write_text(json.dumps(card) + "\n", encoding="utf-8")

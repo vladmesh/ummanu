@@ -276,6 +276,7 @@ integration-recovery tests/test_snapshot_recover.py
 unit tests/test_restore_card_initialization.py
 unit tests/test_import_write_order.py
 unit tests/test_origin_checkpoint.py
+unit tests/test_po_checkpoint.py
 unit tests/test_restore_refused_batch.py
 component tests/test_onboarding_snapshot.py
 integration-recovery tests/test_snapshot_recovery_postgres.py

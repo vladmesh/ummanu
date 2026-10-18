@@ -446,6 +446,7 @@ class SprintExecutorRecoveryTests(SprintBackendFixture, unittest.TestCase):
         )
         for name in ("cards.json", "sprints.json"):
             shutil.copy(source_data / "board" / name, target_data / "board" / name)
+        (target_data / "board" / "export.json").write_text(json.dumps({"version": 1}))
         exported = json.loads((target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
         client = self.make_empty_sprint_client()
         import_normalized_board(target_data, client=client, instance=instance)  # type: ignore[arg-type]

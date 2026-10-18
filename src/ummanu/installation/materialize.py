@@ -21,6 +21,7 @@ from ummanu._fsutil import (
 )
 from ummanu.board.backend import CARD, board_client
 from ummanu.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
+from ummanu.board.po_checkpoint import PO_FILE, PoCheckpointError, read_checkpoint_po
 from ummanu.config import ConfigError, load_config, validate_instance
 from ummanu.data import init_layout
 from ummanu.dispatch.runtime_provenance import ProductionRuntime
@@ -44,6 +45,7 @@ from ummanu.webfront.commands import configured_sites, missing_sites_message
 
 CHECKPOINT_BOARD = (
     "cards.ndjson", "sprints.ndjson", "events.ndjson", "audit.ndjson", "export.json", "origin_returns.ndjson",
+    PO_FILE,
 )
 
 
@@ -139,7 +141,8 @@ def materialize_checkpoint(
         raise InstallError(f"private checkpoint has an unreadable board layout: {exc}") from None
     try:
         read_checkpoint_outbox(board_source)
-    except OriginCheckpointError as exc:
+        read_checkpoint_po(board_source)
+    except (OriginCheckpointError, PoCheckpointError) as exc:
         raise InstallError(str(exc)) from None
     for name in ("cards.ndjson", "export.json"):
         if not board.has(name):

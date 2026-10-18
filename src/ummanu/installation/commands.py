@@ -384,6 +384,10 @@ def install(args: argparse.Namespace) -> InstallResult:
                 "origin-outbox", "unchanged",
                 LEGACY_COVERAGE if outbox is None else f"complete checkpoint coverage: {len(outbox)} obligation(s)",
             )
+            from ummanu.board.po_checkpoint import CAPTURED_PO_COVERAGE, LEGACY_PO_COVERAGE, read_checkpoint_po
+
+            po = read_checkpoint_po(checkpoint_root / "state" / "board")
+            result.add("po-sql", "unchanged", LEGACY_PO_COVERAGE if po is None else CAPTURED_PO_COVERAGE)
             if args.dry_run:
                 result.add(
                     "checkpoint",

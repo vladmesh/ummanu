@@ -127,6 +127,8 @@ def run_restore_board(args: argparse.Namespace) -> int:
         "ok": True, "action": "restore-board", "cards": count, "sprints": state["sprint_count"],
         "origin_outbox_coverage": state["origin_outbox_coverage"],
         "origin_outbox_diagnostic": state["origin_outbox_diagnostic"],
+        "po_sql_coverage": state["po_sql_coverage"],
+        "po_sql_diagnostic": state["po_sql_diagnostic"],
     }
 
 

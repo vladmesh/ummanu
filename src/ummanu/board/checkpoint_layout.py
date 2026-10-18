@@ -39,13 +39,14 @@ SPLIT = "split"
 #: The logical files of a board checkpoint, in either layout.
 LOGICAL_FILES = (
     "cards.ndjson", "sprints.ndjson", "events.ndjson", "audit.ndjson", "export.json", "origin_returns.ndjson",
+    "po_sql.json",
 )
 #: Logical files stored one record per file in the split layout: records change in place.
 RECORD_FILES = {"cards.ndjson": ("cards", ".json"), "sprints.ndjson": ("sprints", ".json")}
 #: Logical files stored as immutable segments in the split layout: they only ever grow.
 SEGMENT_FILES = {"audit.ndjson": ("audit", ".ndjson"), "events.ndjson": ("events", ".ndjson")}
 #: Logical files that stay single files in the split layout.
-SINGLE_FILES = ("export.json", "origin_returns.ndjson")
+SINGLE_FILES = ("export.json", "origin_returns.ndjson", "po_sql.json")
 
 # Parts are grouped a thousand to a directory so no single Git tree grows with the board.
 _PER_DIRECTORY = 1000
@@ -117,7 +118,10 @@ class CheckpointBoard:
         self._check_name(name)
         if self.layout == SPLIT and name not in SINGLE_FILES:
             return True
-        return (self.directory / name).is_file()
+        path = self.directory / name
+        if path.is_symlink():
+            raise CheckpointLayoutError(f"{path}: checkpoint file is a symlink")
+        return path.is_file()
 
     def read_bytes(self, name: str) -> bytes:
         """The logical file's bytes. A logical file the checkpoint lacks raises FileNotFoundError."""
@@ -186,6 +190,17 @@ def open_checkpoint_board(directory: Path) -> CheckpointBoard:
     return CheckpointBoard(root, SPLIT)
 
 
+def read_export_summary(board: CheckpointBoard) -> dict:
+    """Require export.json before interpreting coverage, including released v1/v2 absence."""
+    try:
+        summary = json.loads(board.read_text("export.json"))
+    except (OSError, UnicodeError, ValueError):
+        raise CheckpointLayoutError("board export.json is required and must be readable JSON") from None
+    if not isinstance(summary, dict) or type(summary.get("version", 1)) is not int or summary.get("version", 1) not in (1, 2):
+        raise CheckpointLayoutError("unsupported board export version")
+    return summary
+
+
 def publish_split_board(staging: Path, destination: Path) -> None:
     """Bring `destination` to the split layout of the flat logical files in `staging`.
 
@@ -202,7 +217,7 @@ def publish_split_board(staging: Path, destination: Path) -> None:
     for name, (directory, suffix) in SEGMENT_FILES.items():
         _sync_segments(_read_staged(staging, name), previous.get(name), destination / directory, suffix)
     for name in SINGLE_FILES:
-        if name == "origin_returns.ndjson" and not (staging / name).exists():
+        if name != "export.json" and not (staging / name).exists():
             stale = destination / name
             if stale.exists() or stale.is_symlink():
                 _remove(stale)

@@ -189,6 +189,7 @@ class ImportFollowsTheOrderTests(unittest.TestCase):
                 ("ummanu.restore._normalized_cards", mock.Mock(return_value=[])),
                 ("ummanu.restore._normalized_sprints", mock.Mock(return_value=[])),
                 ("ummanu.restore.read_checkpoint_outbox", mock.Mock(return_value=[])),
+                ("ummanu.restore.read_checkpoint_po", mock.Mock(return_value=None)),
                 ("ummanu.restore.OriginOutboxStore.export", mock.Mock(return_value=[])),
                 ("ummanu.restore._check_sql_sprint_current_tasks", mock.Mock()),
                 ("ummanu.restore._check_restored_observers", mock.Mock()),

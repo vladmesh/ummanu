@@ -1,24 +1,6 @@
-"""The origin-return outbox: what a delegated card owes its PO session, written when it becomes owed (secretary-1792).
-
-One table, `origin_returns` (revision `0022_origin_returns`), one row per transition into Done or
-Blocked of a card that carries a PO origin (`board/po_origin.py`) and is not a wait card: the card
-ref, the transition's event id (unique) and request id, the column it entered, when, and the delivery
-outcome (`delivered_at`, `status` delivered|skipped, the session that took it, the input's request
-id). `notice` is read only; a delivery leaves it as it is.
-
-**Written in the transition's own transaction.** :func:`enqueue` is called by
-`SqlTaskAudit.append`, the one place a committed audit record is written (`requests`), in the same
-statement group and the same transaction as the record: a card transition's typed event and the
-column move it records commit together (`TaskWriter._transition_card`), so the move, its audit event
-and its outbox row stand or fall together. Every writer of a card transition reaches it, because
-every committed record does: `TaskWriter.move` (every role, the dispatcher's edges and the wait
-edges), `task complete`, the decide/release path, a legacy `moved` replay. Archive, reopen and any
-later move write no row and touch none: a row is never deleted or rewritten except by its delivery.
-
-**Read by the dispatcher only** (`dispatch/origin_returns.py`): :meth:`OriginOutboxStore.pending`
-is one indexed query per tick over the undelivered rows, in id order; :meth:`OriginOutboxStore.mark`
-records a delivery once. `task show` reads a card's rows for its `origin` block.
-"""
+"""Origin obligations share the transition transaction; delivery marks each row once.
+The dispatcher and task view read live rows; recovery restores by event identity.
+The export reader captures all delivery fields on the board snapshot."""
 
 from __future__ import annotations
 

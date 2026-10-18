@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ummanu._fsutil import ndjson_lines
-from ummanu.board.checkpoint_layout import open_checkpoint_board
+from ummanu.board.checkpoint_layout import open_checkpoint_board, read_export_summary
 from ummanu.board.origin_outbox import STATUSES, TERMINAL_STATES, OutboxRow, owed_target
 from ummanu.board.sql_rows import parse_rfc3339, rfc3339
 
@@ -108,12 +108,8 @@ def read_checkpoint_outbox(directory: Path) -> list[dict[str, Any]] | None:
     """Read a versioned complete outbox, or None for released checkpoints without coverage."""
     try:
         board = open_checkpoint_board(directory)
-        summary = json.loads(board.read_text("export.json")) if board.has("export.json") else {"version": 1}
-        if not isinstance(summary, dict):
-            raise OriginCheckpointError("invalid board export metadata")
+        summary = read_export_summary(board)
         version = summary.get("version", 1)
-        if type(version) is not int or version not in (1, 2):
-            raise OriginCheckpointError("unsupported board export version")
         if version == 1:
             if board.has(OUTBOX_FILE) or any(key.startswith("origin_return") for key in summary):
                 raise OriginCheckpointError("unversioned origin return coverage")
