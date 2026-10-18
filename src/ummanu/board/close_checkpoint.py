@@ -187,9 +187,9 @@ def require_close_parity(expected: dict[str, Any], actual: dict[str, Any]) -> No
         _fail(0, "decisions/fields/order")
 
 
-def scan_close_secrets(text: str, scrub: Callable[[str], str], *, json_document: bool = False) -> None:
+def scan_close_secrets(text: str, scrub: Callable[[str], str]) -> None:
     """Scan decoded close prose so JSON escaping cannot conceal known secrets."""
-    sprints = json.loads(text)["sprints"] if json_document else [json.loads(line) for line in ndjson_lines(text) if line.strip()]
+    sprints = [json.loads(line) for line in ndjson_lines(text) if line.strip()]
     for index, sprint in enumerate(sprints):
         if "close_facts" not in sprint:
             continue

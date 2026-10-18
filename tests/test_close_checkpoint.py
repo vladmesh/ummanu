@@ -16,6 +16,7 @@ from ummanu.board.close_checkpoint import (
     validate_close_facts,
     validate_close_merge,
 )
+from ummanu.runtime.redact import redact
 
 
 class CloseCheckpointTests(unittest.TestCase):
@@ -169,13 +170,14 @@ class CloseCheckpointTests(unittest.TestCase):
             self.assertEqual(read_checkpoint_close_facts(board), {})
 
     def test_escaped_known_secret_in_close_reason_and_decision_prose_is_detected(self):
-        for location in ("close_reason", "decision"):
-            facts = copy.deepcopy(self.facts)
-            if location == "decision":
-                facts["decisions"][0]["reason"] = "known-secret"
-            else:
-                facts[location] = "known-secret"
-            text = json.dumps({"close_facts": facts}).replace("known-secret", "known-\\u0073ecret")
-            with self.subTest(location=location), self.assertRaises(CloseCheckpointError) as raised:
-                scan_close_secrets(text, lambda value: value.replace("known-secret", "redacted"))
-            self.assertNotIn("known-secret", str(raised.exception))
+        for secret in ("known-secret", 'known\n"private\tsecret'):
+            for location in ("close_reason", "decision"):
+                facts = copy.deepcopy(self.facts)
+                if location == "decision":
+                    facts["decisions"][0]["reason"] = secret
+                else:
+                    facts[location] = secret
+                text = json.dumps({"close_facts": facts}).replace("known-secret", "known-\\u0073ecret")
+                with self.subTest(multiline="\n" in secret, location=location), self.assertRaises(CloseCheckpointError) as raised:
+                    scan_close_secrets(text, lambda value: redact(value, env_files=[], secret_values=(secret,)))
+                self.assertNotIn(secret, str(raised.exception))

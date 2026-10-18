@@ -118,15 +118,16 @@ class SqlSprintAtomicityTests(SprintFixture):
                 before = TaskReader(app).export()
                 history = TaskWriter(app, data_dir=data).audit.events()
                 if shape == "ownership":
-                    with self.assertRaisesRegex(RuntimeError, "undo fixture"), app.transaction():
+                    with app.transaction():
                         app._execute("UPDATE issues SET priority='P2' WHERE issue_id='open'")
-                        conflicting = TaskReader(app).export()
-                        with self.assertRaisesRegex(RestoreError, "different metadata"), app.transaction():
-                            import_normalized_board(data, client=app, instance=self.instance)
-                        self.assertEqual(TaskReader(app).export(), conflicting)
-                        self.assertEqual(app.sprints.export_close_facts(), {})
-                        self.assertEqual(TaskWriter(app, data_dir=data).audit.events(), history)
-                        raise RuntimeError("undo fixture")
+                    conflicting = TaskReader(app).export()
+                    with self.assertRaisesRegex(RestoreError, "different metadata"), app.transaction():
+                        import_normalized_board(data, client=app, instance=self.instance)
+                    self.assertEqual(TaskReader(app).export(), conflicting)
+                    self.assertEqual(app.sprints.export_close_facts(), {})
+                    self.assertEqual(TaskWriter(app, data_dir=data).audit.events(), history)
+                    with app.transaction():
+                        app._execute("UPDATE issues SET priority='P1' WHERE issue_id='open'")
                 with self.assertRaisesRegex(RuntimeError, "caller rollback"), app.transaction():
                     import_normalized_board(data, client=app, instance=self.instance)
                     require_close_set_parity(expected, app.sprints.export_close_facts())

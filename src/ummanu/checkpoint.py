@@ -1365,16 +1365,17 @@ class SnapshotExporter(CheckpointWriter):
         """The whole cut leaves the host, so every file of it passes the secret scan."""
         hits: list[str] = []
         runtime_env = self.instance_dir / "runtime.env"
+        try:
+            board = open_checkpoint_board(cut / "state" / "board")
+            if board.has("sprints.ndjson"):
+                scan_close_secrets(
+                    board.read_text("sprints.ndjson"),
+                    lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values),
+                )
+        except (CloseCheckpointError, CheckpointLayoutError) as exc:
+            raise CheckpointBlocked(str(exc)) from None
         for path in paths:
             text = (cut / path).read_bytes().decode("utf-8", errors="replace")
-            if path in {"state/board/sprints.json", "state/board/sprints.ndjson"}:
-                try:
-                    scan_close_secrets(
-                        text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values),
-                        json_document=path.endswith("sprints.json"),
-                    )
-                except CloseCheckpointError as exc:
-                    raise CheckpointBlocked(str(exc)) from None
             if path == f"state/board/{OWNER_FILE}":
                 try:
                     scan_owner_secrets(
