@@ -1,17 +1,32 @@
-"""App-role PO import, rollback, readback and subsequent writes on real PostgreSQL."""
+"""App-role PO import, rollback, readback, recovery wiring and subsequent writes on real PostgreSQL."""
 
+import contextlib
 import copy
+import getpass
+import io
+import json
+import shutil
+import stat
 import tempfile
 import unittest
 from contextlib import ExitStack
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from tests.po_checkpoint_fixtures import po_records, seed_po
+from tests.restore_fixtures import _write_instance_to
 from tests.sql_backend_fixtures import PostgresBoard
-from ummanu.board.po_checkpoint import PO_COLUMNS, PoCheckpointError, export_po_records
+from ummanu.board import store
+from ummanu.board.po_checkpoint import (
+    PO_COLUMNS,
+    RESTORED_PO_COVERAGE,
+    PoCheckpointError,
+    export_po_records,
+    read_checkpoint_po,
+)
 from ummanu.board.po_restore import (
     PoRestoreStore,
     normalized_po_records,
@@ -20,7 +35,16 @@ from ummanu.board.po_restore import (
 )
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.board.sql_rows import rfc3339
-from ummanu.po.store import PoStore, RequestConflict, SessionClosed
+from ummanu.cli import main
+from ummanu.data import export_board, init_layout
+from ummanu.dispatch.po_delivery import deliver
+from ummanu.po.client import PoServiceClient
+from ummanu.po.recovery_admission import PoRecoveryAdmission, RecoveryAdmissionError
+from ummanu.po.restore_context import NOTICE, RestoreContextError, RestoredContexts
+from ummanu.po.runner import PoRunner
+from ummanu.po.service import PoService, listening
+from ummanu.po.store import COMPLETED, PoStore, RequestConflict, SessionClosed
+from ummanu.restore import RestoreError, restore_findings, restore_po, restore_state
 
 
 class PoRestorePostgresTests(unittest.TestCase):
@@ -271,3 +295,287 @@ class PoRestorePostgresTests(unittest.TestCase):
         with self.assertRaises(PoCheckpointError):
             self.import_records()
         self.assertEqual(before, self.readback())
+
+
+class _FinishedProcess:
+    pid = 999999999
+
+    def wait(self, timeout=None):
+        return 0
+
+
+class PoRecoveryWiringPostgresTests(unittest.TestCase):
+    """A deployed capture through the shared PO phase of restore-board into ordinary PO use."""
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.board = PostgresBoard.shared()
+        self.calls = []
+
+    def installation(self, name):
+        config = self.board.fresh_database()
+        self.addCleanup(self.board.release_database, config.dbname)
+        data = self.root / f"{name}-data"
+        instance = _write_instance_to(self.root / name, name, data)
+        (instance / "projects").mkdir()
+        path = store.store_path(instance)
+        path.write_text("".join(f"{key}={value}\n" for key, value in config.as_environ().items()),
+                        encoding="utf-8")
+        path.chmod(0o600)
+        init_layout(data)
+        client = SqlCardClient(config.for_role("app"), instance)
+        self.addCleanup(client.close)
+        po = PoStore(config.for_role("app"))
+        self.addCleanup(po.close)
+        return instance, data, client, po
+
+    def capture(self, records, name):
+        """The board export a source installation whose PO tables hold `records` publishes."""
+        instance, data, client, _ = self.installation(name)
+        seed_po(client, records)
+        export_board(data, instance_dir=instance)
+        return data / "board"
+
+    def target(self, board, name):
+        instance, data, client, po = self.installation(name)
+        shutil.copytree(board, data / "board", dirs_exist_ok=True)
+        (data / "po").mkdir()
+        return instance, data, client, po
+
+    @staticmethod
+    def readback(client):
+        with client.transaction():
+            return export_po_records(client)
+
+    @staticmethod
+    def restore_board(instance):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = main(["restore-board", "--instance", str(instance)])
+        return code, output.getvalue()
+
+    def launch(self, session, seq, argv, files, environment, spec):
+        self.calls.append({"argv": argv, "prompt": files.prompt.read_text()})
+        output = ({"type": "result", "result": "fresh answer", "session_id": session.cli_session_id}
+                  if session.cli == "claude" else {"type": "thread.started", "thread_id": "new-thread"})
+        files.stdout.write_text(json.dumps(output) + "\n")
+        files.stderr.write_text("")
+        files.last_message.write_text("fresh answer")
+        return _FinishedProcess()
+
+    def runner(self, po, data):
+        runner = PoRunner(po, data, head_specs={}, env={}, turn_launcher=self.launch)
+        self.enterContext(mock.patch.object(runner, "codex_home", return_value=self.root))
+        return runner
+
+    def test_restore_board_restores_dialogue_both_providers_resume_and_a_new_export_carries_it(self):
+        for cli in ("claude", "codex"):
+            with self.subTest(cli=cli):
+                self.calls = []
+                records = po_records(feed_count=12)
+                records["po_sessions"][-1]["cli"] = cli
+                board = self.capture(records, f"{cli}-source")
+                self.assertEqual(read_checkpoint_po(board), records)
+                instance, data, client, po = self.target(board, f"{cli}-target")
+                code, output = self.restore_board(instance)
+                self.assertEqual(code, 0, output)
+                self.assertNotIn("repeated text", output)
+                self.assertNotIn("password", output.lower())
+                result = json.loads(output)
+                self.assertEqual(
+                    (result["po_sql_coverage"], result["po_sql_restore"], result["po_sql_diagnostic"]),
+                    ("captured", "finished", RESTORED_PO_COVERAGE),
+                )
+                plan = prepare_po_restore(records, data, interrupted_at=datetime.now(UTC))
+                expected = normalized_po_records(records, plan)
+                require_po_parity(expected, self.readback(client))
+                self.assertIsNone(PoRecoveryAdmission(data, po).status())
+
+                runner = self.runner(po, data)
+                self.assertEqual(runner.recover(rerun=True), [])
+                replay, created = runner.send_request("open", records["po_feed"][0]["text"], "send")
+                self.assertEqual((replay.seq, created), (1, False))
+                first, created = runner.send_request("open", "current-owner-input", "new-request")
+                self.assertTrue(created)
+                first = runner.wait("open", first.seq, 2)
+                self.assertEqual(first.state, COMPLETED, first.reason)
+                [call] = self.calls
+                self.assertIn(NOTICE, call["prompt"])
+                self.assertEqual(call["prompt"].count("current-owner-input"), 1)
+                if cli == "claude":
+                    self.assertEqual(call["argv"][-2:], ["--session-id", dict(plan.native_bindings)["open"]])
+                else:
+                    self.assertEqual(call["argv"][1], "exec")
+                    self.assertEqual(po.session("open").cli_session_id, "new-thread")
+                second, _ = runner.send_request("open", "follow-up", "second-request")
+                self.assertEqual(runner.wait("open", second.seq, 2).state, COMPLETED)
+                self.assertEqual(self.calls[-1]["prompt"], "follow-up")
+                if cli == "claude":
+                    self.assertEqual(self.calls[-1]["argv"][-2:], ["--resume", dict(plan.native_bindings)["open"]])
+                else:
+                    self.assertEqual(self.calls[-1]["argv"][1:3], ["exec", "resume"])
+
+                live = self.readback(client)
+                code, output = self.restore_board(instance)
+                self.assertEqual(code, 0, output)
+                self.assertEqual(json.loads(output)["po_sql_restore"], "finished")
+                self.assertEqual(self.readback(client), live)
+                self.assertEqual(len(self.calls), 2)
+                again, created = runner.send_request("open", "current-owner-input", "new-request")
+                self.assertEqual((again.seq, created), (first.seq, False))
+                self.assertEqual(len(self.calls), 2)
+
+                export = self.root / f"{cli}-export"
+                export_board(export, instance_dir=instance)
+                exported = read_checkpoint_po(export / "board")
+                self.assertEqual(exported, live)
+                self.assertEqual(len(exported["po_turns"]), len(records["po_turns"]) + 2)
+                self.assertEqual(exported["po_feed"][:len(expected["po_feed"])], expected["po_feed"])
+
+    def test_each_interrupted_phase_holds_po_input_and_the_retry_resumes_the_same_recovery(self):
+        records = po_records()
+        board = self.capture(records, "fault-source")
+        restore = PoRestoreStore.restore
+
+        def after_import(owner, *args):
+            restore(owner, *args)
+            raise PoCheckpointError("injected import failure")
+
+        faults = (
+            ("import", PoRestoreStore, "restore", after_import, "holding"),
+            ("contexts", RestoredContexts, "prepare", RestoreContextError("injected contexts failure"),
+             "imported"),
+            ("finish", PoRecoveryAdmission, "finish", RecoveryAdmissionError("injected finish failure"),
+             "contexts_prepared"),
+        )
+        for step, owner, name, fault, phase in faults:
+            with self.subTest(step=step):
+                instance, data, client, po = self.target(board, f"fault-{step}")
+                with (
+                    mock.patch.object(owner, name, autospec=True, side_effect=fault),
+                    self.assertRaisesRegex(RestoreError, f"PO SQL restore failed at {step}: injected"),
+                ):
+                    restore_po(data, source=data / "board", instance=instance)
+                self.assertEqual(restore_state(data)["po_sql_restore"], phase)
+                self.assertIn(f"PO SQL restore is incomplete at {phase}", restore_findings(data))
+                self.assertEqual(PoRecoveryAdmission(data, po).status()["reason"], "recovery_hold")
+                self.assertEqual((data / ".po-restore" / "contexts.json").exists(), step == "finish")
+                committed = self.readback(client)
+                if step == "import":
+                    self.assertEqual(committed, {table: [] for table in PO_COLUMNS})
+                with self.assertRaises(RecoveryAdmissionError):
+                    self.runner(po, data).send_request("open", "held input", "held-request")
+                self.assertEqual(self.readback(client), committed)
+                self.assertEqual(self.calls, [])
+                plan = (data / ".po-restore" / "plan.json").read_bytes()
+
+                self.assertTrue(restore_po(data, source=data / "board", instance=instance))
+                self.assertEqual((data / ".po-restore" / "plan.json").read_bytes(), plan)
+                self.assertEqual(restore_state(data)["po_sql_restore"], "finished")
+                self.assertIsNone(PoRecoveryAdmission(data, po).status())
+                frozen = prepare_po_restore(records, data, interrupted_at=datetime.now(UTC))
+                require_po_parity(normalized_po_records(records, frozen), self.readback(client))
+                self.assertFalse(restore_po(data, source=data / "board", instance=instance))
+
+    def test_board_commit_before_the_po_import_holds_service_and_dispatcher_and_the_retry_finishes(self):
+        board = self.capture(po_records(), "seam-source")
+        instance, data, client, po = self.target(board, "seam-target")
+        runner = self.runner(po, data)
+        service = PoService(runner, models={"codex": ("chosen-model",)})
+        service.queue.put(session_id="open", text="queued before recovery", request_id="queued-early", source="web")
+        successors = []
+
+        def successor(closed):
+            successors.append(closed)
+            return "", "no successor here"
+
+        with listening(service):
+            runtime = SimpleNamespace(po=PoServiceClient(data))
+            with mock.patch("ummanu.board.po_restore.prepare_po_restore",
+                            side_effect=PoCheckpointError("injected seam failure")):
+                code, output = self.restore_board(instance)
+            self.assertEqual(code, 2, output)
+            self.assertIn("PO SQL restore failed at plan: injected seam failure", output)
+            state = restore_state(data)
+            self.assertEqual((state["board"], state["po_sql_restore"]), ("complete", "holding"))
+            # The restored board is published; every PO consumer still waits on the admission hold.
+            status, detail, received = deliver(runtime, session_id="open", text="card result",
+                                               request_id="delivery-1", card={"ref": "ummanu-1"},
+                                               successor=successor)
+            self.assertEqual((status, received), (None, ""))
+            self.assertIn("recovery_hold", detail)
+            service.pump()
+            self.assertEqual([item.request_id for item in service.queue.pending()], ["queued-early"])
+            self.assertIsNone(service.queue.find_refused("queued-early"))
+            self.assertEqual((successors, self.calls), ([], []))
+            self.assertEqual(self.readback(client), {table: [] for table in PO_COLUMNS})
+            self.assertIn("PO SQL restore is incomplete at holding", restore_findings(data))
+
+            code, output = self.restore_board(instance)
+            self.assertEqual(code, 0, output)
+            self.assertEqual(json.loads(output)["po_sql_restore"], "finished")
+            service.pump()
+            queued = po.request("queued-early")
+            self.assertIsNotNone(queued)
+            self.assertEqual(runner.wait("open", queued.seq, 2).state, COMPLETED)
+            self.assertEqual(service.queue.pending(), [])
+            self.assertEqual(len(self.calls), 1)
+            self.assertEqual(successors, [])
+
+    def test_unfinished_plan_with_another_source_digest_is_refused_by_field_through_restore_board(self):
+        board = self.capture(po_records(), "plan-source")
+        instance, data, client, po = self.target(board, "plan-target")
+        with mock.patch.object(PoRestoreStore, "restore", autospec=True,
+                               side_effect=PoCheckpointError("injected import failure")):
+            self.assertEqual(self.restore_board(instance)[0], 2)
+        path = data / ".po-restore" / "plan.json"
+        saved = json.loads(path.read_bytes())
+        other = "f" * 64 if saved["source_sha256"] != "f" * 64 else "e" * 64
+        payload = json.dumps({**saved, "source_sha256": other}).encode()
+        path.write_bytes(payload)
+        code, output = self.restore_board(instance)
+        self.assertEqual(code, 2, output)
+        self.assertIn("PO SQL restore failed at plan: PO restore plan field source_sha256 differs", output)
+        for value in (other, saved["source_sha256"]):
+            self.assertNotIn(value, output)
+        self.assertEqual(path.read_bytes(), payload)
+        self.assertEqual(PoRecoveryAdmission(data, po).status()["reason"], "recovery_hold")
+        self.assertEqual(restore_state(data)["po_sql_restore"], "holding")
+        self.assertEqual(self.readback(client), {table: [] for table in PO_COLUMNS})
+
+    def test_busy_target_refuses_before_any_recovery_write_and_keeps_its_running_turn(self):
+        board = self.capture(po_records(), "busy-source")
+        instance, data, client, _ = self.target(board, "busy-target")
+        live = po_records()
+        live["po_sessions"] = [live["po_sessions"][-1]]
+        live["po_turns"] = [live["po_turns"][-1]]
+        live["po_feed"] = live["po_requests"] = []
+        seed_po(client, live)
+        with self.assertRaisesRegex(RestoreError, "failed at admission: .*turns are running"):
+            restore_po(data, source=data / "board", instance=instance)
+        self.assertEqual(restore_state(data)["po_sql_restore"], "captured")
+        self.assertEqual(self.readback(client), live)
+        self.assertEqual(sorted(path.name for path in data.iterdir() if path.name.startswith(".po-")), [])
+
+    def test_root_recovery_runs_the_po_phase_in_the_runtime_user_child(self):
+        board = self.capture(po_records(), "root-source")
+        instance, data, client, po = self.target(board, "root-target")
+        root = mock.patch("os.geteuid", return_value=0)
+        root.start()
+        self.addCleanup(root.stop)
+        # The child stops pretending to be root once it has dropped to the account.
+        with (
+            mock.patch("os.initgroups"),
+            mock.patch("os.setgid"),
+            mock.patch("os.setuid", side_effect=lambda _uid: root.stop()),
+        ):
+            for _ in range(2):
+                restore_po(data, source=data / "board", instance=instance, runtime_user=getpass.getuser())
+        root.stop()
+        self.assertEqual(restore_state(data)["po_sql_restore"], "finished")
+        self.assertIsNone(PoRecoveryAdmission(data, po).status())
+        for path in (data / ".po-recovery-admission.json", data / ".po-restore" / "plan.json",
+                     data / ".po-restore" / "contexts.json"):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE((data / ".po-restore").stat().st_mode), 0o700)
+        self.assertEqual(len(self.readback(client)["po_sessions"]), 3)

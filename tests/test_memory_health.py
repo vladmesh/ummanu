@@ -133,9 +133,11 @@ class MemoryHealthWireTests(unittest.TestCase):
                 ),
             ]
         )
-        with mock.patch("ummanu.memory.health.http.client.HTTPConnection", return_value=connection):
-            with self.assertRaisesRegex(health.MemoryProbeError, "denied.*runtime_identity_stale"):
-                health._authenticated_list("launch-bound-token", port=8077, timeout_seconds=5)
+        with (
+            mock.patch("ummanu.memory.health.http.client.HTTPConnection", return_value=connection),
+            self.assertRaisesRegex(health.MemoryProbeError, "denied.*runtime_identity_stale"),
+        ):
+            health._authenticated_list("launch-bound-token", port=8077, timeout_seconds=5)
 
 
 class MemoryHealthIdentityTests(unittest.TestCase):
@@ -163,7 +165,7 @@ class MemoryHealthIdentityTests(unittest.TestCase):
             handed_off: list[Path] = []
             with (
                 mock.patch("ummanu.memory.health._authenticated_list", return_value=[{"scope": "product:ummanu"}]),
-                mock.patch("ummanu.memory.health.os.geteuid", return_value=1000),
+                mock.patch("ummanu._proc.os.geteuid", return_value=1000),
             ):
                 health.probe_memory(
                     data_dir,
@@ -175,12 +177,14 @@ class MemoryHealthIdentityTests(unittest.TestCase):
             self.assertEqual(handed_off, [access.bindings_dir(data_dir)])
 
     def test_missing_expected_steward_entry_is_a_visible_probe_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch(
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch(
                 "ummanu.memory.health._authenticated_list", return_value=[{"id": 1, "scope": "project:foreign"}]
-            ):
-                with self.assertRaisesRegex(health.MemoryProbeError, "expected steward-scoped"):
-                    health.probe_memory(Path(tmp), timeout_seconds=0.01, retry_seconds=0)
+            ),
+            self.assertRaisesRegex(health.MemoryProbeError, "expected steward-scoped"),
+        ):
+            health.probe_memory(Path(tmp), timeout_seconds=0.01, retry_seconds=0)
 
     @unittest.skipUnless(os.geteuid() == 0, "requires a root upgrade parent")
     def test_root_probe_uses_a_runtime_user_heartbeat_resolved_by_a_separate_daemon_process(self) -> None:
@@ -298,7 +302,7 @@ class MemoryHealthDaemonIntegrationTests(unittest.TestCase):
     def test_unprivileged_probe_uses_the_real_streamable_http_session_and_read_guard(self) -> None:
         # This is the ordinary runner path exercised in CI.  The root-only test
         # above covers the distinct privilege-drop handoff.
-        with mock.patch("ummanu.memory.health.os.geteuid", return_value=1000):
+        with mock.patch("ummanu._proc.os.geteuid", return_value=1000):
             health.probe_memory(self.data_dir, port=self.port, timeout_seconds=10, retry_seconds=0.05)
         deadline = time.monotonic() + 2
         while not self.audit.exists() and time.monotonic() < deadline:
@@ -325,16 +329,14 @@ class MemoryHealthDaemonIntegrationTests(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                "\n".join(
-                    (
-                        "import types",
-                        "from mcp.server.auth.provider import AccessToken",
-                        "from ummanu import memory_service",
-                        "async def verify_token(token):",
-                        "    return AccessToken(token=token, client_id='fixture', subject='fixture', scopes=[], claims={'memory_grant_id': '0' * 32})",
-                        "memory_service.mcp._token_verifier = types.SimpleNamespace(verify_token=verify_token)",
-                        "memory_service.mcp.run(transport='streamable-http')",
-                    )
+                (
+                    "import types\n"
+                    "from mcp.server.auth.provider import AccessToken\n"
+                    "from ummanu import memory_service\n"
+                    "async def verify_token(token):\n"
+                    "    return AccessToken(token=token, client_id='fixture', subject='fixture', scopes=[], claims={'memory_grant_id': '0' * 32})\n"
+                    "memory_service.mcp._token_verifier = types.SimpleNamespace(verify_token=verify_token)\n"
+                    "memory_service.mcp.run(transport='streamable-http')"
                 ),
             ],
             cwd=source_root,

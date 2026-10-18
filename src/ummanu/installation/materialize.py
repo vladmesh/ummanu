@@ -139,14 +139,14 @@ def materialize_checkpoint(
         board = open_checkpoint_board(board_source)
     except CheckpointLayoutError as exc:
         raise InstallError(f"private checkpoint has an unreadable board layout: {exc}") from None
+    for name in ("cards.ndjson", "export.json"):
+        if not board.has(name):
+            raise InstallError(f"private checkpoint is missing state/board/{name}")
     try:
         read_checkpoint_outbox(board_source)
         read_checkpoint_po(board_source)
     except (OriginCheckpointError, PoCheckpointError) as exc:
         raise InstallError(str(exc)) from None
-    for name in ("cards.ndjson", "export.json"):
-        if not board.has(name):
-            raise InstallError(f"private checkpoint is missing state/board/{name}")
     for name in CHECKPOINT_RUNS:
         if not (runs_source / name).is_file():
             raise InstallError(f"private checkpoint is missing state/runs/{name}")

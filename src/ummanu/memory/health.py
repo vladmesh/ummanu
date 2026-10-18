@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
-import os
-import pwd
 import time
-from pathlib import Path
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
+from ummanu._proc import RuntimeUserError, run_as_user
 from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef, new_run_id
 from ummanu.runtime.head.identity import publish_heartbeat
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
@@ -192,62 +192,6 @@ def _probe_read(
     raise last_error or MemoryProbeError("Memory MCP probe timed out")
 
 
-def _drop_to_runtime_user(runtime_user: str) -> None:
-    try:
-        account = pwd.getpwnam(runtime_user)
-    except KeyError:
-        raise MemoryProbeError(f"runtime user {runtime_user!r} does not exist") from None
-    try:
-        os.initgroups(account.pw_name, account.pw_gid)
-        os.setgid(account.pw_gid)
-        os.setuid(account.pw_uid)
-    except OSError as exc:
-        raise MemoryProbeError(f"could not enter runtime user {runtime_user!r}: {exc}") from None
-
-
-def _run_from_runtime_user(runtime_user: str | None, callback: Callable[[], None]) -> None:
-    """Run the heartbeat and read as the account that owns the Memory daemon.
-
-    Root upgrade is permitted to create and hand off the short-lived grant, but it
-    must not lend its process identity to an unprivileged server.  The forked
-    helper publishes its own heartbeat after dropping privileges, so the ordinary
-    server-side reader can inspect the exact process that made the MCP request.
-    """
-    if not runtime_user or os.geteuid() != 0:
-        callback()
-        return
-    read_fd, write_fd = os.pipe()
-    child = os.fork()
-    if child == 0:
-        os.close(read_fd)
-        try:
-            _drop_to_runtime_user(runtime_user)
-            callback()
-            result = {"ok": True}
-        except Exception as exc:
-            # This pipe crosses only the result boundary.  It never carries the
-            # bearer, grant body, request payload, or a Memory fact.
-            result = {"ok": False, "error": str(exc)}
-        try:
-            os.write(write_fd, json.dumps(result).encode("utf-8"))
-        finally:
-            os.close(write_fd)
-        os._exit(0)
-    os.close(write_fd)
-    try:
-        raw = os.read(read_fd, 16_384)
-    finally:
-        os.close(read_fd)
-        _, status = os.waitpid(child, 0)
-    try:
-        result = json.loads(raw)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        result = None
-    if status != 0 or not isinstance(result, dict) or not result.get("ok"):
-        detail = str(result.get("error") if isinstance(result, dict) else "runtime-user helper failed")
-        raise MemoryProbeError(f"runtime-user authenticated probe failed: {detail}")
-
-
 def probe_memory(
     data_dir: Path,
     *,
@@ -285,21 +229,20 @@ def probe_memory(
             # Handoff the whole tree before the daemon resolves it, not merely
             # the leaf files a root process happened to write.
             runtime_handoff(bindings)
-        _run_from_runtime_user(
-            runtime_user,
-            lambda: _probe_read(
-                run,
-                grant.token,
-                port=port,
-                timeout_seconds=timeout_seconds,
-                retry_seconds=retry_seconds,
-            ),
-        )
+        try:
+            run_as_user(
+                runtime_user,
+                lambda: _probe_read(
+                    run,
+                    grant.token,
+                    port=port,
+                    timeout_seconds=timeout_seconds,
+                    retry_seconds=retry_seconds,
+                ),
+            )
+        except RuntimeUserError as exc:
+            raise MemoryProbeError(f"runtime-user authenticated probe failed: {exc}") from None
     finally:
         for path in (grant_path, pid_file):
-            try:
+            with contextlib.suppress(OSError):
                 path.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                pass

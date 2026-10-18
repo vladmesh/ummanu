@@ -114,6 +114,25 @@ class PoRestorePlanTests(unittest.TestCase):
             with self.subTest(binding_count=len(altered)):
                 self.assert_refused_unchanged(json.dumps({**saved, "native_bindings": altered}).encode())
 
+    def test_unfinished_plan_refusal_names_the_safe_field_without_its_value(self):
+        self.records["po_turns"][-1]["started_at"] = "2026-09-30T00:00:00Z"
+        self.prepare()
+        saved = json.loads(self.path.read_bytes())
+        other_digest = "f" * 64 if saved["source_sha256"] != "f" * 64 else "e" * 64
+        for field, value in (
+            ("source_sha256", other_digest),
+            ("data_dir", str(self.root / "elsewhere")),
+            ("interrupted_at", "2026-10-01 00:00:00"),
+            ("interrupted_at", "2026-09-29T00:00:00Z"),
+        ):
+            payload = json.dumps({**saved, field: value}).encode()
+            self.path.write_bytes(payload)
+            with self.subTest(field=field, value=value), self.assertRaises(PoCheckpointError) as failed:
+                self.prepare()
+            self.assertIn(f"PO restore plan field {field} ", str(failed.exception))
+            self.assertNotIn(value, str(failed.exception))
+            self.assertEqual(self.path.read_bytes(), payload)
+
     def test_source_digest_ignores_object_key_order_but_binds_unicode_and_array_order(self):
         plan = self.prepare()
         before = self.path.read_bytes()

@@ -894,7 +894,9 @@ After the clone step, `recover` (`installation.install`) runs one sequence:
    (`<data>/webfront/owner-password.env`). Before it writes, a file target already present in a data
    directory ummanu has not laid out (no data manifest) is refused by path and no secret is written;
    in a laid-out one it is refreshed. Without the phrase it writes nothing, reports locked/missing,
-   and `runtime.env` stays as it is.
+   and `runtime.env` stays as it is. Locked or missing `runtime.env` secrets gate only activation:
+   with `board-store.env` present, recovery still runs the checkpoint, head registry, board, PO SQL,
+   memory and project steps, then skips the host step and reports recovery incomplete.
 2. **Ownership barrier.** The live root, secrets, locks and declared data root are handed to
    `--installation-user` before that user's Git or remote child can consume a restored key. A
    present key must be a regular non-symlink mode-`0600` file owned by that user.
@@ -912,9 +914,12 @@ After the clone step, `recover` (`installation.install`) runs one sequence:
    product default; `installation.materialize_head_registry`). The board import needs it: it
    validates every open sprint's observer head against this pair, and a clean host has none until
    this phase. It is idempotent and runs on every retry.
-6. **Board.** Imports the board in foreign-key order, with card and sprint parity
-   (`restore.import_normalized_board`, [Board import](#board-import)).
-7. **Memory.** Rebuilds the memory index from `state/memory/facts` in a child process that takes the
+6. **Board.** Inside the PO recovery hold, imports the board in foreign-key order, with card and
+   sprint parity (`restore.import_normalized_board`, [Board import](#board-import)).
+7. **PO SQL.** Runs on every retry, including after board progress is complete
+   (`restore.restore_po`, [PO SQL restore](#po-sql-restore)). It begins the hold before step 6 and
+   finishes PO recovery admission before the host step can start the PO service.
+8. **Memory.** Rebuilds the memory index from `state/memory/facts` in a child process that takes the
    embedding model with it when it exits (`restore.rebuild_memory_index(..., isolated=True)`; one
    killed by the kernel is reported by its signal). Recover then publishes the memory export
    (`<data>/memory/export.ndjson`, `export.json`, `manifest.json`) from the same facts and hands it to
@@ -922,13 +927,13 @@ After the clone step, `recover` (`installation.install`) runs one sequence:
    is `ok` right after recovery. The pack step later finds the restored ledger current and writes
    nothing, so this is the export's only writer on a recovered host. A retry past a completed rebuild
    keeps the index and still publishes an export that is missing.
-8. **Projects.** Attempts every missing project checkout from the registry through the same
+9. **Projects.** Attempts every missing project checkout from the registry through the same
    remote-execution boundary as the instance remote, and creates the non-secret managed runtime-home
    files for agent CLIs. A binding with `enabled: false` (retired, or not yet onboarded) is not
    cloned: its row has outcome `disabled` and does not count as unavailable. A parent directory
    recovery creates for a checkout (`~/projects`) is handed to `--installation-user`. Provider
    authentication stays manual.
-9. **Materializer up to the host step** (`installation.materialize_host`, the `upgrade.STEPS`
+10. **Materializer up to the host step** (`installation.materialize_host`, the `upgrade.STEPS`
    before `host`). Its head-registry step finds the pair phase 5 wrote current (the pair is
    generated, never read from the remote); `instance-packing` is skipped on a plain live root. It
    synchronises role skills and recreates role worktrees (owned by `--installation-user` under
@@ -937,13 +942,13 @@ After the clone step, `recover` (`installation.install`) runs one sequence:
    root, a host rebuilt from a backup) is added again over that registration; a locked one is
    refused, and the step reports git's `fatal:` line. Its **web-front config** step renders
    `<data>/webfront/Caddyfile` from `host.web_front.sites`; a file already current is not rewritten.
-10. **Pipeline journal.** Rebuilds the pipeline worktree's live run journal from the checkpoint
+11. **Pipeline journal.** Rebuilds the pipeline worktree's live run journal from the checkpoint
     (`installation.materialize_pipeline_state`), before any dispatcher unit is installed or started.
-11. **Host.** Applies host units, starts the memory service, the PO and the web, and verifies
+12. **Host.** Applies host units, starts the memory service, the PO and the web, and verifies
     restore status. Dispatch refuses an unavailable binding before starting its worker, reviewer or
     project worktree. Observers use the dedicated observer repository and are unaffected by
     unavailable reserved projects. Heads are connected afterwards as a separate step.
-12. **Ownership again.** Re-enters the ownership barrier on every partial or successful exit, handing
+13. **Ownership again.** Re-enters the ownership barrier on every partial or successful exit, handing
     root-created locks, recovery progress and restored dispatcher run-state to the installation
     user. A cleanup error is reported separately and does not replace an earlier failure.
 
@@ -956,8 +961,9 @@ configured/default root, not from the pin. Every reader of the pair (the dispatc
 pair.
 
 `ummanu recover --dry-run` checks checkout, credentials, runtime prerequisites and checkpoint
-integrity and prints steps as `would-change`. It writes no data plane, does not touch the board and
-runs neither the memory reindex nor the host materialiser.
+integrity and prints steps as `would-change`. It writes no data plane, does not touch the board,
+begins no PO admission, writes no PO plan, contexts or SQL rows and runs neither the memory reindex
+nor the host materialiser.
 
 ### Board import
 
@@ -981,8 +987,8 @@ order before the transaction commits. Existing conflicting, extra or reordered o
 the whole import. Retries cannot requeue a delivered/skipped row. Audit replay keeps
 `restoring=True`; neither current card state nor replay generates obligations. Reopened and archived
 cards retain their saved returns. Restore sends no external effects and revives no processes or
-claims. PO SQL capture does not import sessions or request bindings, so a pending obligation alone
-does not establish that its origin session can receive it.
+claims. PO sessions and request bindings arrive in the PO SQL phase after this transaction commits;
+until its recovery admission finishes, a delivery to an origin session stays pending and retryable.
 
 Released version-1 checkpoints without an outbox remain readable. Recovery's `origin-outbox` result
 and `restore-board` output explicitly report unavailable coverage; `restore-state.json` records
@@ -1016,16 +1022,77 @@ when all counts are zero; it cannot become legacy absence. The export summary bi
 through the analytics seal, and the snapshot manifest covers the physical file. PO fields pass the
 existing secret scan before commit/push; diagnostics name only table, record ordinal and field.
 
-Materialization writes inert files into `<data>/board`; the board importer leaves all four live PO
-tables untouched. Recovery's `po-sql` result and `restore-board`'s `po_sql_coverage` and
-`po_sql_diagnostic` distinguish captured source data from imported state. These flows do not invoke
-the library primitive `board.po_restore.PoRestoreStore` or establish PO readiness.
+Materialization writes inert files into `<data>/board`. The board importer validates the capture
+before its first write and leaves all four live PO tables untouched; the PO SQL restore imports them.
 
-The library ordering is: validate captured source with `read_checkpoint_po`/`validate_po_records`,
-begin recovery admission, prepare/load the frozen plan, import in the caller's SQL transaction,
-prove parity and commit, prepare the full runner context cohort, then finish recovery admission.
-New owner input can then establish a replacement native context. Normal recovery does not perform
-this library sequence. Legacy unavailable coverage cannot be passed as empty records.
+### PO SQL restore
+
+`recover` and `restore-board` share `restore.restore_po(data_dir, source=..., instance=...,
+runtime_user=..., board=...)`, before any host activation. `source` is the board directory of the
+selected source: `recover` reads the checkpoint it selected (`state/board` of the extracted snapshot
+or checkout), never `<data>/board`, which the running installation's export rewrites; `restore-board`
+reads the materialized `<data>/board` it imports. `board` is the caller's board import. Steps 1 to 3
+and 5 to 8 each hold `board/.restore.lock`; the board import between them takes that lock itself.
+
+1. **Capture.** `export.json` must be present in the source (its absence is named before any outbox
+   or PO reader runs); `read_checkpoint_po` validates the declared capture. Legacy absence runs the
+   board import and records `unavailable`, without credentials, admission or SQL; it is never empty
+   history.
+2. **Target.** The data directory must be canonical, owned by the effective user and deny
+   group/other writes.
+3. **Admission.** `PoRecoveryAdmission.begin` closes PO mutations before any plan exists. A finished
+   authority for the same source returns at once: later legitimate turns, native bindings and
+   metadata are neither reimported nor reported as source corruption. Running turns refuse with
+   retryable `recovery_busy` and nothing is killed. A refusal here stops before the board import, so
+   no restored obligation is published without the hold.
+4. **Board.** The caller's board and outbox import runs only after the hold is durable. A dispatcher
+   delivery or queued owner input meanwhile stays pending and retryable (`recovery_hold`); no
+   successor session is opened, nothing is refused permanently and nothing launches.
+5. **Plan.** `prepare_po_restore` publishes or reloads the frozen plan; a retry keeps its time and
+   UUIDs.
+6. **Import.** `PoRestoreStore.restore` runs in its own app-role SQL transaction with full readback
+   parity. Nothing later starts unless that transaction committed.
+7. **Contexts.** The full context cohort is prepared from committed rows through an ordinary
+   `PoStore`, under the native target lock. Neither credentials for a provider nor its CLI is
+   needed, and no provider starts.
+8. **Finish.** `finish(..., import_committed=True, parity_verified=True)` follows only the commit
+   and readback of step 6 in the same call, never a progress flag.
+
+When the process is root and `--installation-user` names another account, steps 2 and 3, and again
+steps 5 to 8, run in a child that drops to that account (`_proc.run_as_user`), so admission, plan
+and contexts belong to the runtime user under the same strict checks; root reads the capture,
+resolves the store credential, holds the lock and runs the board import. The final ownership
+barrier is unchanged.
+
+`restore-state.json` records `po_sql_coverage` (`captured` or `unavailable`), `po_sql_restore`, the
+last phase reached (`captured`, `holding`, `imported`, `contexts_prepared`, `finished` or
+`unavailable`), and `po_sql_diagnostic`. A refusal names its step (`target`, `admission`, `plan`,
+`import`, `contexts`, `finish`) and quotes only the protocol's safe diagnostic or, for store and SQL
+errors, the error class. An unfinished frozen plan that differs names its field (`source_sha256`,
+`data_dir` or `interrupted_at`) without the value and keeps the hold and the plan bytes. `restore-board` prints these three fields; recovery reports them as
+`po-sql`, and doctor reports an unfinished phase. A finished phase means restored SQL and prepared
+inert contexts, not provider readiness or a ready installation.
+
+Retry is the same command with the same checkpoint, and resumes the same source-bound recovery:
+
+- A missing `board-store.env` (the app SQL credential) skips the board and this phase with that
+  reason; nothing is begun. Restore it and rerun the same `recover`.
+- Locked or missing `runtime.env` secrets do not block this phase: the SQL restore and inert
+  contexts complete and only the host step is skipped. Rerun `recover` with the recovery phrase;
+  the finished phase is not repeated.
+- Missing provider authentication does not block this restore. Authenticate each provider CLI
+  before the first owner input to a restored session: a first launch without its native evidence
+  leaves that session's restored context blocked.
+- A refusal at `admission` with `recovery_busy`: let the running turns settle, then rerun.
+- A refusal at `plan`, `import`, `contexts` or `finish`: the admission stays `holding`, so every
+  PO mutation and queued input waits and stays retryable. Fix the cause the diagnostic names (store
+  reachability, target ownership or mode) and rerun; a rolled-back import is retried with the same
+  plan, a committed one is re-proved without writes.
+- `recovery_invalid`, a parity mismatch or a changed capture names the entity and field and is not
+  repaired by a retry. Preserve the target and its `.po-recovery-admission.json` and `.po-restore/`
+  for diagnosis; never delete them, edit SQL or remove markers to restart.
+- An uncertain restored native context after a later launch stays blocked for that session only;
+  there is no reset. The owner continues in a new session; the restored dialogue remains readable.
 
 `po.recovery_admission.PoRecoveryAdmission(target_data_dir, store)` is the sole admission owner.
 `begin(records)` durably closes all new PO mutations before any plan/import work and returns
@@ -1139,7 +1206,9 @@ row identities. Ordinary subsequent turn claims and feed appends use the normal 
 Parity errors name table, hashed identity and field, with transported values redacted.
 
 After the import transaction commits and the canonical PO workspace exists,
-`PoRunner.prepare_restored_context(records, plan)` validates the same captured records, persisted
+`RestoredContexts.prepare(records, plan)` under the native target lock (the recovery phase calls it
+directly; `PoRunner.prepare_restored_context` is the same call under the runner lock) validates the
+same captured records, persisted
 frozen plan and live imported session/turn/feed/request rows. It neither imports SQL nor starts a
 turn. `.po-restore/contexts.json` is the sole owner of restored native establishment: a private,
 mode-0600 atomic file under the plan's mode-0700 locked directory. It binds the plan digest, source
@@ -1172,11 +1241,9 @@ rewritten. Request-id replay returns its recorded turn without spawning. Ordinar
 their existing resume, recovery and fallback behavior. Automatic provider switching is disabled for
 explicitly restored sessions so it cannot discard the recorded native binding.
 
-Normal `recover`/`restore-board` still do not call admission begin/finish, SQL import or runner context preparation. Their
-captured/unavailable coverage is not restored/ready. Activation wiring and reconciliation of uncertain
-external effects remain separate. Pending/refused inputs in `<data>/po-queue/`, images under
-`<data>/po/sessions/<id>/attachments/` and PO workspace notes are not transported by these primitives.
-Library SQL parity and runner preparation do not establish full PO recovery readiness.
+Reconciliation of uncertain external effects is not automated. Pending/refused inputs in
+`<data>/po-queue/`, images under `<data>/po/sessions/<id>/attachments/` and PO workspace notes are
+not transported. SQL parity and prepared contexts do not establish full PO recovery readiness.
 
 Released v1/v2 checkpoints lacking both declaration and file remain supported and report
 `checkpoint has no PO SQL coverage; sessions, turns, feed and request bindings are unavailable`.
