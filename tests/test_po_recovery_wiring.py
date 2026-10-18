@@ -10,13 +10,21 @@ from pathlib import Path
 from unittest import mock
 
 from tests.fakes.installation import _checkpoint
+from tests.po_checkpoint_fixtures import po_records, write_po
+from tests.po_fake_store import FakeBoard, FakePoStore
 from ummanu import _proc
 from ummanu._fsutil import write_json
 from ummanu.board.po_checkpoint import LEGACY_PO_COVERAGE
 from ummanu.data import init_layout
 from ummanu.installation.materialize import materialize_checkpoint
 from ummanu.installation.models import InstallError
+from ummanu.po.recovery_admission import PoRecoveryAdmission
 from ummanu.restore import RestoreError, restore_findings, restore_po, restore_state
+
+
+class _ClosingStore(FakePoStore):
+    def close(self):
+        return None
 
 
 def _failing_callback():
@@ -66,7 +74,7 @@ class RestorePoBoundaryTests(unittest.TestCase):
         write_json(self.data / "board" / "export.json", {"version": 1})
         with mock.patch("ummanu.board.store.resolve_role", side_effect=AssertionError("credentials read")):
             for _ in range(2):
-                self.assertFalse(restore_po(self.data, instance=self.root / "instance"))
+                self.assertFalse(restore_po(self.data, source=self.data / "board", instance=self.root / "instance"))
         state = restore_state(self.data)
         self.assertEqual(
             (state["po_sql_coverage"], state["po_sql_restore"], state["po_sql_diagnostic"]),
@@ -77,7 +85,7 @@ class RestorePoBoundaryTests(unittest.TestCase):
     def test_missing_export_is_named_before_any_coverage_reader(self):
         with mock.patch("ummanu.restore.read_checkpoint_po", side_effect=AssertionError("PO reader")), \
                 self.assertRaisesRegex(RestoreError, "missing board/export.json"):
-            restore_po(self.data, instance=self.root / "instance")
+            restore_po(self.data, source=self.data / "board", instance=self.root / "instance")
         self.assertEqual(restore_state(self.data), {})
         self.assertEqual(self.artifacts(), [])
 
@@ -87,6 +95,41 @@ class RestorePoBoundaryTests(unittest.TestCase):
         (instance / "state" / "board" / "export.json").unlink()
         with self.assertRaisesRegex(InstallError, "missing state/board/export.json"):
             materialize_checkpoint(instance, self.root / "target")
+
+    def test_admission_holds_before_the_board_publishes_and_a_refused_begin_publishes_nothing(self):
+        write_json(self.data / "board" / "export.json", {"version": 1})
+        write_po(self.data / "board", po_records())
+        board = FakeBoard()
+        published = []
+
+        def publish():
+            published.append(PoRecoveryAdmission(self.data, FakePoStore(board)).status())
+            raise RuntimeError("board import interrupted after its commit")
+
+        with (
+            mock.patch("ummanu.board.store.resolve_role", return_value=object()),
+            mock.patch("ummanu.po.store.PoStore", side_effect=lambda _credentials: _ClosingStore(board)),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "interrupted after its commit"):
+                restore_po(self.data, source=self.data / "board", instance=self.root / "instance", board=publish)
+            self.assertEqual([status["reason"] for status in published], ["recovery_hold"])
+            self.assertEqual(restore_state(self.data)["po_sql_restore"], "holding")
+            busy = self.root / "busy"
+            init_layout(busy)
+            write_json(busy / "board" / "export.json", {"version": 1})
+            write_po(busy / "board", po_records())
+            running = FakePoStore(FakeBoard())
+            session = running.claim_session(session_id="live", cli="codex", model="model", cwd=str(busy),
+                                            cli_session_id=None, request_id=None, effort="high")[0]
+            running.claim_turn(session.session_id, "live input", lambda seq: busy / str(seq))
+            with (
+                mock.patch("ummanu.po.store.PoStore", side_effect=lambda _credentials: _ClosingStore(running.board)),
+                self.assertRaisesRegex(RestoreError, "failed at admission: .*turns are running"),
+            ):
+                restore_po(busy, source=busy / "board", instance=self.root / "instance", board=publish)
+        self.assertEqual(len(published), 1)
+        self.assertEqual(restore_state(busy)["po_sql_restore"], "captured")
+        self.assertFalse((busy / ".po-recovery-admission.json").exists())
 
     def test_doctor_names_an_unfinished_po_phase_and_not_a_finished_or_legacy_one(self):
         complete = {"board": "complete", "sprints": "complete", "memory_index": "complete",

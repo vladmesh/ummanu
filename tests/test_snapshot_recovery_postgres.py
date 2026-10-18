@@ -23,7 +23,10 @@ from __future__ import annotations
 
 import getpass
 import json
+import os
+import secrets
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -36,23 +39,25 @@ from tests.fakes.installation import PRODUCT_ROOT
 from tests.fakes.snapshot_remote import HEAD, exporter_remote, git
 from tests.po_checkpoint_fixtures import po_records, seed_po
 from tests.sql_backend_fixtures import PostgresBoard, insert_card_row
-from ummanu import bootstrap as bootstrap_module, upgrade
+from tests.support.snapshot_recovery import recover_patches
+from ummanu import bootstrap as bootstrap_module
 from ummanu.board import store
-from ummanu.board.po_checkpoint import RESTORED_PO_COVERAGE
+from ummanu.board.po_checkpoint import RESTORED_PO_COVERAGE, export_po_records, read_checkpoint_po
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.board.store import BoardStoreConfig
 from ummanu.checkpoint import SNAPSHOT_BASE_REF, SNAPSHOT_REF, SnapshotExporter, tick_checkpoint_writer
-from ummanu.data import init_layout
+from ummanu.data import export_board, init_layout
 from ummanu.head_registry import installed_heads, installed_pair
-from ummanu.installation import commands as installation_commands, materialize as installation_materialize
-from ummanu.installation.upgrade import workspaces as upgrade_workspaces
+from ummanu.installation import commands as installation_commands
 from ummanu.memory_journal import export_memory_snapshot, verify_memory_journal
 from ummanu.po.recovery_admission import PoRecoveryAdmission
-from ummanu.po.store import INTERRUPTED, PoStore
+from ummanu.po.runner import PoRunner
+from ummanu.po.store import COMPLETED, INTERRUPTED, PoStore
 from ummanu.po.workspace import workspace_dir
 from ummanu.product_issues import ProductIssueStore
-from ummanu.restore import DEFAULT_MEMORY_DIM, restore_state
+from ummanu.restore import restore_state
+from ummanu.secret_recover import SecretRecovery
 from ummanu.sprint_observer import none_choice
 from ummanu.sprints import SprintReader, SprintWriter, sprint_client
 from ummanu.tasks import TaskError, TaskReader, TaskWriter
@@ -89,20 +94,11 @@ def _exported_history(data_dir: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in lines if line.strip()]
 
 
-class _Embedder:
-    """A deterministic stand-in for the fastembed model: the index is real, the vectors are not."""
+class _FinishedProcess:
+    pid = 999999999
 
-    def embed_many(self, texts: list[str]):
-        import numpy as np
-
-        vectors = []
-        for text in texts:
-            raw = np.arange(1, DEFAULT_MEMORY_DIM + 1, dtype=np.float32) * (1 + len(text) % 7)
-            vectors.append(raw / np.linalg.norm(raw))
-        return vectors
-
-    def __call__(self, text: str):
-        return self.embed_many([text])[0]
+    def wait(self, timeout=None):
+        return 0
 
 
 class SnapshotRecoveryPostgresTests(unittest.TestCase):
@@ -344,6 +340,58 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
             code = bootstrap_module.bootstrap(args)
         return code, [str(call.args[0]) for call in printed.call_args_list if call.args]
 
+    def _args(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            instance_dir=str(self.fixture.target),
+            instance_remote=str(self.fixture.remote),
+            installation_user=getpass.getuser(),
+            recover=True,
+            adopt=False,
+            dry_run=False,
+            runtime_env=None,
+            product_root=str(PRODUCT_ROOT),
+            bootstrap_credential_file=None,
+            bootstrap_credential_stdin=False,
+            recovery_phrase_file=None,
+            recovery_phrase_stdin=False,
+            host_fixture=None,
+        )
+
+    def _recover(self, *extra) -> tuple[object, list[str]]:
+        """One unprivileged `recover` with host provisioning stood in for, and the store refusals it met."""
+        # A refused batch names the store's refusal itself; every refusal is kept anyway, so a
+        # failure message holds each one the store gave, not only the first.
+        refused: list[str] = []
+        real_batch = SqlCardClient.call_batch
+
+        def recording_batch(client, calls):
+            try:
+                return real_batch(client, calls)
+            except TaskError as exc:
+                refused.append(exc.message)
+                raise
+
+        with ExitStack() as stack:
+            for patch in (
+                mock.patch.object(SqlCardClient, "call_batch", autospec=True, side_effect=recording_batch),
+                *recover_patches(owners=True),
+                *extra,
+            ):
+                stack.enter_context(patch)
+            return installation_commands.install(self._args()), refused
+
+    def _target_po(self) -> tuple[PoStore, SqlCardClient]:
+        po = PoStore(self.target_config.for_role("app"))
+        self.addCleanup(po.close)
+        client = SqlCardClient(self.target_config.for_role("app"), self.fixture.target)
+        self.addCleanup(client.close)
+        return po, client
+
+    @staticmethod
+    def _readback(client: SqlCardClient) -> dict[str, list[dict[str, object]]]:
+        with client.transaction():
+            return export_po_records(client)
+
     def test_a_snapshot_remote_recovers_into_an_empty_store_at_parity(self) -> None:
         fixture = self.fixture
         target, data_dir = fixture.target, fixture.data_dir
@@ -366,56 +414,7 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
         self.assertTrue((target / ".ummanu-bootstrap").is_file())
         self.assertEqual(store.store_path(target).stat().st_mode & 0o777, 0o600)
 
-        def head_registry_only(context, steps=installation_materialize.STEPS):
-            return upgrade.run_steps(
-                context, steps=tuple(step for step in steps if step is upgrade_workspaces.step_head_registry)
-            )
-
-        args = SimpleNamespace(
-            instance_dir=str(target),
-            instance_remote=str(fixture.remote),
-            installation_user=getpass.getuser(),
-            recover=True,
-            adopt=False,
-            dry_run=False,
-            runtime_env=None,
-            product_root=str(PRODUCT_ROOT),
-            bootstrap_credential_file=None,
-            bootstrap_credential_stdin=False,
-            recovery_phrase_file=None,
-            recovery_phrase_stdin=False,
-            host_fixture=None,
-        )
-        # A refused batch now names the store's refusal itself; every refusal is kept anyway, so a
-        # failure message holds each one the store gave, not only the first.
-        refused: list[str] = []
-        real_batch = SqlCardClient.call_batch
-
-        def recording_batch(client, calls):
-            try:
-                return real_batch(client, calls)
-            except TaskError as exc:
-                refused.append(exc.message)
-                raise
-
-        with ExitStack() as stack:
-            for patch in (
-                mock.patch.object(SqlCardClient, "call_batch", autospec=True, side_effect=recording_batch),
-                mock.patch("ummanu.installation.commands._ensure_installation_user"),
-                mock.patch("ummanu.installation.clone._set_installation_owner"),
-                mock.patch("ummanu.installation.commands._set_installation_owner"),
-                mock.patch("ummanu.installation.materialize._set_installation_owner"),
-                mock.patch("ummanu.installation.support._set_installation_owner"),
-                mock.patch("ummanu.installation.commands.provision_project_checkouts", return_value=[]),
-                mock.patch("ummanu.installation.commands.provision_codex_home", return_value=0),
-                mock.patch("ummanu.installation.materialize.run_steps", side_effect=head_registry_only),
-                mock.patch("ummanu.installation.materialize.check_product_runtime"),
-                # The fixture enables the web front; the host's Caddy is not this test's (ummanu-49 P4).
-                mock.patch("ummanu.installation.materialize.caddy_installed", return_value=True),
-                mock.patch("ummanu.memory_service.build_document_embedder", return_value=_Embedder()),
-            ):
-                stack.enter_context(patch)
-            result = installation_commands.install(args)
+        result, refused = self._recover()
 
         steps = {step.name: (step.status, step.detail) for step in result.steps}
         self.assertEqual(result.status, "ok", f"{result.render()}\nrefused store batches: {refused}")
@@ -511,6 +510,126 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
         writer = tick_checkpoint_writer(data_dir, target)
         self.assertIsInstance(writer, SnapshotExporter)
         self.assertEqual(writer.snapshot_repo, repository.resolve())
+
+
+    def test_retry_after_new_po_activity_and_a_live_export_reads_the_selected_checkpoint(self) -> None:
+        self.assertEqual(self._bootstrap()[0], 0)
+        result, refused = self._recover()
+        self.assertEqual(result.status, "ok", f"{result.render()}\nrefused store batches: {refused}")
+        data_dir = self.fixture.data_dir.resolve()
+        po, client = self._target_po()
+        (data_dir / "po").mkdir(exist_ok=True)
+        launches = []
+
+        def launch(session, seq, argv, files, environment, spec):
+            launches.append(seq)
+            files.stdout.write_text(json.dumps({"type": "thread.started", "thread_id": "new-thread"}) + "\n")
+            files.stderr.write_text("")
+            files.last_message.write_text("fresh answer")
+            return _FinishedProcess()
+
+        runner = PoRunner(po, data_dir, head_specs={}, env={}, turn_launcher=launch)
+        self.enterContext(mock.patch.object(runner, "codex_home", return_value=self.root))
+        turn, created = runner.send_request("open", "input after recovery", "after-recovery")
+        self.assertTrue(created)
+        self.assertEqual(runner.wait("open", turn.seq, 2).state, COMPLETED)
+        self.assertEqual(po.session("open").cli_session_id, "new-thread")
+        # The installation's ordinary export rewrites `<data>/board` with the new history.
+        export_board(data_dir, instance_dir=self.fixture.target)
+        self.assertNotEqual(read_checkpoint_po(data_dir / "board"), po_records())
+        live = self._readback(client)
+        plan = (data_dir / ".po-restore" / "plan.json").read_bytes()
+
+        again, refused = self._recover()
+        steps = {step.name: (step.status, step.detail) for step in again.steps}
+        self.assertEqual(again.status, "ok", f"{again.render()}\nrefused store batches: {refused}")
+        self.assertEqual(steps["board"][0], "unchanged")
+        self.assertEqual(steps["po-sql"], ("unchanged", RESTORED_PO_COVERAGE))
+        self.assertEqual(self._readback(client), live)
+        self.assertEqual((data_dir / ".po-restore" / "plan.json").read_bytes(), plan)
+        self.assertIsNone(PoRecoveryAdmission(data_dir, po).status())
+        replay, created = runner.send_request("open", "input after recovery", "after-recovery")
+        self.assertEqual((replay.seq, created), (turn.seq, False))
+        self.assertEqual(launches, [turn.seq])
+
+    def test_locked_runtime_secrets_restore_board_and_po_sql_but_skip_activation(self) -> None:
+        self.assertEqual(self._bootstrap()[0], 0)
+        locked = SecretRecovery(
+            store_present=True,
+            unlocked=False,
+            locked=({"id": "example_token", "environment": "EXAMPLE_TOKEN", "target": "runtime-env"},),
+        )
+        data_dir = self.fixture.data_dir.resolve()
+        po, client = self._target_po()
+        for attempt in ("first", "retry"):
+            with self.subTest(attempt=attempt):
+                result, refused = self._recover(
+                    mock.patch("ummanu.installation.commands._open_secret_store", return_value=locked)
+                )
+                steps = {step.name: (step.status, step.detail) for step in result.steps}
+                self.assertEqual(result.status, "failed", f"{result.render()}\nrefused store batches: {refused}")
+                self.assertIn("recovery is incomplete", result.render())
+                changed = "changed" if attempt == "first" else "unchanged"
+                self.assertEqual(steps["board"][0], changed)
+                self.assertEqual(steps["po-sql"], (changed, RESTORED_PO_COVERAGE))
+                self.assertEqual(steps["host"][0], "skipped")
+                self.assertEqual(restore_state(data_dir)["po_sql_restore"], "finished")
+                self.assertEqual(len(self._readback(client)["po_sessions"]), len(po_records()["po_sessions"]))
+                self.assertIsNone(PoRecoveryAdmission(data_dir, po).status())
+
+    def test_root_recovery_hands_po_recovery_to_a_distinct_runtime_user_and_retries(self) -> None:
+        """Real root, a real distinct runtime account and real ownership changes, through `recover`.
+
+        Bootstrap's handoff gives the live root, data plane and remote to the runtime user; a root
+        `recover` then fails inside the PO import and is retried.
+        """
+        self.assertEqual(self._bootstrap()[0], 0)
+        user = f"ummanu-po-{secrets.token_hex(3)}"
+        subprocess.run(["sudo", "-n", "useradd", "--create-home", "--user-group", user], check=True)
+        self.addCleanup(subprocess.run, ["sudo", "-n", "userdel", "--remove", user], check=False)
+        uid = int(subprocess.run(["id", "-u", user], check=True, capture_output=True, text=True).stdout)
+        self.addCleanup(subprocess.run, ["sudo", "-n", "chown", "-R", f"{os.getuid()}:{os.getgid()}",
+                                         str(self.root)], check=True)
+        self.root.chmod(0o755)
+        fixture = self.fixture
+        subprocess.run(["sudo", "-n", "chown", "-R", f"{user}:{user}", str(fixture.target),
+                        str(fixture.data_dir), str(fixture.remote)], check=True)
+        repository = Path(__file__).resolve().parents[1]
+        data_dir = fixture.data_dir.resolve()
+        runs = []
+        for fail_import in (True, False):
+            spec = {"args": {**vars(self._args()), "installation_user": user}, "data_dir": str(data_dir),
+                    "uid": uid, "fail_import": fail_import}
+            completed = subprocess.run(
+                ["sudo", "-n", "env", f"PYTHONPATH={repository}:{repository / 'src'}", sys.executable, "-B",
+                 "-m", "tests.support.snapshot_recovery"],
+                input=json.dumps(spec), capture_output=True, text=True, cwd=repository, check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr[-4000:])
+            runs.append(json.loads(completed.stdout.splitlines()[-1]))
+        failed, retried = runs
+        self.assertEqual(failed["status"], "failed", failed["steps"])
+        self.assertIn("PO SQL restore failed at import: injected root recovery import failure",
+                      " ".join(step[2] for step in failed["steps"]))
+        self.assertEqual(retried["status"], "ok", retried["steps"])
+        self.assertEqual(retried["po_sql_restore"], "finished")
+        for run, phase in ((failed, "holding"), (retried, "finished")):
+            # Before the final barrier: whatever root wrote, the PO authority is the runtime user's own.
+            facts = run["before_final_barrier"]
+            self.assertEqual(facts["data_dir"]["uid"], uid)
+            self.assertEqual(facts["data_dir"]["mode"] & 0o022, 0)
+            artifacts = facts["artifacts"]
+            for name, mode in ((".po-recovery-admission.json", 0o600), (".po-restore", 0o700),
+                               (".po-restore/plan.json", 0o600)):
+                self.assertEqual(artifacts[name], {"uid": uid, "mode": mode}, name)
+            self.assertEqual(facts["admission_phase"], phase)
+            self.assertEqual(run["after"]["foreign"], [])
+        self.assertIsNone(failed["before_final_barrier"]["artifacts"][".po-restore/contexts.json"])
+        self.assertEqual(retried["before_final_barrier"]["artifacts"][".po-restore/contexts.json"],
+                         {"uid": uid, "mode": 0o600})
+        self.assertEqual(retried["after"]["plan_sha256"], failed["after"]["plan_sha256"])
+        _, client = self._target_po()
+        self.assertEqual(len(self._readback(client)["po_sessions"]), len(po_records()["po_sessions"]))
 
 
 if __name__ == "__main__":

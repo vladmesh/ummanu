@@ -2254,14 +2254,17 @@ class BootstrapCheckoutRecoveryTests(unittest.TestCase):
         result, steps = self._install()
 
         self.assertEqual(result.status, "ok", result.steps)
-        # The board-side sequence is the store's prerequisite read, then the restore into it and
-        # the PO phase: no transport is materialized and no Pipeline board is made first.
+        # The board-side sequence is the store's prerequisite read, then the PO phase, whose hold
+        # precedes the board import: no transport is materialized and no Pipeline board is made first.
         self.assertEqual(
             steps.mock_calls,
             [
                 mock.call.check_prerequisites(self.target),
+                mock.call.restore_po(
+                    self.data, source=self.target / "state" / "board", instance=self.target,
+                    runtime_user=getpass.getuser(), board=mock.ANY,
+                ),
                 mock.call.import_normalized_board(self.data, instance=self.target),
-                mock.call.restore_po(self.data, instance=self.target, runtime_user=getpass.getuser()),
                 mock.call.rebuild_memory_index(
                     self.data,
                     self.target,

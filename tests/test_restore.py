@@ -104,7 +104,7 @@ class RestoreTests(unittest.TestCase):
             self._portable_origin_board(data_dir)
             client = card_store(self, empty_seed())
             self.assertEqual(import_normalized_board(data_dir, client=client), 1)
-            self.assertFalse(restore_po(data_dir, instance=Path(tmp) / "unread-instance"))
+            self.assertFalse(restore_po(data_dir, source=data_dir / "board", instance=Path(tmp) / "unread-instance"))
             self.assertEqual(export_po_records(client), {table: [] for table in po_records()})
             state = restore_state(data_dir)
             self.assertEqual(state["po_sql_coverage"], "unavailable")

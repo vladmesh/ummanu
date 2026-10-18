@@ -121,8 +121,15 @@ def run_restore_board(args: argparse.Namespace) -> int:
     from ummanu.restore import _target, import_normalized_board, restore_po, restore_state
 
     instance_path, data_dir, _ = _target(Path(args.instance))
-    count = import_normalized_board(data_dir, instance=instance_path.parent)
-    restore_po(data_dir, instance=instance_path.parent)
+    instance = instance_path.parent
+    count = 0
+
+    def restore_board() -> None:
+        nonlocal count
+        count = import_normalized_board(data_dir, instance=instance)
+
+    # The materialized board export is this command's source; the PO hold precedes its import.
+    restore_po(data_dir, source=data_dir / "board", instance=instance, board=restore_board)
     state = restore_state(data_dir)
     return {
         "ok": True, "action": "restore-board", "cards": count, "sprints": state["sprint_count"],

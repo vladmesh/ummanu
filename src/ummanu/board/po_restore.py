@@ -79,11 +79,11 @@ def _decode_plan(payload: bytes, data_dir: Path) -> PoRestorePlan:
     plan = PoRestorePlan(saved["source_sha256"], saved["data_dir"], saved["interrupted_at"],
                          tuple(tuple(binding) for binding in bindings))
     moment = parse_rfc3339(plan.interrupted_at)
-    if (moment is None or moment.tzinfo is None
-            or rfc3339(moment, microseconds=True) != plan.interrupted_at
-            or len(dict(plan.native_bindings)) != len(bindings)
+    if moment is None or moment.tzinfo is None or rfc3339(moment, microseconds=True) != plan.interrupted_at:
+        raise PoCheckpointError("PO restore plan field interrupted_at is invalid")
+    if (len(dict(plan.native_bindings)) != len(bindings)
             or any(Path(key).name != key or key in {"", ".", ".."} for key, _ in bindings)):
-        raise PoCheckpointError("PO restore plan time or session identities are invalid")
+        raise PoCheckpointError("PO restore plan field native_bindings has invalid session identities")
     native_ids = [value for _, value in bindings if value is not None]
     try:
         valid = len(set(native_ids)) == len(native_ids) and all(str(uuid.UUID(value)) == value for value in native_ids)
@@ -170,11 +170,13 @@ def normalized_po_records(records: dict[str, list[dict[str, Any]]],
                           plan: PoRestorePlan) -> dict[str, list[dict[str, Any]]]:
     """Describe every allowed change without accessing source files or generating retry values."""
     validate_po_records(records)
+    if _digest(records) != plan.source_sha256:
+        raise PoCheckpointError("PO restore plan field source_sha256 differs from the captured source")
+    if not os.path.isabs(plan.data_dir) or os.path.normpath(plan.data_dir) != plan.data_dir:
+        raise PoCheckpointError("PO restore plan field data_dir is invalid")
     moment = parse_rfc3339(plan.interrupted_at)
-    if (_digest(records) != plan.source_sha256 or not os.path.isabs(plan.data_dir)
-            or os.path.normpath(plan.data_dir) != plan.data_dir or moment is None
-            or moment.tzinfo is None or rfc3339(moment, microseconds=True) != plan.interrupted_at):
-        raise PoCheckpointError("PO restore plan source, target or time is invalid")
+    if moment is None or moment.tzinfo is None or rfc3339(moment, microseconds=True) != plan.interrupted_at:
+        raise PoCheckpointError("PO restore plan field interrupted_at is invalid")
     sessions = records["po_sessions"]
     if (type(plan.native_bindings) is not tuple
             or any(type(binding) is not tuple or len(binding) != 2 for binding in plan.native_bindings)
@@ -208,7 +210,7 @@ def normalized_po_records(records: dict[str, list[dict[str, Any]]],
         row["pid"] = row["process_identity"] = None
         if row["state"] == "running":
             if moment < parse_rfc3339(row["started_at"]):
-                raise PoCheckpointError("PO restore plan interruption precedes turn start")
+                raise PoCheckpointError("PO restore plan field interrupted_at precedes a captured running turn")
             reason = INTERRUPTION_REASON if row["reason"] is None else row["reason"] + "\n" + INTERRUPTION_REASON
             row.update(state="interrupted", finished_at=plan.interrupted_at, reason=reason)
     validate_po_records(result)

@@ -894,7 +894,9 @@ After the clone step, `recover` (`installation.install`) runs one sequence:
    (`<data>/webfront/owner-password.env`). Before it writes, a file target already present in a data
    directory ummanu has not laid out (no data manifest) is refused by path and no secret is written;
    in a laid-out one it is refreshed. Without the phrase it writes nothing, reports locked/missing,
-   and `runtime.env` stays as it is.
+   and `runtime.env` stays as it is. Locked or missing `runtime.env` secrets gate only activation:
+   with `board-store.env` present, recovery still runs the checkpoint, head registry, board, PO SQL,
+   memory and project steps, then skips the host step and reports recovery incomplete.
 2. **Ownership barrier.** The live root, secrets, locks and declared data root are handed to
    `--installation-user` before that user's Git or remote child can consume a restored key. A
    present key must be a regular non-symlink mode-`0600` file owned by that user.
@@ -912,11 +914,11 @@ After the clone step, `recover` (`installation.install`) runs one sequence:
    product default; `installation.materialize_head_registry`). The board import needs it: it
    validates every open sprint's observer head against this pair, and a clean host has none until
    this phase. It is idempotent and runs on every retry.
-6. **Board.** Imports the board in foreign-key order, with card and sprint parity
-   (`restore.import_normalized_board`, [Board import](#board-import)).
+6. **Board.** Inside the PO recovery hold, imports the board in foreign-key order, with card and
+   sprint parity (`restore.import_normalized_board`, [Board import](#board-import)).
 7. **PO SQL.** Runs on every retry, including after board progress is complete
-   (`restore.restore_po`, [PO SQL restore](#po-sql-restore)). It finishes PO recovery admission
-   before the host step can start the PO service.
+   (`restore.restore_po`, [PO SQL restore](#po-sql-restore)). It begins the hold before step 6 and
+   finishes PO recovery admission before the host step can start the PO service.
 8. **Memory.** Rebuilds the memory index from `state/memory/facts` in a child process that takes the
    embedding model with it when it exits (`restore.rebuild_memory_index(..., isolated=True)`; one
    killed by the kernel is reported by its signal). Recover then publishes the memory export
@@ -1025,45 +1027,59 @@ before its first write and leaves all four live PO tables untouched; the PO SQL 
 
 ### PO SQL restore
 
-`recover` and `restore-board` share `restore.restore_po(data_dir, instance=..., runtime_user=...)`,
-after the board import and before any host activation. It holds `board/.restore.lock` and runs:
+`recover` and `restore-board` share `restore.restore_po(data_dir, source=..., instance=...,
+runtime_user=..., board=...)`, before any host activation. `source` is the board directory of the
+selected source: `recover` reads the checkpoint it selected (`state/board` of the extracted snapshot
+or checkout), never `<data>/board`, which the running installation's export rewrites; `restore-board`
+reads the materialized `<data>/board` it imports. `board` is the caller's board import. Steps 1 to 3
+and 5 to 8 each hold `board/.restore.lock`; the board import between them takes that lock itself.
 
-1. **Capture.** `board/export.json` must be present (its absence is named before any outbox or PO
-   reader runs); `read_checkpoint_po` validates the declared capture. Legacy absence records
-   `unavailable` and stops here, without credentials or SQL; it is never empty history.
+1. **Capture.** `export.json` must be present in the source (its absence is named before any outbox
+   or PO reader runs); `read_checkpoint_po` validates the declared capture. Legacy absence runs the
+   board import and records `unavailable`, without credentials, admission or SQL; it is never empty
+   history.
 2. **Target.** The data directory must be canonical, owned by the effective user and deny
    group/other writes.
 3. **Admission.** `PoRecoveryAdmission.begin` closes PO mutations before any plan exists. A finished
    authority for the same source returns at once: later legitimate turns, native bindings and
    metadata are neither reimported nor reported as source corruption. Running turns refuse with
-   retryable `recovery_busy` and nothing is killed.
-4. **Plan.** `prepare_po_restore` publishes or reloads the frozen plan; a retry keeps its time and
+   retryable `recovery_busy` and nothing is killed. A refusal here stops before the board import, so
+   no restored obligation is published without the hold.
+4. **Board.** The caller's board and outbox import runs only after the hold is durable. A dispatcher
+   delivery or queued owner input meanwhile stays pending and retryable (`recovery_hold`); no
+   successor session is opened, nothing is refused permanently and nothing launches.
+5. **Plan.** `prepare_po_restore` publishes or reloads the frozen plan; a retry keeps its time and
    UUIDs.
-5. **Import.** `PoRestoreStore.restore` runs in its own app-role SQL transaction with full readback
+6. **Import.** `PoRestoreStore.restore` runs in its own app-role SQL transaction with full readback
    parity. Nothing later starts unless that transaction committed.
-6. **Contexts.** The full context cohort is prepared from committed rows through an ordinary
+7. **Contexts.** The full context cohort is prepared from committed rows through an ordinary
    `PoStore`, under the native target lock. Neither credentials for a provider nor its CLI is
    needed, and no provider starts.
-7. **Finish.** `finish(..., import_committed=True, parity_verified=True)` follows only the commit
-   and readback of step 5 in the same call, never a progress flag.
+8. **Finish.** `finish(..., import_committed=True, parity_verified=True)` follows only the commit
+   and readback of step 6 in the same call, never a progress flag.
 
-When the process is root and `--installation-user` names another account, steps 2 to 7 run in a
-child that drops to that account (`_proc.run_as_user`), so admission, plan and contexts belong to
-the runtime user under the same strict checks; root only resolves the store credential and holds
-the lock. The final ownership barrier is unchanged.
+When the process is root and `--installation-user` names another account, steps 2 and 3, and again
+steps 5 to 8, run in a child that drops to that account (`_proc.run_as_user`), so admission, plan
+and contexts belong to the runtime user under the same strict checks; root reads the capture,
+resolves the store credential, holds the lock and runs the board import. The final ownership
+barrier is unchanged.
 
 `restore-state.json` records `po_sql_coverage` (`captured` or `unavailable`), `po_sql_restore`, the
 last phase reached (`captured`, `holding`, `imported`, `contexts_prepared`, `finished` or
 `unavailable`), and `po_sql_diagnostic`. A refusal names its step (`target`, `admission`, `plan`,
 `import`, `contexts`, `finish`) and quotes only the protocol's safe diagnostic or, for store and SQL
-errors, the error class. `restore-board` prints these three fields; recovery reports them as
+errors, the error class. An unfinished frozen plan that differs names its field (`source_sha256`,
+`data_dir` or `interrupted_at`) without the value and keeps the hold and the plan bytes. `restore-board` prints these three fields; recovery reports them as
 `po-sql`, and doctor reports an unfinished phase. A finished phase means restored SQL and prepared
 inert contexts, not provider readiness or a ready installation.
 
 Retry is the same command with the same checkpoint, and resumes the same source-bound recovery:
 
-- Missing or locked store credentials stop recovery before the board, with nothing begun. Restore
-  the credentials (`runtime.env`, `board-store.env`) and rerun the same `recover`.
+- A missing `board-store.env` (the app SQL credential) skips the board and this phase with that
+  reason; nothing is begun. Restore it and rerun the same `recover`.
+- Locked or missing `runtime.env` secrets do not block this phase: the SQL restore and inert
+  contexts complete and only the host step is skipped. Rerun `recover` with the recovery phrase;
+  the finished phase is not repeated.
 - Missing provider authentication does not block this restore. Authenticate each provider CLI
   before the first owner input to a restored session: a first launch without its native evidence
   leaves that session's restored context blocked.
@@ -1190,7 +1206,9 @@ row identities. Ordinary subsequent turn claims and feed appends use the normal 
 Parity errors name table, hashed identity and field, with transported values redacted.
 
 After the import transaction commits and the canonical PO workspace exists,
-`PoRunner.prepare_restored_context(records, plan)` validates the same captured records, persisted
+`RestoredContexts.prepare(records, plan)` under the native target lock (the recovery phase calls it
+directly; `PoRunner.prepare_restored_context` is the same call under the runner lock) validates the
+same captured records, persisted
 frozen plan and live imported session/turn/feed/request rows. It neither imports SQL nor starts a
 turn. `.po-restore/contexts.json` is the sole owner of restored native establishment: a private,
 mode-0600 atomic file under the plan's mode-0700 locked directory. It binds the plan digest, source

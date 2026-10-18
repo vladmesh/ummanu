@@ -78,8 +78,9 @@
     "_validated_instance": {"owner": "commands", "baseline_lines": [1839, 1843], "ast_sha256": "e063dbb6cc3111affbb0b33f3df0bd9c62d8401382676236bb088df1c4e0d7dc"},
     "PRODUCT_MARKERS": {"owner": "commands", "baseline_lines": [1849, 1849], "ast_sha256": "4546f8b037eb5858d271fe31ddfeb4e4f2ebb0565072891340b141e0f3dfe781"},
     "_product_root": {"owner": "commands", "baseline_lines": [1852, 1870], "ast_sha256": "f95532a8e5e6dda06b0eeafc8073b970cebe4f5dc5baa5e1d6d626f0627886dd"},
-    "_restore_without_credentials": {"owner": "commands", "baseline_lines": [1873, 1944], "ast_sha256": "7d946bad7d3e40965d3798ce7050c0ec81bc3f3e9c77b34d79a8692fc7161795"},
-    "install": {"owner": "commands", "baseline_lines": [1947, 2301], "ast_sha256": "b70122115c0d946c53fcca1d75ad9eb586ec2c948c7206037049754918cffc2a"},
+    "_restore_board_and_po": {"owner": "commands", "baseline_lines": null, "ast_sha256": "a3c144dd0347d7222003c0b65330fd2cde2b548622df6cd4e0e67b21a421356f"},
+    "_restore_without_credentials": {"owner": "commands", "baseline_lines": [1873, 1944], "ast_sha256": "6d84fbeb14e649e0fb268fe7f0dd55833233254467a135003e159f2178d7e7a5"},
+    "install": {"owner": "commands", "baseline_lines": [1947, 2301], "ast_sha256": "070b324066005341ae2f112f2677d992298888a43ec2757eccb179359c5705d6"},
     "run_install": {"owner": "commands", "baseline_lines": [2304, 2329], "ast_sha256": "6b36453de36e76db1bfe3e1df7ea528711edf31cc4d957805f2a5a1de82a16fc"},
     "add_bootstrap_credential_arguments": {"owner": "credentials", "baseline_lines": [2332, 2343], "ast_sha256": "e4af049da29bf1bd49bc45d48a6809d592f10511aae85b0edb7572500d7c7b43"},
     "add_install_commands": {"owner": "commands", "baseline_lines": [2346, 2389], "ast_sha256": "0ff459a0bc401b78f8584c006b907b7d7e91ca4695d083f2517124e20c501c59"}

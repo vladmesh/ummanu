@@ -9,6 +9,7 @@ import sys
 import tarfile
 import tempfile
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -99,6 +100,7 @@ class RestoreError(RuntimeError):
 
 
 RESTORE_STATE_FILE = "restore-state.json"
+HOLDING_PO_COVERAGE = "PO recovery admission holds PO input until the board and PO SQL restore finishes"
 MEMORY_REINDEX_TIMEOUT_SECONDS = 300
 # Every card needs a kind; refuse rows the current board cannot place.
 _RECORD_TYPES = {"task", "issue", "product"}
@@ -155,7 +157,7 @@ def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance:
     )
     sprints = _normalized_sprints(data_dir)
     # `restore_po` imports this capture after the board commits; refuse a damaged one before writes.
-    _checkpoint_po(data_dir)
+    _checkpoint_po(data_dir / "board")
     outbox = read_checkpoint_outbox(data_dir / "board")
     # Validate both sets before the first backend write.
     _check_sql_sprint_current_tasks(cards, sprints)
@@ -246,59 +248,78 @@ def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance:
     return len(cards)
 
 
-def _checkpoint_po(data_dir: Path) -> dict[str, list[dict[str, Any]]] | None:
-    """The validated PO capture of the materialized board, None only for legacy absence."""
+def _checkpoint_po(board: Path) -> dict[str, list[dict[str, Any]]] | None:
+    """The validated PO capture of a board directory, None only for legacy absence."""
     try:
-        present = open_checkpoint_board(data_dir / "board").has("export.json")
+        present = open_checkpoint_board(board).has("export.json")
     except CheckpointLayoutError as exc:
         raise RestoreError(f"normalized board layout is unreadable: {exc}") from None
     if not present:
         raise RestoreError("normalized board is missing board/export.json")
     try:
-        return read_checkpoint_po(data_dir / "board")
+        return read_checkpoint_po(board)
     except PoCheckpointError as exc:
         raise RestoreError(str(exc)) from None
 
 
-def restore_po(data_dir: Path, *, instance: Path, runtime_user: str | None = None) -> bool:
-    """Restore the captured PO SQL before any host activation; True when this call advanced it.
+def restore_po(data_dir: Path, *, source: Path, instance: Path, runtime_user: str | None = None,
+               board: Callable[[], None] | None = None) -> bool:
+    """Hold PO admission, run `board`, then import the captured PO SQL; True when this call advanced it.
 
-    The protocol runs as `runtime_user` when this process is root, so every recovery artifact is
-    the target owner's. Restore state records the last phase reached; a refusal raises after it.
+    `source` is the selected checkpoint's board directory, never a live export rewritten later. The
+    hold is durable before `board` publishes restored obligations. Root runs the PO protocol as
+    `runtime_user`; restore state records the last phase reached and a refusal raises after it.
     """
     from ummanu.board.store import BoardStoreError, resolve_role
 
     data_dir = data_dir.expanduser().resolve()
-    with file_lock(data_dir / "board" / ".restore.lock"):
-        records = _checkpoint_po(data_dir)
-        if records is None:
-            _update_restore_state(data_dir, po_sql_coverage="unavailable", po_sql_restore="unavailable",
-                                  po_sql_diagnostic=LEGACY_PO_COVERAGE)
-            return False
-        try:
-            credentials = resolve_role(instance, "app")
-            outcome = _proc.run_as_user(
-                runtime_user, lambda: _restore_po_sql(data_dir, instance, credentials, records)
-            )
-        except BoardStoreError as exc:
-            outcome = {"phase": "captured", "changed": False, "error": f"PO SQL restore failed at target: {exc}"}
-        except _proc.RuntimeUserError as exc:
-            outcome = {"phase": restore_state(data_dir).get("po_sql_restore", "captured"), "changed": False,
-                       "error": f"PO SQL restore failed in the runtime-user child: {exc}"}
-        _update_restore_state(
-            data_dir, po_sql_coverage="captured", po_sql_restore=outcome["phase"],
-            po_sql_diagnostic=outcome["error"] or RESTORED_PO_COVERAGE,
-        )
+    lock = data_dir / "board" / ".restore.lock"
+    with file_lock(lock):
+        records = _checkpoint_po(source)
+        if records is not None:
+            try:
+                credentials = resolve_role(instance, "app")
+            except BoardStoreError as exc:
+                _record_po(data_dir, {"phase": "captured", "changed": False,
+                                      "error": f"PO SQL restore failed at target: {exc}"})
+            begun = _po_phase(data_dir, runtime_user,
+                              lambda: _restore_po_sql(data_dir, instance, credentials, records, begin_only=True))
+    if board is not None:
+        board()
+    if records is None:
+        _update_restore_state(data_dir, po_sql_coverage="unavailable", po_sql_restore="unavailable",
+                              po_sql_diagnostic=LEGACY_PO_COVERAGE)
+        return False
+    with file_lock(lock):
+        restored = _po_phase(data_dir, runtime_user,
+                             lambda: _restore_po_sql(data_dir, instance, credentials, records))
+    return begun["changed"] or restored["changed"]
+
+
+def _po_phase(data_dir: Path, runtime_user: str | None, step: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    try:
+        outcome = _proc.run_as_user(runtime_user, step)
+    except _proc.RuntimeUserError as exc:
+        outcome = {"phase": restore_state(data_dir).get("po_sql_restore", "captured"), "changed": False,
+                   "error": f"PO SQL restore failed in the runtime-user child: {exc}"}
+    return _record_po(data_dir, outcome)
+
+
+def _record_po(data_dir: Path, outcome: dict[str, Any]) -> dict[str, Any]:
+    finished = RESTORED_PO_COVERAGE if outcome["phase"] == "finished" else HOLDING_PO_COVERAGE
+    _update_restore_state(data_dir, po_sql_coverage="captured", po_sql_restore=outcome["phase"],
+                          po_sql_diagnostic=outcome["error"] or finished)
     if outcome["error"]:
         raise RestoreError(outcome["error"])
-    return outcome["changed"]
+    return outcome
 
 
 def _restore_po_sql(data_dir: Path, instance: Path, credentials: Any,
-                    records: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+                    records: dict[str, list[dict[str, Any]]], *, begin_only: bool = False) -> dict[str, Any]:
     """Begin admission, persist the plan, import at parity, prepare contexts and finish, in order.
 
-    Context preparation and finish read only rows the import transaction committed.
+    Context preparation and finish read only rows the import transaction committed; `begin_only`
+    stops once the hold is durable.
     """
     from ummanu.board.po_restore import PoRestoreStore, _check_plan_path, prepare_po_restore
     from ummanu.board.sql_cards import SqlCardClient
@@ -317,6 +338,8 @@ def _restore_po_sql(data_dir: Path, instance: Path, credentials: Any,
         admission = PoRecoveryAdmission(data_dir, store)
         if admission.begin(records) == "finished":
             return {"phase": "finished", "changed": False, "error": None}
+        if begin_only:
+            return {"phase": "holding", "changed": True, "error": None}
         phase, step = "holding", "plan"
         plan = prepare_po_restore(records, data_dir, interrupted_at=datetime.now(UTC))
         step = "import"

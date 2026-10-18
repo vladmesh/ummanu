@@ -19,8 +19,9 @@ import json
 import shutil
 from pathlib import Path
 
+from ummanu.board.store import store_path
 from ummanu.cli_output import print_error
-from ummanu.config import validate_instance
+from ummanu.config import InstanceReport, validate_instance
 from ummanu.installation.clone import (
     SnapshotCheckout,
     _clone_or_reuse,
@@ -114,6 +115,46 @@ def _product_root(args: argparse.Namespace) -> Path:
 
 
 
+def _restore_board_and_po(
+    args: argparse.Namespace,
+    target: Path,
+    report: InstanceReport,
+    checkpoint_root: Path,
+    cards: int,
+    progress: dict[str, object],
+    identity: str,
+    product_root: Path,
+    result: InstallResult,
+) -> None:
+    """Head registry, then the board import inside the PO recovery hold and the PO SQL phase."""
+    assert report.data_dir is not None
+    data_dir = report.data_dir
+    progress_path = data_dir / RECOVERY_PROGRESS_FILE
+    # Before the board: the import checks open sprints' observer heads against this pair.
+    result.add("head-registry", *materialize_head_registry(target, product_root, report, args.installation_user))
+    recovered_board_completion = (
+        progress.get("board") == "started" and restore_state(data_dir).get("board_parity") == "complete"
+    )
+
+    def restore_board() -> None:
+        if progress.get("board") == "complete" or recovered_board_completion:
+            result.add("board", "unchanged", f"{cards} card(s) already restored at parity")
+            if recovered_board_completion:
+                _write_recovery_progress(progress_path, identity, board="complete")
+            return
+        _write_recovery_progress(progress_path, identity, board="started")
+        restored = import_normalized_board(data_dir, instance=target)
+        result.add("board", "changed", f"{restored} card(s) at parity")
+        _write_recovery_progress(progress_path, identity, board="complete")
+
+    # Board progress never skips the PO phase: admission authority decides. The source is the
+    # selected checkpoint, not `<data>/board`, which a running installation's export rewrites.
+    changed = restore_po(data_dir, source=checkpoint_root / "state" / "board", instance=target,
+                         runtime_user=args.installation_user, board=restore_board)
+    result.add("po-sql", "changed" if changed else "unchanged", restore_state(data_dir)["po_sql_diagnostic"])
+
+
+
 def _restore_without_credentials(
     args: argparse.Namespace,
     target: Path,
@@ -155,6 +196,15 @@ def _restore_without_credentials(
         else f"{cards} board card(s), {runs} run record(s)",
     )
     _write_recovery_progress(progress_path, identity, checkpoint="complete")
+    product_root = _product_root(args)
+    # Runtime secrets gate activation only; the board store has its own credential file.
+    if store_path(target).exists():
+        with _runtime_environment({"UMMANU_INSTANCE": str(target)}):
+            _restore_board_and_po(
+                args, target, report, checkpoint_root, cards, progress, identity, product_root, result
+            )
+    else:
+        result.add("board", "skipped", f"board store configuration is missing: {store_path(target)}")
     host = report.host if isinstance(report.host, dict) else {}
     memory = memory_config(host)
     if progress.get("memory") == "complete" and index_matches(data_dir / "memory" / "index.sqlite", memory):
@@ -176,7 +226,7 @@ def _restore_without_credentials(
         recovery_identity=identity,
     )
     result.projects.extend(project_results)
-    seeded = provision_codex_home(_product_root(args), args.installation_user, data_dir=data_dir)
+    seeded = provision_codex_home(product_root, args.installation_user, data_dir=data_dir)
     cloned = sum(project.outcome == "cloned" for project in project_results)
     failed = sum(project.outcome == "failed" for project in project_results)
     result.add(
@@ -184,8 +234,7 @@ def _restore_without_credentials(
         "degraded" if failed else ("changed" if cloned or seeded else "unchanged"),
         f"{cloned} project checkout(s) cloned, {failed} unavailable, {seeded} CODEX_HOME file(s) seeded",
     )
-    result.add("board", "skipped", "requires an available board backend after locked secret recovery")
-    result.add("host", "skipped", "requires full recovery before host materialization")
+    result.add("host", "skipped", "requires the locked runtime secrets before host activation")
 
 
 
@@ -415,29 +464,8 @@ def install(args: argparse.Namespace) -> InstallResult:
             )
             _write_recovery_progress(progress_path, identity, checkpoint="complete")
             product_root = _product_root(args)
-            # Before the board: the import checks open sprints' observer heads against this pair.
-            result.add(
-                "head-registry",
-                *materialize_head_registry(target, product_root, report, args.installation_user),
-            )
-            recovered_board_completion = (
-                progress.get("board") == "started"
-                and restore_state(data_dir).get("board_parity") == "complete"
-            )
-            if progress.get("board") == "complete" or recovered_board_completion:
-                result.add("board", "unchanged", f"{cards} card(s) already restored at parity")
-                if recovered_board_completion:
-                    _write_recovery_progress(progress_path, identity, board="complete")
-            else:
-                _write_recovery_progress(progress_path, identity, board="started")
-                restored = import_normalized_board(data_dir, instance=target)
-                result.add("board", "changed", f"{restored} card(s) at parity")
-                _write_recovery_progress(progress_path, identity, board="complete")
-            # Board progress never skips this: admission authority decides, and it must finish
-            # before the host step starts the PO service.
-            po_changed = restore_po(data_dir, instance=target, runtime_user=args.installation_user)
-            result.add(
-                "po-sql", "changed" if po_changed else "unchanged", restore_state(data_dir)["po_sql_diagnostic"]
+            _restore_board_and_po(
+                args, target, report, checkpoint_root, cards, progress, identity, product_root, result
             )
             host = report.host if isinstance(report.host, dict) else {}
             memory = memory_config(host)

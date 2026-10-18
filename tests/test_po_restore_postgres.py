@@ -13,6 +13,7 @@ from contextlib import ExitStack
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from tests.po_checkpoint_fixtures import po_records, seed_po
@@ -36,9 +37,12 @@ from ummanu.board.sql_cards import SqlCardClient
 from ummanu.board.sql_rows import rfc3339
 from ummanu.cli import main
 from ummanu.data import export_board, init_layout
+from ummanu.dispatch.po_delivery import deliver
+from ummanu.po.client import PoServiceClient
 from ummanu.po.recovery_admission import PoRecoveryAdmission, RecoveryAdmissionError
 from ummanu.po.restore_context import NOTICE, RestoreContextError, RestoredContexts
 from ummanu.po.runner import PoRunner
+from ummanu.po.service import PoService, listening
 from ummanu.po.store import COMPLETED, PoStore, RequestConflict, SessionClosed
 from ummanu.restore import RestoreError, restore_findings, restore_po, restore_state
 
@@ -451,7 +455,7 @@ class PoRecoveryWiringPostgresTests(unittest.TestCase):
                     mock.patch.object(owner, name, autospec=True, side_effect=fault),
                     self.assertRaisesRegex(RestoreError, f"PO SQL restore failed at {step}: injected"),
                 ):
-                    restore_po(data, instance=instance)
+                    restore_po(data, source=data / "board", instance=instance)
                 self.assertEqual(restore_state(data)["po_sql_restore"], phase)
                 self.assertIn(f"PO SQL restore is incomplete at {phase}", restore_findings(data))
                 self.assertEqual(PoRecoveryAdmission(data, po).status()["reason"], "recovery_hold")
@@ -465,13 +469,79 @@ class PoRecoveryWiringPostgresTests(unittest.TestCase):
                 self.assertEqual(self.calls, [])
                 plan = (data / ".po-restore" / "plan.json").read_bytes()
 
-                self.assertTrue(restore_po(data, instance=instance))
+                self.assertTrue(restore_po(data, source=data / "board", instance=instance))
                 self.assertEqual((data / ".po-restore" / "plan.json").read_bytes(), plan)
                 self.assertEqual(restore_state(data)["po_sql_restore"], "finished")
                 self.assertIsNone(PoRecoveryAdmission(data, po).status())
                 frozen = prepare_po_restore(records, data, interrupted_at=datetime.now(UTC))
                 require_po_parity(normalized_po_records(records, frozen), self.readback(client))
-                self.assertFalse(restore_po(data, instance=instance))
+                self.assertFalse(restore_po(data, source=data / "board", instance=instance))
+
+    def test_board_commit_before_the_po_import_holds_service_and_dispatcher_and_the_retry_finishes(self):
+        board = self.capture(po_records(), "seam-source")
+        instance, data, client, po = self.target(board, "seam-target")
+        runner = self.runner(po, data)
+        service = PoService(runner, models={"codex": ("chosen-model",)})
+        service.queue.put(session_id="open", text="queued before recovery", request_id="queued-early", source="web")
+        successors = []
+
+        def successor(closed):
+            successors.append(closed)
+            return "", "no successor here"
+
+        with listening(service):
+            runtime = SimpleNamespace(po=PoServiceClient(data))
+            with mock.patch("ummanu.board.po_restore.prepare_po_restore",
+                            side_effect=PoCheckpointError("injected seam failure")):
+                code, output = self.restore_board(instance)
+            self.assertEqual(code, 2, output)
+            self.assertIn("PO SQL restore failed at plan: injected seam failure", output)
+            state = restore_state(data)
+            self.assertEqual((state["board"], state["po_sql_restore"]), ("complete", "holding"))
+            # The restored board is published; every PO consumer still waits on the admission hold.
+            status, detail, received = deliver(runtime, session_id="open", text="card result",
+                                               request_id="delivery-1", card={"ref": "ummanu-1"},
+                                               successor=successor)
+            self.assertEqual((status, received), (None, ""))
+            self.assertIn("recovery_hold", detail)
+            service.pump()
+            self.assertEqual([item.request_id for item in service.queue.pending()], ["queued-early"])
+            self.assertIsNone(service.queue.find_refused("queued-early"))
+            self.assertEqual((successors, self.calls), ([], []))
+            self.assertEqual(self.readback(client), {table: [] for table in PO_COLUMNS})
+            self.assertIn("PO SQL restore is incomplete at holding", restore_findings(data))
+
+            code, output = self.restore_board(instance)
+            self.assertEqual(code, 0, output)
+            self.assertEqual(json.loads(output)["po_sql_restore"], "finished")
+            service.pump()
+            queued = po.request("queued-early")
+            self.assertIsNotNone(queued)
+            self.assertEqual(runner.wait("open", queued.seq, 2).state, COMPLETED)
+            self.assertEqual(service.queue.pending(), [])
+            self.assertEqual(len(self.calls), 1)
+            self.assertEqual(successors, [])
+
+    def test_unfinished_plan_with_another_source_digest_is_refused_by_field_through_restore_board(self):
+        board = self.capture(po_records(), "plan-source")
+        instance, data, client, po = self.target(board, "plan-target")
+        with mock.patch.object(PoRestoreStore, "restore", autospec=True,
+                               side_effect=PoCheckpointError("injected import failure")):
+            self.assertEqual(self.restore_board(instance)[0], 2)
+        path = data / ".po-restore" / "plan.json"
+        saved = json.loads(path.read_bytes())
+        other = "f" * 64 if saved["source_sha256"] != "f" * 64 else "e" * 64
+        payload = json.dumps({**saved, "source_sha256": other}).encode()
+        path.write_bytes(payload)
+        code, output = self.restore_board(instance)
+        self.assertEqual(code, 2, output)
+        self.assertIn("PO SQL restore failed at plan: PO restore plan field source_sha256 differs", output)
+        for value in (other, saved["source_sha256"]):
+            self.assertNotIn(value, output)
+        self.assertEqual(path.read_bytes(), payload)
+        self.assertEqual(PoRecoveryAdmission(data, po).status()["reason"], "recovery_hold")
+        self.assertEqual(restore_state(data)["po_sql_restore"], "holding")
+        self.assertEqual(self.readback(client), {table: [] for table in PO_COLUMNS})
 
     def test_busy_target_refuses_before_any_recovery_write_and_keeps_its_running_turn(self):
         board = self.capture(po_records(), "busy-source")
@@ -482,7 +552,7 @@ class PoRecoveryWiringPostgresTests(unittest.TestCase):
         live["po_feed"] = live["po_requests"] = []
         seed_po(client, live)
         with self.assertRaisesRegex(RestoreError, "failed at admission: .*turns are running"):
-            restore_po(data, instance=instance)
+            restore_po(data, source=data / "board", instance=instance)
         self.assertEqual(restore_state(data)["po_sql_restore"], "captured")
         self.assertEqual(self.readback(client), live)
         self.assertEqual(sorted(path.name for path in data.iterdir() if path.name.startswith(".po-")), [])
@@ -500,7 +570,7 @@ class PoRecoveryWiringPostgresTests(unittest.TestCase):
             mock.patch("os.setuid", side_effect=lambda _uid: root.stop()),
         ):
             for _ in range(2):
-                restore_po(data, instance=instance, runtime_user=getpass.getuser())
+                restore_po(data, source=data / "board", instance=instance, runtime_user=getpass.getuser())
         root.stop()
         self.assertEqual(restore_state(data)["po_sql_restore"], "finished")
         self.assertIsNone(PoRecoveryAdmission(data, po).status())
