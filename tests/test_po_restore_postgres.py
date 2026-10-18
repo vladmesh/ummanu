@@ -564,7 +564,6 @@ class PoRecoveryWiringPostgresTests(unittest.TestCase):
                                            ("empty", b"RIFF\x00\x00\x00\x00WEBPimage"))]
         export_board(source_data, instance_dir=self.root / "images-source")
         instance, data, client, po = self.target(board, "images-target")
-        (data / "po").chmod(0o700)
         with mock.patch.object(RestoredContexts, "prepare", side_effect=RestoreContextError("context failure")):
             code, output = self.restore_board(instance)
         self.assertEqual(code, 2, output)

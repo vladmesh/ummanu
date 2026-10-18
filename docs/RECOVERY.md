@@ -1242,9 +1242,10 @@ The ordinary attachment reader returns the exact captured bytes there. Source pa
 messages are never opened; historical absolute paths still name the source host and are not remapped.
 
 Publication runs as the runtime user under the recovery target lock. Each target component is opened
-relative to its parent descriptor without following links. Native directories must be owned by that
-user with mode `0700`, images with mode `0600`; the canonical data directory must be owned and deny
-group/other writes. Unsafe types, owners, permissions, links or differing bytes refuse without
+relative to its parent descriptor without following links. All directory ancestors must be owned by
+that user and deny group/other writes, including existing native directories with mode `0755`.
+Restore creates missing native directories with mode `0700`; staged and final images require mode
+`0600`. Unsafe types, owners, permissions, links or differing bytes refuse without
 overwriting or changing target ownership or modes. A synced staged file is linked without overwrite,
 read back, and the file and every ancestor directory are synced, including on an identical-file retry.
 An interrupted publication may leave a correct immutable prefix; retry checks it and completes the

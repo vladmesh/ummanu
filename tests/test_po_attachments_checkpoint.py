@@ -33,7 +33,8 @@ from ummanu.data import export_board, init_layout
 from ummanu.installation import support as installation_support
 from ummanu.installation.materialize import materialize_checkpoint
 from ummanu.installation.models import InstallError
-from ummanu.po import attachments, recovery_admission
+from ummanu.memory.client_config import bridge_executable
+from ummanu.po import attachments, recovery_admission, workspace as po_workspace
 from ummanu.po.attachments import (
     MAX_ATTACHMENT_BYTES,
     AttachmentCaptureError,
@@ -594,12 +595,61 @@ class PublicationTests(_Case):
         self.assertEqual(target.stat().st_ino, before.st_ino)
         self.assertEqual(target.stat().st_mode, before.st_mode)
 
+    def test_installed_workspace_and_upload_directories_preserve_metadata_through_restore(self):
+        product = self.root / "product"
+        instructions = po_workspace.agents_source(product)
+        instructions.parent.mkdir(parents=True)
+        instructions.write_text("Fixture PO instructions\n")
+        bridge = bridge_executable(product)
+        bridge.parent.mkdir(parents=True)
+        bridge.write_text("#!/bin/sh\n")
+        target = self.root / "target"
+        init_layout(target)
+        previous_umask = os.umask(0o022)
+        try:
+            captured = {(session, store_image(self.data, session, image).name): image
+                        for session, image in (("open", PNG), ("open", JPEG), ("closed", WEBP))}
+            source = self.board(inventory_attachments(self.data, SESSIONS))
+            po_workspace.materialize(product, target)
+            existing = store_image(target, "open", PNG)
+            later = store_image(target, "open", PNG + b"later upload")
+            ancestors = list(existing.parents)[:4]
+            for path in ancestors:
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755)
+            preserved = (existing, later, *ancestors)
+            before = {path: (path.stat().st_ino, path.stat().st_uid, path.stat().st_gid, path.stat().st_mode)
+                      for path in preserved}
+            self.assertEqual(list(attachments_dir(target, "open").glob("*.jpg")), [])
+            fake = FakeBoard()
+            with (
+                mock.patch("ummanu.board.store.resolve_role", return_value=object()),
+                mock.patch("ummanu.po.store.PoStore", side_effect=lambda _: _ClosingStore(fake)),
+                mock.patch("ummanu.board.po_restore.prepare_po_restore", side_effect=PoCheckpointError("stopped")),
+            ):
+                for _ in range(2):
+                    with self.assertRaisesRegex(RestoreError, "failed at plan: stopped"):
+                        restore_po(target, source=source, instance=self.root)
+                    self.assertEqual(restore_state(target)["po_attachments_parity"], "complete")
+                    for (session, name), image in captured.items():
+                        path = attachment_path(target, session, name)
+                        self.assertEqual(path.read_bytes(), image)
+                        self.assertEqual((path.stat().st_uid, stat.S_IMODE(path.stat().st_mode)),
+                                         (os.geteuid(), 0o600))
+                    for path, identity in before.items():
+                        info = path.stat()
+                        self.assertEqual((info.st_ino, info.st_uid, info.st_gid, info.st_mode), identity)
+                    for path in (attachments_dir(target, "closed"), attachments_dir(target, "closed").parent):
+                        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
+                    self.assertEqual(later.read_bytes(), PNG + b"later upload")
+        finally:
+            os.umask(previous_umask)
+
     def test_symlinks_nonregular_entries_and_unsafe_permissions_refuse_without_changes(self):
         item, image = self.image()
         outside = self.root / "outside"
         outside.write_bytes(b"private")
         for part in ("po", "sessions", "open", "attachments", item.name):
-            for kind in ("symlink", "fifo", "permissions", "owner"):
+            for kind in ("symlink", "fifo", "permissions", "group-write", "other-write", "owner"):
                 with self.subTest(part=part, kind=kind):
                     if (self.data / "po").exists():
                         shutil.rmtree(self.data / "po")
@@ -620,6 +670,9 @@ class PublicationTests(_Case):
                             os.mkfifo(path)
                     elif kind == "permissions":
                         path.chmod(0o777 if path.is_dir() else 0o644)
+                    elif kind in ("group-write", "other-write"):
+                        mode = 0o700 if path.is_dir() else 0o600
+                        path.chmod(mode | (0o020 if kind == "group-write" else 0o002))
                     before = path.lstat()
                     real_stat = os.fstat
 

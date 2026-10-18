@@ -184,7 +184,7 @@ def publish_image(data_dir: Path, item: StoredAttachment, data: bytes) -> None:
         with recovery_target_lock(data_dir), ExitStack() as stack:
             root = os.open(data_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
             stack.callback(os.close, root)
-            _publication_identity(root, directory=True, private=False)
+            _publication_identity(root, directory=True)
             directories = [root]
             for name in (*_SESSIONS, item.session_id, "attachments"):
                 parent = directories[-1]
@@ -210,10 +210,9 @@ def publish_image(data_dir: Path, item: StoredAttachment, data: bytes) -> None:
         raise AttachmentPublicationError(f"{shown}: {exc.strerror or type(exc).__name__}") from None
 
 
-def _publication_identity(handle: int, *, directory: bool, private: bool = True) -> None:
+def _publication_identity(handle: int, *, directory: bool) -> None:
     info = os.fstat(handle)
-    mode = 0o700 if directory else 0o600
-    unsafe_mode = stat.S_IMODE(info.st_mode) != mode if private else bool(info.st_mode & 0o022)
+    unsafe_mode = bool(info.st_mode & 0o022) if directory else stat.S_IMODE(info.st_mode) != 0o600
     if info.st_uid != os.geteuid() or unsafe_mode:
         raise AttachmentPublicationError("target owner or permissions are unsafe")
 
