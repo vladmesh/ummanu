@@ -230,7 +230,8 @@ split, so a checkpoint's Git cost follows what changed instead of the size of th
   that does not extend the committed one (the first split checkpoint after a flat one, or rewritten
   history) is replaced from its first segment. Segments are cut at line ends and hold at most 32 MiB
   unless one line is longer, so no blob reaches the 100 MB file limit of the GitHub remote.
-- `export.json`, `origin_returns.ndjson`, `owner_events.ndjson` and `po_sql.json` stay single files.
+- `export.json`, `origin_returns.ndjson`, `owner_events.ndjson`, `po_sql.json` and `po_notes.json`
+  stay single files.
   These payloads contain mutable state and are read through the same flat/split reader.
 - A logical file's bytes are the concatenation of its parts in index order; a gap in the sequence or
   an unexpected entry is a broken checkpoint, not a shorter one.
@@ -1061,8 +1062,7 @@ reconstructing unknown history. `restore_findings` and `doctor` treat incomplete
 an invariant failure, but do not treat absent legacy coverage as a failure. Inspect the recovery
 result or restore state for bell coverage; a successful doctor result does not prove complete bell
 history or sprint readiness. Bell fact coverage does not restore pending handover dispatch or
-delivery effects, sprint decisions, PO attachments or NOTES transport, or the remaining durability
-classes.
+delivery effects, sprint decisions, PO attachments, or the remaining durability classes.
 
 ### PO SQL capture
 
@@ -1093,17 +1093,62 @@ existing secret scan before commit/push; diagnostics name only table, record ord
 Materialization writes inert files into `<data>/board`. The board importer validates the capture
 before its first write and leaves all four live PO tables untouched; the PO SQL restore imports them.
 
+### PO notes
+
+`<data>/po/NOTES.md` is the PO's own file: install and upgrade create its seed once and never
+rewrite it, and the PO keeps decisions there that the SQL feed may not hold. The board export reads
+it beside the PO SQL capture, from the configured data directory, as one regular file opened beneath
+the data directory without following a symlink at `po/` or at the file. `export.json` declares
+`po_notes` version `1` with `state`:
+
+- `present`, with `bytes` and `sha256` of the exact file bytes, including an empty file. The bytes
+  travel in `po_notes.json` as `{"version": 1, "text": ...}`, JSON-escaped UTF-8 text, so newlines,
+  a byte order mark or NUL are kept and nothing is normalized.
+- `absent`, with no `po_notes.json`: neither `po/` nor the file existed.
+
+A checkpoint without the declaration and without the payload predates the capability (legacy
+unavailable); a payload without the declaration is refused. A symlink, a non-regular file, an
+unreadable file, content that is not UTF-8 or a file whose size, times or identity changed while it
+was read refuses the export, and the previous local export and committed checkpoint stay as they
+were. There is no lock against concurrent PO writes and no promise of an atomic snapshot of other
+filesystem state. Staging, snapshot verification and materialization check the declaration against
+the decoded bytes; a declared missing, changed or malformed payload is fatal. The secret scan reads
+the decoded notes as well as the escaped file before commit/push; a hit blocks the window with
+`secret detected in PO notes` and names no content.
+
+Restore publishes the selected capture after the board import and before PO admission finishes
+([PO SQL restore](#po-sql-restore), step 4), so the install step's workspace materialize later
+finds the file and writes no seed over it. Publication creates `po/` (mode 0700) when it is missing
+and links a synced mode-0600 staged file to `po/NOTES.md`, as the runtime user when root recovers for
+another account. It never replaces or removes a file there:
+
+- a target holding exactly the captured bytes is parity, so a retry, or a retry after an
+  interruption before or after the link, finishes with the same bytes;
+- any other target file, the installation's seed included, is `PO notes target conflict` and keeps
+  its bytes; a symlink at `po/` or at the file is refused. Notes the PO edited after an earlier
+  recovery are its work: a later retry refuses the same conflict rather than replace them.
+- a captured absence leaves whatever the target holds and claims nothing about it.
+
+`restore-state.json` and `restore-board` expose `po_notes_coverage` (`captured`, `absent` or
+`unavailable`), `po_notes_parity` (`complete` or `failed` for a captured file, otherwise
+`unavailable`) and `po_notes_diagnostic`; recovery reports the diagnostic as `po-notes`. Doctor and
+the final status gate name a captured file without parity, never legacy unavailability or a captured
+absence. The notes phase is a filesystem step with its own retry: it is not part of any SQL
+transaction and is not rolled back with one.
+
 ### PO SQL restore
 
 `recover` and `restore-board` share `restore.restore_po(data_dir, source=..., instance=...,
 runtime_user=..., board=...)`, before any host activation. `source` is the board directory of the
 selected source: `recover` reads the checkpoint it selected (`state/board` of the extracted snapshot
 or checkout), never `<data>/board`, which the running installation's export rewrites; `restore-board`
-reads the materialized `<data>/board` it imports. `board` is the caller's board import. Steps 1 to 3
-and 5 to 8 each hold `board/.restore.lock`; the board import between them takes that lock itself.
+reads the materialized `<data>/board` it imports. `board` is the caller's board import. Steps 1 to 3,
+the notes publication of step 4 and steps 5 to 8 each hold `board/.restore.lock`; the board import
+takes that lock itself.
 
 1. **Capture.** `export.json` must be present in the source (its absence is named before any outbox
-   or PO reader runs); `read_checkpoint_po` validates the declared capture. Legacy absence runs the
+   or PO reader runs); `read_checkpoint_po` and `read_checkpoint_notes` validate the declared
+   captures. Legacy absence runs the
    board import and records `unavailable`, without credentials, admission or SQL; it is never empty
    history.
 2. **Target.** The data directory must be canonical, owned by the effective user and deny
@@ -1113,9 +1158,11 @@ and 5 to 8 each hold `board/.restore.lock`; the board import between them takes 
    metadata are neither reimported nor reported as source corruption. Running turns refuse with
    retryable `recovery_busy` and nothing is killed. A refusal here stops before the board import, so
    no restored obligation is published without the hold.
-4. **Board.** The caller's board and outbox import runs only after the hold is durable. A dispatcher
-   delivery or queued owner input meanwhile stays pending and retryable (`recovery_hold`); no
-   successor session is opened, nothing is refused permanently and nothing launches.
+4. **Board and notes.** The caller's board and outbox import runs only after the hold is durable. A
+   dispatcher delivery or queued owner input meanwhile stays pending and retryable (`recovery_hold`);
+   no successor session is opened, nothing is refused permanently and nothing launches. Then, under
+   `board/.restore.lock`, the captured notes are published ([PO notes](#po-notes)); a refusal stops
+   here with the admission held.
 5. **Plan.** `prepare_po_restore` publishes or reloads the frozen plan; a retry keeps its time and
    UUIDs.
 6. **Import.** `PoRestoreStore.restore` runs in its own app-role SQL transaction with full readback
@@ -1126,8 +1173,8 @@ and 5 to 8 each hold `board/.restore.lock`; the board import between them takes 
 8. **Finish.** `finish(..., import_committed=True, parity_verified=True)` follows only the commit
    and readback of step 6 in the same call, never a progress flag.
 
-When the process is root and `--installation-user` names another account, steps 2 and 3, and again
-steps 5 to 8, run in a child that drops to that account (`_proc.run_as_user`), so admission, plan
+When the process is root and `--installation-user` names another account, steps 2 and 3, the notes
+publication and steps 5 to 8 run in a child that drops to that account (`_proc.run_as_user`), so admission, plan
 and contexts belong to the runtime user under the same strict checks; root reads the capture,
 resolves the store credential, holds the lock and runs the board import. The final ownership
 barrier is unchanged.
@@ -1310,8 +1357,8 @@ their existing resume, recovery and fallback behavior. Automatic provider switch
 explicitly restored sessions so it cannot discard the recorded native binding.
 
 Reconciliation of uncertain external effects is not automated. Pending/refused inputs in
-`<data>/po-queue/`, images under `<data>/po/sessions/<id>/attachments/` and PO workspace notes are
-not transported. SQL parity and prepared contexts do not establish full PO recovery readiness.
+`<data>/po-queue/` and images under `<data>/po/sessions/<id>/attachments/` are not transported. SQL
+parity, prepared contexts and restored notes do not establish full PO recovery readiness.
 
 Released v1/v2 checkpoints lacking both declaration and file remain supported and report
 `checkpoint has no PO SQL coverage; sessions, turns, feed and request bindings are unavailable`.

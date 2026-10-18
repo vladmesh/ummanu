@@ -147,6 +147,9 @@ def run_restore_board(args: argparse.Namespace) -> int:
         "po_sql_coverage": state["po_sql_coverage"],
         "po_sql_restore": state["po_sql_restore"],
         "po_sql_diagnostic": state["po_sql_diagnostic"],
+        "po_notes_coverage": state["po_notes_coverage"],
+        "po_notes_parity": state["po_notes_parity"],
+        "po_notes_diagnostic": state["po_notes_diagnostic"],
     }
 
 

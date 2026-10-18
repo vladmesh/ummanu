@@ -24,6 +24,7 @@ from ummanu.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutErro
 from ummanu.board.close_checkpoint import CloseCheckpointError, read_checkpoint_close_facts
 from ummanu.board.owner_checkpoint import OWNER_FILE, OwnerCheckpointError, read_checkpoint_owner_events
 from ummanu.board.po_checkpoint import PO_FILE, PoCheckpointError, read_checkpoint_po
+from ummanu.board.po_notes_checkpoint import NOTES_CHECKPOINT_FILE, PoNotesError, read_checkpoint_notes
 from ummanu.config import ConfigError, load_config, validate_instance
 from ummanu.data import init_layout
 from ummanu.dispatch.runtime_provenance import ProductionRuntime
@@ -54,6 +55,7 @@ CHECKPOINT_BOARD = (
     "origin_returns.ndjson",
     PO_FILE,
     OWNER_FILE,
+    NOTES_CHECKPOINT_FILE,
 )
 
 
@@ -155,7 +157,8 @@ def materialize_checkpoint(
         read_checkpoint_owner_events(board_source)
         read_checkpoint_close_facts(board_source)
         read_checkpoint_po(board_source)
-    except (OriginCheckpointError, OwnerCheckpointError, PoCheckpointError, CloseCheckpointError) as exc:
+        read_checkpoint_notes(board_source)
+    except (OriginCheckpointError, OwnerCheckpointError, PoCheckpointError, CloseCheckpointError, PoNotesError) as exc:
         raise InstallError(str(exc)) from None
     for name in CHECKPOINT_RUNS:
         if not (runs_source / name).is_file():

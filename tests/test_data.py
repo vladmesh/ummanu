@@ -24,6 +24,7 @@ from ummanu.board.origin_outbox import OriginOutboxStore
 from ummanu.board.owner_checkpoint import read_checkpoint_owner_events, require_owner_parity
 from ummanu.board.owner_events import OwnerEventStore
 from ummanu.board.po_checkpoint import PO_FILE, read_checkpoint_po
+from ummanu.board.po_notes_checkpoint import NOTES_CHECKPOINT_FILE, NotesCapture, read_checkpoint_notes
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.data import (
@@ -51,6 +52,7 @@ from ummanu.memory_write import (
     propose_memory_fact,
     supersede_memory_fact,
 )
+from ummanu.po.workspace import NOTES_FILE, workspace_dir
 from ummanu.sprint_observer import none_choice
 from ummanu.sprints import SPRINT_BOARD_NAME, SprintWriter
 from ummanu.tasks import TaskError, TaskReader, TaskWriter
@@ -214,6 +216,33 @@ class ExportTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "po_requests record 1: fingerprint") as failure:
                 export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
             self.assertNotIn("sensitive-invalid-binding", str(failure.exception))
+            after = {path.name: path.read_bytes() for path in (root / "board").iterdir() if path.is_file()}
+            self.assertEqual(before, after)
+
+    def test_board_cut_captures_po_notes_bytes_or_absence_and_an_unsafe_source_keeps_the_previous_cut(self):
+        seed_po(self.store, po_records())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            reader = TaskExportReader(client=self.store)
+            notes = workspace_dir(root) / NOTES_FILE
+            notes.parent.mkdir()
+            for content in (None, b"", b"# Decisions\r\nkeep \xd1\x8f\rno newline", None):
+                notes.unlink(missing_ok=True)
+                if content is not None:
+                    notes.write_bytes(content)
+                export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
+                self.assertEqual(read_checkpoint_notes(root / "board"), NotesCapture(content))
+                self.assertEqual((root / "board" / NOTES_CHECKPOINT_FILE).exists(), content is not None)
+            notes.write_bytes(b"current notes")
+            export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
+            before = {path.name: path.read_bytes() for path in (root / "board").iterdir() if path.is_file()}
+            outside = root / "outside.md"
+            outside.write_bytes(b"private outside notes")
+            notes.unlink()
+            notes.symlink_to(outside)
+            with self.assertRaisesRegex(RuntimeError, "PO notes refuse po/NOTES.md") as failure:
+                export_board(root, instance_dir=root, reader=reader, sprint_client=self.store)
+            self.assertNotIn("private", str(failure.exception))
             after = {path.name: path.read_bytes() for path in (root / "board").iterdir() if path.is_file()}
             self.assertEqual(before, after)
 

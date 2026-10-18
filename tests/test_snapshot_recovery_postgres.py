@@ -22,6 +22,7 @@ which the import wrote only after every comment, and no seed here held one.
 from __future__ import annotations
 
 import getpass
+import hashlib
 import io
 import json
 import os
@@ -41,7 +42,7 @@ from unittest import mock
 from tests.fakes.installation import PRODUCT_ROOT
 from tests.fakes.snapshot_remote import HEAD, exporter_remote, git
 from tests.owner_checkpoint_fixtures import bell_rows
-from tests.po_checkpoint_fixtures import po_records, seed_po
+from tests.po_checkpoint_fixtures import po_records, seed_po, write_notes
 from tests.sql_backend_fixtures import PostgresBoard, insert_card_row
 from tests.support.snapshot_recovery import recover_patches
 from ummanu import bootstrap as bootstrap_module
@@ -60,6 +61,13 @@ from ummanu.board.owner_checkpoint import (
 )
 from ummanu.board.owner_events import OwnerEventStore, ReadRefused
 from ummanu.board.po_checkpoint import RESTORED_PO_COVERAGE, export_po_records, read_checkpoint_po
+from ummanu.board.po_notes_checkpoint import (
+    LEGACY_NOTES_COVERAGE,
+    NOTES_CHECKPOINT_FILE,
+    RESTORED_NOTES_COVERAGE,
+    NotesCapture,
+    read_checkpoint_notes,
+)
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.board.store import BoardStoreConfig
@@ -76,11 +84,13 @@ from ummanu.data import export_board, init_layout
 from ummanu.head_registry import installed_heads, installed_pair
 from ummanu.installation import commands as installation_commands
 from ummanu.installation.materialize import materialize_checkpoint
+from ummanu.memory import client_config
 from ummanu.memory_journal import export_memory_snapshot, verify_memory_journal
+from ummanu.po import workspace as po_workspace
 from ummanu.po.recovery_admission import PoRecoveryAdmission
 from ummanu.po.runner import PoRunner
 from ummanu.po.store import COMPLETED, INTERRUPTED, PoStore
-from ummanu.po.workspace import workspace_dir
+from ummanu.po.workspace import NOTES_FILE, workspace_dir
 from ummanu.product_issues import ProductIssueStore
 from ummanu.restore import import_normalized_board, restore_state
 from ummanu.secret_recover import SecretRecovery
@@ -100,6 +110,8 @@ RETIRED_METADATA = {
 }
 CARDS = ("ummanu-1", "ummanu-2", RETIRED_CARD)
 SPRINTS = ("sprint:snapshot", "sprint:snapshot-open")
+#: The PO's own notes on the source host: a decision the SQL feed does not hold, in CRLF and UTF-8.
+SOURCE_NOTES = "# PO notes\r\nThe owner settled on option B in a call; no PO turn records it. Решено.\n".encode()
 
 
 def _write_store_file(instance: Path, config: BoardStoreConfig) -> None:
@@ -300,6 +312,8 @@ class _SnapshotRecoveryCase(unittest.TestCase):
         po_client = SqlCardClient(self.source_config.for_role("app"), source)
         self.addCleanup(po_client.close)
         seed_po(po_client, po_records())
+        workspace_dir(data_dir).mkdir()
+        (workspace_dir(data_dir) / NOTES_FILE).write_bytes(SOURCE_NOTES)
         self.source_kinds = self._kinds(source, data_dir, self.source_config)
 
     def _kinds(self, instance: Path, data_dir: Path, config: BoardStoreConfig) -> dict[str, object]:
@@ -426,6 +440,17 @@ class _SnapshotRecoveryCase(unittest.TestCase):
         with client.transaction():
             return export_po_records(client)
 
+    def _materialize_po_workspace(self, data_dir: Path) -> tuple[str, ...]:
+        """The install step's workspace materialize over the recovered data dir, from a minimal product."""
+        product = self.root / "po-product"
+        bridge = client_config.bridge_executable(product)
+        bridge.parent.mkdir(parents=True, exist_ok=True)
+        bridge.write_text("#!/bin/sh\n", encoding="utf-8")
+        source = po_workspace.agents_source(product)
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(po_workspace.agents_source(PRODUCT_ROOT).read_bytes())
+        return po_workspace.materialize(product, data_dir).changed
+
 
 class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
     def test_legacy_recovery_and_retry_keep_coverage_descriptive_through_the_status_gate(self):
@@ -434,6 +459,8 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         summary = json.loads(summary_path.read_text())
         summary.pop("owner_events")
         summary.pop("sprint_close")
+        summary.pop("po_notes")
+        (board / NOTES_CHECKPOINT_FILE).unlink()
         for name in ("sprints.json", "sprints.ndjson"):
             path = board / name
             if name.endswith(".ndjson"):
@@ -449,6 +476,7 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         summary_path.write_text(json.dumps(summary))
         (board / OWNER_FILE).unlink()
         self.assertIsNone(read_checkpoint_owner_events(board))
+        self.assertIsNone(read_checkpoint_notes(board))
         canon = self.fixture.source / "heads" / "heads.toml"
         canon.write_text(
             canon.read_text().replace("fallback = []", 'fallback = ["legacy-fallback"]')
@@ -480,6 +508,13 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
                 self.assertEqual(state["owner_events_coverage"], "unavailable")
                 self.assertEqual(state["owner_events_parity"], "unavailable")
                 self.assertEqual(state["owner_events_diagnostic"], LEGACY_OWNER_COVERAGE)
+                self.assertEqual(
+                    (state["po_notes_coverage"], state["po_notes_parity"], state["po_notes_diagnostic"]),
+                    ("unavailable", "unavailable", LEGACY_NOTES_COVERAGE),
+                )
+                notes_step = next(step for step in machine["steps"] if step["name"] == "po-notes")
+                self.assertEqual((notes_step["status"], notes_step["detail"]), ("unchanged", LEGACY_NOTES_COVERAGE))
+                self.assertFalse((workspace_dir(data_dir) / NOTES_FILE).exists())
                 self.assertEqual(state["sprint_close_coverage"], "unavailable")
                 self.assertEqual(state["sprint_close_parity"], "unavailable")
                 self.assertEqual(state["sprint_close_diagnostic"], LEGACY_CLOSE_COVERAGE)
@@ -717,6 +752,16 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertEqual(len(po.feed("open")), len(po_records()["po_feed"]))
         self.assertIsNotNone(po.request("send"))
         self.assertIsNone(PoRecoveryAdmission(data_dir.resolve(), po).status())
+        # The PO's notes are back at the ordinary workspace path with their exact bytes, private and
+        # the runtime user's, and the install step's workspace materialize leaves them.
+        self.assertEqual(read_checkpoint_notes(data_dir / "board"), NotesCapture(SOURCE_NOTES))
+        notes = workspace_dir(data_dir.resolve()) / NOTES_FILE
+        self.assertEqual(steps["po-notes"], ("unchanged", RESTORED_NOTES_COVERAGE))
+        self.assertEqual((state["po_notes_coverage"], state["po_notes_parity"]), ("captured", "complete"))
+        self.assertEqual(notes.read_bytes(), SOURCE_NOTES)
+        self.assertEqual((notes.stat().st_mode & 0o777, notes.stat().st_uid), (0o600, os.getuid()))
+        self.assertNotIn(NOTES_FILE, self._materialize_po_workspace(data_dir.resolve()))
+        self.assertEqual(notes.read_bytes(), SOURCE_NOTES)
         # The closed card on the retired id is back as the tree exported it: placement and project.
         exported = next(
             card
@@ -792,11 +837,13 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertEqual(result.status, "ok", f"{result.render()}\nrefused store batches: {refused}")
         data_dir = self.fixture.data_dir.resolve()
         po, client = self._target_po()
-        (data_dir / "po").mkdir(exist_ok=True)
+        notes = workspace_dir(data_dir) / NOTES_FILE
         launches = []
+        seen_notes = []
 
         def launch(session, seq, argv, files, environment, spec):
             launches.append(seq)
+            seen_notes.append((Path(session.cwd) / NOTES_FILE).read_bytes())
             files.stdout.write_text(json.dumps({"type": "thread.started", "thread_id": "new-thread"}) + "\n")
             files.stderr.write_text("")
             files.last_message.write_text("fresh answer")
@@ -808,9 +855,13 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertTrue(created)
         self.assertEqual(runner.wait("open", turn.seq, 2).state, COMPLETED)
         self.assertEqual(po.session("open").cli_session_id, "new-thread")
-        # The installation's ordinary export rewrites `<data>/board` with the new history.
+        self.assertEqual(seen_notes, [SOURCE_NOTES])
+        # The installation's ordinary export rewrites `<data>/board` with the new history; a capture
+        # there holding other notes is not what the retry restores.
         export_board(data_dir, instance_dir=self.fixture.target)
         self.assertNotEqual(read_checkpoint_po(data_dir / "board"), po_records())
+        self.assertEqual(read_checkpoint_notes(data_dir / "board"), NotesCapture(SOURCE_NOTES))
+        write_notes(data_dir / "board", b"notes of a later live export")
         live = self._readback(client)
         plan = (data_dir / ".po-restore" / "plan.json").read_bytes()
 
@@ -825,6 +876,18 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         replay, created = runner.send_request("open", "input after recovery", "after-recovery")
         self.assertEqual((replay.seq, created), (turn.seq, False))
         self.assertEqual(launches, [turn.seq])
+        self.assertEqual(steps["po-notes"], ("unchanged", RESTORED_NOTES_COVERAGE))
+        self.assertEqual(notes.read_bytes(), SOURCE_NOTES)
+        # Notes the PO changed after recovery are its work: a retry refuses the conflict, keeps them
+        # and names no content.
+        edited = SOURCE_NOTES + b"Decided after recovery: keep the drill weekly.\n"
+        notes.write_bytes(edited)
+        conflicted, refused = self._recover()
+        self.assertEqual(conflicted.status, "failed", f"{conflicted.render()}\nrefused store batches: {refused}")
+        self.assertIn("PO notes target conflict", conflicted.render())
+        self.assertNotIn("Decided after recovery", conflicted.render())
+        self.assertEqual(notes.read_bytes(), edited)
+        self.assertEqual(restore_state(data_dir)["po_notes_parity"], "failed")
 
     def test_locked_runtime_secrets_restore_board_and_po_sql_but_skip_activation(self) -> None:
         self.assertEqual(self._bootstrap()[0], 0)
@@ -932,6 +995,13 @@ class RootHandoffSnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertEqual(retried["before_final_barrier"]["artifacts"][".po-restore/contexts.json"],
                          {"uid": uid, "mode": 0o600})
         self.assertEqual(retried["after"]["plan_sha256"], failed["after"]["plan_sha256"])
+        # The notes are published before the PO SQL phase, by the runtime user, on both runs.
+        for run in (failed, retried):
+            facts = run["before_final_barrier"]
+            self.assertEqual(facts["artifacts"]["po"], {"uid": uid, "mode": 0o700})
+            self.assertEqual(facts["artifacts"]["po/NOTES.md"], {"uid": uid, "mode": 0o600})
+            self.assertEqual(facts["notes_sha256"], hashlib.sha256(SOURCE_NOTES).hexdigest())
+        self.assertIn(["po-notes", "unchanged", RESTORED_NOTES_COVERAGE], retried["steps"])
         _, client = self._target_po()
         self.assertEqual(len(self._readback(client)["po_sessions"]), len(po_records()["po_sessions"]))
 

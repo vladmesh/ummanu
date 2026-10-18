@@ -69,6 +69,15 @@ from ummanu.board.po_checkpoint import (
     PoCheckpointError,
     read_checkpoint_po,
 )
+from ummanu.board.po_notes_checkpoint import (
+    ABSENT_NOTES_COVERAGE,
+    LEGACY_NOTES_COVERAGE,
+    RESTORED_NOTES_COVERAGE,
+    NotesCapture,
+    PoNotesError,
+    publish_notes,
+    read_checkpoint_notes,
+)
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.task_routing import TaskMetadata
 from ummanu.config import DataDirError, instance_data_dir, validate_instance
@@ -293,13 +302,22 @@ def _checkpoint_po(board: Path) -> dict[str, list[dict[str, Any]]] | None:
         raise RestoreError(str(exc)) from None
 
 
+def _checkpoint_notes(board: Path) -> NotesCapture | None:
+    """The validated PO notes capture of a board directory, None only for legacy absence."""
+    try:
+        return read_checkpoint_notes(board)
+    except PoNotesError as exc:
+        raise RestoreError(str(exc)) from None
+
+
 def restore_po(data_dir: Path, *, source: Path, instance: Path, runtime_user: str | None = None,
                board: Callable[[], None] | None = None) -> bool:
-    """Hold PO admission, run `board`, then import the captured PO SQL; True when this call advanced it.
+    """Hold PO admission, run `board`, publish the notes, then import the captured PO SQL.
 
-    `source` is the selected checkpoint's board directory, never a live export rewritten later. The
-    hold is durable before `board` publishes restored obligations. Root runs the PO protocol as
-    `runtime_user`; restore state records the last phase reached and a refusal raises after it.
+    True when this call advanced the PO SQL phases. `source` is the selected checkpoint's board
+    directory, never a live export rewritten later. The hold is durable before `board` publishes
+    restored obligations. Root runs the PO protocol as `runtime_user`; restore state records the
+    last phase reached and a refusal raises after it.
     """
     from ummanu.board.store import BoardStoreError, resolve_role
 
@@ -307,6 +325,7 @@ def restore_po(data_dir: Path, *, source: Path, instance: Path, runtime_user: st
     lock = data_dir / "board" / ".restore.lock"
     with file_lock(lock):
         records = _checkpoint_po(source)
+        notes = _checkpoint_notes(source)
         if records is not None:
             try:
                 credentials = resolve_role(instance, "app")
@@ -317,6 +336,8 @@ def restore_po(data_dir: Path, *, source: Path, instance: Path, runtime_user: st
                               lambda: _restore_po_sql(data_dir, instance, credentials, records, begin_only=True))
     if board is not None:
         board()
+    with file_lock(lock):
+        _restore_notes(data_dir, notes, runtime_user)
     if records is None:
         _update_restore_state(data_dir, po_sql_coverage="unavailable", po_sql_restore="unavailable",
                               po_sql_diagnostic=LEGACY_PO_COVERAGE)
@@ -325,6 +346,34 @@ def restore_po(data_dir: Path, *, source: Path, instance: Path, runtime_user: st
         restored = _po_phase(data_dir, runtime_user,
                              lambda: _restore_po_sql(data_dir, instance, credentials, records))
     return begun["changed"] or restored["changed"]
+
+
+def _restore_notes(data_dir: Path, notes: NotesCapture | None, runtime_user: str | None) -> None:
+    """Publish a captured notes file into the PO workspace as `runtime_user`, or describe its absence.
+
+    A filesystem phase: a retry compares the target with the capture again, and a refusal leaves
+    the target as it was and admission held.
+    """
+    if notes is None:
+        _update_restore_state(data_dir, po_notes_coverage="unavailable", po_notes_parity="unavailable",
+                              po_notes_diagnostic=LEGACY_NOTES_COVERAGE)
+        return
+    content = notes.content
+    if content is None:
+        _update_restore_state(data_dir, po_notes_coverage="absent", po_notes_parity="unavailable",
+                              po_notes_diagnostic=ABSENT_NOTES_COVERAGE)
+        return
+    error = None
+    try:
+        _proc.run_as_user(runtime_user, lambda: publish_notes(data_dir, content))
+    except PoNotesError as exc:
+        error = f"PO notes restore failed: {exc}"
+    except _proc.RuntimeUserError as exc:
+        error = f"PO notes restore failed in the runtime-user child: {exc}"
+    _update_restore_state(data_dir, po_notes_coverage="captured", po_notes_parity="failed" if error else "complete",
+                          po_notes_diagnostic=error or RESTORED_NOTES_COVERAGE)
+    if error:
+        raise RestoreError(error)
 
 
 def _po_phase(data_dir: Path, runtime_user: str | None, step: Callable[[], dict[str, Any]]) -> dict[str, Any]:
@@ -1042,6 +1091,8 @@ def restore_findings(data_dir: Path) -> list[str]:
         findings.append(f"PO SQL restore is incomplete at {state.get('po_sql_restore')}")
     if state.get("owner_events_coverage") == "restored" and state.get("owner_events_parity") != "complete":
         findings.append("owner events restore parity is incomplete")
+    if state.get("po_notes_coverage") == "captured" and state.get("po_notes_parity") != "complete":
+        findings.append("PO notes restore parity is incomplete")
     if state.get("memory_index") != "complete":
         findings.append("memory index has not been rebuilt")
     if state.get("reconcile") != "complete":
