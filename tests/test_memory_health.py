@@ -329,16 +329,14 @@ class MemoryHealthDaemonIntegrationTests(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                "\n".join(
-                    (
-                        "import types",
-                        "from mcp.server.auth.provider import AccessToken",
-                        "from ummanu import memory_service",
-                        "async def verify_token(token):",
-                        "    return AccessToken(token=token, client_id='fixture', subject='fixture', scopes=[], claims={'memory_grant_id': '0' * 32})",
-                        "memory_service.mcp._token_verifier = types.SimpleNamespace(verify_token=verify_token)",
-                        "memory_service.mcp.run(transport='streamable-http')",
-                    )
+                (
+                    "import types\n"
+                    "from mcp.server.auth.provider import AccessToken\n"
+                    "from ummanu import memory_service\n"
+                    "async def verify_token(token):\n"
+                    "    return AccessToken(token=token, client_id='fixture', subject='fixture', scopes=[], claims={'memory_grant_id': '0' * 32})\n"
+                    "memory_service.mcp._token_verifier = types.SimpleNamespace(verify_token=verify_token)\n"
+                    "memory_service.mcp.run(transport='streamable-http')"
                 ),
             ],
             cwd=source_root,
