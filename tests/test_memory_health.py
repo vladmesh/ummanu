@@ -133,9 +133,11 @@ class MemoryHealthWireTests(unittest.TestCase):
                 ),
             ]
         )
-        with mock.patch("ummanu.memory.health.http.client.HTTPConnection", return_value=connection):
-            with self.assertRaisesRegex(health.MemoryProbeError, "denied.*runtime_identity_stale"):
-                health._authenticated_list("launch-bound-token", port=8077, timeout_seconds=5)
+        with (
+            mock.patch("ummanu.memory.health.http.client.HTTPConnection", return_value=connection),
+            self.assertRaisesRegex(health.MemoryProbeError, "denied.*runtime_identity_stale"),
+        ):
+            health._authenticated_list("launch-bound-token", port=8077, timeout_seconds=5)
 
 
 class MemoryHealthIdentityTests(unittest.TestCase):
@@ -175,12 +177,14 @@ class MemoryHealthIdentityTests(unittest.TestCase):
             self.assertEqual(handed_off, [access.bindings_dir(data_dir)])
 
     def test_missing_expected_steward_entry_is_a_visible_probe_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch(
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch(
                 "ummanu.memory.health._authenticated_list", return_value=[{"id": 1, "scope": "project:foreign"}]
-            ):
-                with self.assertRaisesRegex(health.MemoryProbeError, "expected steward-scoped"):
-                    health.probe_memory(Path(tmp), timeout_seconds=0.01, retry_seconds=0)
+            ),
+            self.assertRaisesRegex(health.MemoryProbeError, "expected steward-scoped"),
+        ):
+            health.probe_memory(Path(tmp), timeout_seconds=0.01, retry_seconds=0)
 
     @unittest.skipUnless(os.geteuid() == 0, "requires a root upgrade parent")
     def test_root_probe_uses_a_runtime_user_heartbeat_resolved_by_a_separate_daemon_process(self) -> None:

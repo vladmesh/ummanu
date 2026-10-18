@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import time
@@ -243,9 +244,5 @@ def probe_memory(
             raise MemoryProbeError(f"runtime-user authenticated probe failed: {exc}") from None
     finally:
         for path in (grant_path, pid_file):
-            try:
+            with contextlib.suppress(OSError):
                 path.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                pass
