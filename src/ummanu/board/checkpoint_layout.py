@@ -12,8 +12,9 @@ Two layouts are readable:
   file (`cards/0000/00000000.json`, ...), so changing one card rewrites one small blob; the
   append-only `audit.ndjson` and `events.ndjson` are stored as immutable segments
   (`audit/0000/00000000.ndjson`, ...), and a checkpoint that appended lines adds one segment.
-  `export.json` and the analytics manifest stay single files. The optional `po_queue.ndjson` is
-  stored as bounded parts (`po_queue/0000/00000000.ndjson`, ...) rewritten where they changed.
+  `export.json` and the analytics manifest stay single files. The optional `po_queue.ndjson` and
+  `po_attachments.ndjson` are stored as bounded parts (`po_queue/0000/00000000.ndjson`, ...)
+  rewritten where they changed.
 
 In both layouts a logical file's bytes are the concatenation of its parts in index order, so every
 consumer of a committed checkpoint reads through :func:`open_checkpoint_board` and sees the same
@@ -49,6 +50,7 @@ LOGICAL_FILES = (
     "owner_events.ndjson",
     "po_notes.json",
     "po_queue.ndjson",
+    "po_attachments.ndjson",
 )
 #: Logical files stored one record per file in the split layout: records change in place.
 RECORD_FILES = {"cards.ndjson": ("cards", ".json"), "sprints.ndjson": ("sprints", ".json")}
@@ -57,7 +59,10 @@ SEGMENT_FILES = {"audit.ndjson": ("audit", ".ndjson"), "events.ndjson": ("events
 #: Optional logical files stored as parts of at most `MAX_SEGMENT_BYTES` in the split layout, cut
 #: inside a longer line too: they change in place. No parts reads as no file; the export summary's
 #: coverage tells a declared empty file from an absent one.
-CHUNKED_FILES = {"po_queue.ndjson": ("po_queue", ".ndjson")}
+CHUNKED_FILES = {
+    "po_queue.ndjson": ("po_queue", ".ndjson"),
+    "po_attachments.ndjson": ("po_attachments", ".ndjson"),
+}
 #: Logical files that stay single files in the split layout.
 SINGLE_FILES = ("export.json", "origin_returns.ndjson", "po_sql.json", "owner_events.ndjson", "po_notes.json")
 

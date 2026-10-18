@@ -67,6 +67,11 @@ from ummanu.board.owner_checkpoint import (
     require_owner_parity,
 )
 from ummanu.board.owner_events import OwnerEventStore, ReadRefused
+from ummanu.board.po_attachments_checkpoint import (
+    ATTACHMENTS_CHECKPOINT_FILE,
+    LEGACY_ATTACHMENTS_COVERAGE,
+    read_checkpoint_attachments,
+)
 from ummanu.board.po_checkpoint import RESTORED_PO_COVERAGE, export_po_records, read_checkpoint_po
 from ummanu.board.po_notes_checkpoint import (
     LEGACY_NOTES_COVERAGE,
@@ -100,6 +105,7 @@ from ummanu.installation.materialize import materialize_checkpoint
 from ummanu.memory import client_config
 from ummanu.memory_journal import export_memory_snapshot, verify_memory_journal
 from ummanu.po import workspace as po_workspace
+from ummanu.po.attachments import attachments_dir, store_image
 from ummanu.po.queue import PoQueue, queue_dir
 from ummanu.po.recovery_admission import PoRecoveryAdmission
 from ummanu.po.runner import PoRunner
@@ -125,6 +131,11 @@ RETIRED_METADATA = {
 CARDS = ("ummanu-1", "ummanu-2", RETIRED_CARD)
 SPRINTS = ("sprint:snapshot", "sprint:snapshot-open")
 #: The PO's own notes on the source host: a decision the SQL feed does not hold, in CRLF and UTF-8.
+SOURCE_IMAGES = (
+    ("open", b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4),
+    ("open", b"\xff\xd8\xff\xe0" + bytes(range(255, -1, -1)) * 3),
+    ("closed", b"RIFF\x20\x00\x00\x00WEBPVP8 " + b"\xab\xcd\xef" * 200),
+)
 SOURCE_NOTES = "# PO notes\r\nThe owner settled on option B in a call; no PO turn records it. Решено.\n".encode()
 
 
@@ -342,6 +353,9 @@ class _SnapshotRecoveryCase(unittest.TestCase):
                            source="web", metadata={"attachments": ["shot.png"]})
         queue.refuse(closed, "PO session closed is closed; open a new session to continue")
         self.source_queue = queue.capture()
+        # Images of an open and a closed session as the upload publishes them.
+        self.source_images = {(session, store_image(data_dir, session, image).name): image
+                              for session, image in SOURCE_IMAGES}
         self.source_kinds = self._kinds(source, data_dir, self.source_config)
 
     def _kinds(self, instance: Path, data_dir: Path, config: BoardStoreConfig) -> dict[str, object]:
@@ -495,6 +509,25 @@ class _SnapshotRecoveryCase(unittest.TestCase):
         self.assertEqual(PoQueue(self.fixture.source_data).capture(), self.source_queue)
 
 
+    def _assert_inert_attachments(self, steps: dict[str, tuple[str, str]], data_dir: Path) -> None:
+        """The source images arrive as exact board bytes; no session attachments directory is written."""
+        board = data_dir / "board"
+        lines = (board / ATTACHMENTS_CHECKPOINT_FILE).read_text(encoding="utf-8").splitlines()
+        self.assertEqual({(record["session_id"], record["name"]): bytes.fromhex(record["data"])
+                          for record in map(json.loads, lines)}, self.source_images)
+        captured = read_checkpoint_attachments(board)
+        self.assertEqual(steps["po-attachments"], ("unchanged", captured.describe()))
+        state = restore_state(data_dir)
+        self.assertEqual(
+            (state["po_attachments_coverage"], state["po_attachments_files"], state["po_attachments_bytes"]),
+            ("captured", 3, sum(len(image) for image in self.source_images.values())),
+        )
+        for session in ("closed", "empty", "open"):
+            self.assertFalse(attachments_dir(data_dir, session).exists())
+        for (session, name), image in self.source_images.items():
+            self.assertEqual((attachments_dir(self.fixture.source_data, session) / name).read_bytes(), image)
+
+
 class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
     def test_legacy_recovery_and_retry_keep_coverage_descriptive_through_the_status_gate(self):
         board = self.fixture.source_data / "board"
@@ -506,6 +539,8 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         (board / NOTES_CHECKPOINT_FILE).unlink()
         summary.pop("po_queue")
         (board / QUEUE_CHECKPOINT_FILE).unlink()
+        summary.pop("po_attachments")
+        (board / ATTACHMENTS_CHECKPOINT_FILE).unlink()
         for name in ("sprints.json", "sprints.ndjson"):
             path = board / name
             if name.endswith(".ndjson"):
@@ -566,6 +601,12 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
                 queue_step = next(step for step in machine["steps"] if step["name"] == "po-queue")
                 self.assertEqual((queue_step["status"], queue_step["detail"]), ("unchanged", LEGACY_QUEUE_COVERAGE))
                 self.assertIsNone(read_checkpoint_queue(data_dir / "board"))
+                self.assertEqual((state["po_attachments_coverage"], state["po_attachments_diagnostic"]),
+                                 ("unavailable", LEGACY_ATTACHMENTS_COVERAGE))
+                images_step = next(step for step in machine["steps"] if step["name"] == "po-attachments")
+                self.assertEqual((images_step["status"], images_step["detail"]),
+                                 ("unchanged", LEGACY_ATTACHMENTS_COVERAGE))
+                self.assertIsNone(read_checkpoint_attachments(data_dir / "board"))
                 self.assertEqual(state["sprint_close_coverage"], "unavailable")
                 self.assertEqual(state["sprint_close_parity"], "unavailable")
                 self.assertEqual(state["sprint_close_diagnostic"], LEGACY_CLOSE_COVERAGE)
@@ -814,6 +855,7 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertNotIn(NOTES_FILE, self._materialize_po_workspace(data_dir.resolve()))
         self.assertEqual(notes.read_bytes(), SOURCE_NOTES)
         self._assert_inert_queue(steps, data_dir, po)
+        self._assert_inert_attachments(steps, data_dir)
         # The closed card on the retired id is back as the tree exported it: placement and project.
         exported = next(
             card
@@ -986,6 +1028,7 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         po = PoStore(self.target_config.for_role("app"))
         self.addCleanup(po.close)
         self._assert_inert_queue(steps, data_dir, po)
+        self._assert_inert_attachments(steps, data_dir)
         seen_notes = []
 
         def launch(session, seq, argv, files, environment, spec):
@@ -1009,6 +1052,7 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertEqual(again.status, "ok", f"{again.render()}\nrefused store batches: {refused}")
         self.assertEqual(steps["po-notes"], ("unchanged", RESTORED_NOTES_COVERAGE))
         self._assert_inert_queue(steps, data_dir, po)
+        self._assert_inert_attachments(steps, data_dir)
         self.assertEqual(notes.read_bytes(), SOURCE_NOTES)
         self.assertEqual(notes.stat().st_mode & 0o777, 0o600)
 
@@ -1175,6 +1219,94 @@ class SnapshotRecoveryPostgresTests(_SnapshotRecoveryCase):
         self.assertNotIn("private", result.reason)
         self.assertEqual(git(repository, "rev-parse", SNAPSHOT_REF), tip)
         self.assertEqual(committed(tip), before)
+
+    def test_a_secret_or_damaged_image_keeps_the_live_export_and_the_committed_cut(self) -> None:
+        """A runtime secret in an image's text metadata and a damaged stored image both refuse the cut."""
+        source, source_data = self.fixture.source, self.fixture.source_data
+        board = source_data / "board"
+        before = {path.name: path.read_bytes() for path in board.iterdir() if path.is_file()}
+        repository = self.fixture.source_snapshot
+        tip = git(repository, "rev-parse", SNAPSHOT_REF)
+        committed = git(repository, "ls-tree", "-r", tip, "--", "state/board/po_attachments")
+        self.assertTrue(committed)
+        secret = "private-known-secret-value"
+        with (source / "runtime.env").open("a", encoding="utf-8") as runtime_env:
+            runtime_env.write(f"EXAMPLE_TOKEN={secret}\n")
+        pasted = store_image(source_data, "open", b"\x89PNG\r\n\x1a\n\x00\x00\x00\x20tEXtComment\x00"
+                             + secret.encode() + b"\xff\x00")
+        (session, name), image = next(iter(self.source_images.items()))
+
+        def damaged() -> None:
+            pasted.unlink()
+            (attachments_dir(source_data, session) / name).write_bytes(image[:-1] + b"\x00")
+
+        for label, damage, reason in (
+            ("secret", lambda: None, "secret detected in PO attachment record"),
+            ("damaged", damaged, f"PO session {session} attachment {name} does not hold the image its name names"),
+        ):
+            with self.subTest(source=label):
+                damage()
+                result = SnapshotExporter(
+                    source_data,
+                    source,
+                    snapshot_repo=repository,
+                    product_revision=REVISION,
+                    board_schema_head=head_revision(),
+                    state_dir=self.root / "source-pipeline-state",
+                ).write()
+                self.assertEqual(result.status, "blocked", result.reason)
+                self.assertIn(reason, result.reason)
+                self.assertIn(pasted.name if label == "secret" else name, result.reason)
+                self.assertNotIn("private", result.reason)
+                self.assertEqual({path.name: path.read_bytes() for path in board.iterdir() if path.is_file()}, before)
+                self.assertEqual(git(repository, "rev-parse", SNAPSHOT_REF), tip)
+                self.assertEqual(git(repository, "ls-tree", "-r", tip, "--", "state/board/po_attachments"), committed)
+
+    def test_images_over_the_part_budget_commit_bounded_blobs_that_recover_whole_and_shrink(self) -> None:
+        """Images larger than the part budget commit as bounded blobs, recover with exact bytes, and
+        a removal leaves no stale part."""
+        budget = 1024
+        self.enterContext(mock.patch.object(checkpoint_layout, "MAX_SEGMENT_BYTES", budget))
+        fixture = self.fixture
+        state_dir = self.root / "source-pipeline-state"
+        extra = store_image(fixture.source_data, "closed", b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 9)
+
+        def committed(tip: str) -> tuple[list[tuple[str, int]], bytes]:
+            listing = git(fixture.remote, "ls-tree", "-r", "-l", "--full-tree", tip, "--", "state/board/po_attachments")
+            parts = [(line.split("\t")[1], int(line.split()[3])) for line in listing.splitlines()]
+            payload = b"".join(
+                subprocess.run(["git", "-C", str(fixture.remote), "cat-file", "blob", f"{tip}:{path}"],
+                               capture_output=True, check=True).stdout
+                for path, _ in parts
+            )
+            return parts, payload
+
+        counts = []
+        for stage in ("grown", "shrunk"):
+            with self.subTest(stage=stage):
+                if stage == "shrunk":
+                    extra.unlink()
+                tip = fixture.cut(stand_in=False, state_dir=state_dir)
+                parts, payload = committed(tip)
+                logical = (fixture.source_data / "board" / ATTACHMENTS_CHECKPOINT_FILE).read_bytes()
+                self.assertEqual(payload, logical)
+                self.assertTrue(all(0 < size <= budget for _, size in parts))
+                self.assertEqual(
+                    [path for path, _ in parts],
+                    [f"state/board/po_attachments/{part_name(index, '.ndjson').as_posix()}"
+                     for index in range(len(parts))],
+                )
+                self.assertEqual(git(fixture.remote, "ls-tree", "--name-only", tip, "--",
+                                     f"state/board/{ATTACHMENTS_CHECKPOINT_FILE}"), "")
+                counts.append(len(parts))
+                if stage == "grown":
+                    self.assertEqual(self._bootstrap()[0], 0)
+                    result, refused = self._recover()
+                    self.assertEqual(result.status, "ok", f"{result.render()}\nrefused store batches: {refused}")
+                    self.assertEqual((fixture.data_dir / "board" / ATTACHMENTS_CHECKPOINT_FILE).read_bytes(), logical)
+                    self.assertEqual(len(read_checkpoint_attachments(fixture.data_dir / "board").files), 4)
+                    self.assertFalse(attachments_dir(fixture.data_dir, "closed").exists())
+        self.assertLess(counts[1], counts[0])
 
     def test_locked_runtime_secrets_restore_board_and_po_sql_but_skip_activation(self) -> None:
         self.assertEqual(self._bootstrap()[0], 0)

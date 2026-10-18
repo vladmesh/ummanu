@@ -232,11 +232,12 @@ split, so a checkpoint's Git cost follows what changed instead of the size of th
   unless one line is longer, so no blob reaches the 100 MB file limit of the GitHub remote.
 - `export.json`, `origin_returns.ndjson`, `owner_events.ndjson`, `po_sql.json` and `po_notes.json`
   stay single files.
-- The optional `po_queue.ndjson` changes in place and is stored as parts `po_queue/<index // 1000>/<index>`
-  of at most 32 MiB each, cut at line ends and, inside a longer line, every 32 MiB, so no part
-  reaches the remote's file limit however large the queue grows. Each checkpoint rewrites only the
-  parts whose bytes changed and removes parts past the new end. An empty file has no parts; the
-  export summary's coverage tells it from an absent one.
+- The optional `po_queue.ndjson` and `po_attachments.ndjson` change in place and are stored as parts
+  `po_queue/<index // 1000>/<index>` and `po_attachments/<index // 1000>/<index>` of at most 32 MiB
+  each, cut at line ends and, inside a longer line, every 32 MiB, so no part reaches the remote's
+  file limit however large the queue or the images grow. Each checkpoint rewrites only the parts
+  whose bytes changed and removes parts past the new end. An empty file has no parts; the export
+  summary's coverage tells it from an absent one.
   These payloads contain mutable state and are read through the same flat/split reader.
 - A logical file's bytes are the concatenation of its parts in index order; a gap in the sequence or
   an unexpected entry is a broken checkpoint, not a shorter one.
@@ -1195,6 +1196,51 @@ reconciliation are not restored. `restore-state.json` and `restore-board` expose
 and `po_queue_diagnostic`; recovery reports the diagnostic as `po-queue`. Doctor and the final status
 gate raise no finding for it.
 
+### PO attachment capture
+
+`<data>/po/sessions/<session>/attachments/` holds the images the owner attached to a session
+(`po.attachments`): each PNG, JPEG or WebP image of at most 10 MiB once, named `<sha256>.<ext>`
+by its content and signature. `store_image` publishes an image under the PO recovery target lock.
+Inside the board export's capture window, after the PO SQL rows and the queue, the inventory lists
+the attachments directory of every session the captured `po_sessions` holds, open and closed,
+whatever its turns, feed or queue name (an id that is not a path segment has none); a directory
+of a session the cut does not hold, any other path and a path quoted in message text are never read. An upload therefore lands wholly before the
+cut or after it. The inventory records names and sizes only; the bytes are read after the lock and
+the bulk lane are released, one image at a time.
+
+Directories and images are opened beneath the data directory without following links. Dot names
+are publications in flight and other regular files are not images; a symlink or a non-regular entry
+anywhere on the path or in the directory, or an image name whose size is zero or over the upload
+limit, refuses the export. An image that vanished, changed size or no longer hashes and signs to
+its name when read refuses it too, naming the session and image name only. Either refusal keeps the
+previous local export and committed checkpoint.
+
+The logical `po_attachments.ndjson` holds one line `{"data", "name", "session_id", "sha256", "size"}`
+per image in session then name order, `data` the image bytes in lowercase hex, so the stored text
+cannot match a credential shape. `export.json` declares `po_attachments` version `1`: `sessions`
+(the captured PO SQL session count), `directories` (how many had an attachments directory), `files`,
+`image_bytes`, `bytes` and `sha256` of the payload, and `po_sql_sha256`, which must equal the
+`po_sql` digest of the same export and of its `po_sql.json` bytes. Staging, snapshot verification
+and materialization refuse an undeclared payload, a count, digest or binding mismatch, a record
+whose bytes do not match its size, digest, name or signature, a session the PO SQL cut does not
+hold, a repeated or out-of-order record, a duplicate field and a gap or stray entry among the
+parts, without quoting content. The board export and the checkpoint scan each image's bytes,
+decoded as UTF-8 with replacement, with the instance's redaction values and `runtime.env`, and the
+whole logical file again, so a secret in an image's text metadata is found whatever cuts its hex;
+a hit names only the record ordinal and image name. Text rendered as pixels or compressed inside
+the image is not scanned. A checkpoint without the declaration and without the payload predates the
+capability and reports `checkpoint has no PO attachment coverage; PO session images are
+unavailable`.
+
+Materialization writes the selected point's payload to `<data>/board/po_attachments.ndjson` as inert
+data and removes one an earlier point left when the selected point has none.
+Restore validates it and writes no `<data>/po/sessions/` file; the absolute paths in restored
+message text still name the source host. `restore-state.json` and `restore-board` expose
+`po_attachments_coverage` (`captured`, `empty` when directories held no image, `absent` when no
+captured session had one, or `unavailable`), `po_attachments_files`, `po_attachments_bytes` and
+`po_attachments_diagnostic`; recovery reports the diagnostic as `po-attachments`. Doctor and the
+final status gate raise no finding for it.
+
 ### PO SQL restore
 
 `recover` and `restore-board` share `restore.restore_po(data_dir, source=..., instance=...,
@@ -1416,9 +1462,11 @@ their existing resume, recovery and fallback behavior. Automatic provider switch
 explicitly restored sessions so it cannot discard the recorded native binding.
 
 Reconciliation of uncertain external effects is not automated. Pending/refused inputs travel only
-as the inert [PO queue capture](#po-queue-capture); images under
-`<data>/po/sessions/<id>/attachments/` are not transported. SQL parity, prepared contexts, restored
-notes and the captured queue do not establish full PO recovery readiness.
+as the inert [PO queue capture](#po-queue-capture) and images under
+`<data>/po/sessions/<id>/attachments/` only as the inert [PO attachment
+capture](#po-attachment-capture); neither is restored as runtime context. SQL parity, prepared
+contexts, restored notes, the captured queue and the captured images do not establish full PO
+recovery readiness.
 
 Released v1/v2 checkpoints lacking both declaration and file remain supported and report
 `checkpoint has no PO SQL coverage; sessions, turns, feed and request bindings are unavailable`.

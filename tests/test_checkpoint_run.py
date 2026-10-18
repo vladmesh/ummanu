@@ -36,7 +36,8 @@ from ummanu.host import (
 )
 from ummanu.host_apply import ApplyInputs, apply_host
 from ummanu.infra import checkpoint_run
-from ummanu.po import recovery_admission
+from ummanu.po import attachments as po_attachments, recovery_admission
+from ummanu.po.attachments import AttachmentInventory
 from ummanu.po.queue import PoQueue, QueueCapture
 from ummanu.po.recovery_admission import PoRecoveryAdmission
 from ummanu.tasks import TaskError
@@ -586,6 +587,12 @@ class BoardCutTests(unittest.TestCase):
                 ] if table == "origin_returns" else [])
 
             client._query.side_effect = query
+            real_inventory = po_attachments.inventory_attachments
+
+            def inventory(data_dir, session_ids):
+                ordered.append(("attachments", _target_held(root)))
+                return real_inventory(data_dir, session_ids)
+
             with (
                 mock.patch.object(data, "task_audit_for", return_value=audit),
                 mock.patch.object(
@@ -595,8 +602,9 @@ class BoardCutTests(unittest.TestCase):
                 ),
                 mock.patch("ummanu.sprints.sprint_client") as sprint_factory,
                 mock.patch.object(ownership, "bulk_lane", side_effect=bulk_lane),
+                mock.patch.object(po_attachments, "inventory_attachments", side_effect=inventory),
             ):
-                cards, history, sprints, outbox, po, owner_events, queue = data._read_board_cut(
+                cards, history, sprints, outbox, po, owner_events, queue, attachments = data._read_board_cut(
                     root, root, reader, None
                 )
             self.assertEqual(cards, [{"reference": "demo-1"}])
@@ -607,11 +615,15 @@ class BoardCutTests(unittest.TestCase):
             self.assertEqual(outbox[0]["event_id"], "transition")
             self.assertEqual(po, {table: [] for table in PO_TABLES})
             self.assertEqual(queue, QueueCapture(present=False, inputs=()))
+            self.assertEqual(attachments, AttachmentInventory(sessions=0, directories=0, files=()))
             self.assertCountEqual(queried, ["origin_returns", "owner_events", *PO_TABLES])
-            # The queue boundary precedes the bulk lane; the PO rows pin the snapshot inside it and
-            # every later read runs after it is released.
-            self.assertEqual(ordered[: len(PO_TABLES) + 1], [("bulk", True), *((table, True) for table in PO_TABLES)])
-            self.assertTrue(all(not held for _, held in ordered[len(PO_TABLES) + 1 :]))
+            # The queue boundary precedes the bulk lane; the PO rows pin the snapshot inside it, the
+            # images are listed inside it, and every later read runs after it is released.
+            self.assertEqual(
+                ordered[: len(PO_TABLES) + 2],
+                [("bulk", True), *((table, True) for table in PO_TABLES), ("attachments", True)],
+            )
+            self.assertTrue(all(not held for _, held in ordered[len(PO_TABLES) + 2 :]))
             self.assertFalse(_target_held(root))
             sprint_factory.assert_not_called()
             client.read_snapshot.assert_called_once_with()

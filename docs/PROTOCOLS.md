@@ -4814,9 +4814,10 @@ form (`application/x-www-form-urlencoded`) with `request_id`, `product`, `goal`,
 `issues`, `projects`, `observer`, `worker` and `reviewer`, and the `/po` POSTs, which take forms too. An
 unknown field is refused.
 
-Instance checkpoints capture the complete PO SQL ledger and conversation as inert files; they do
-not import/rebind PO state or transport pending queue inputs and attachments. Coverage, fields and
-recovery limits are specified in [Recovery: PO SQL capture](RECOVERY.md#po-sql-capture).
+Instance checkpoints capture the complete PO SQL ledger and conversation, the PO queue and the
+session images as inert files; they do not import/rebind PO state, run the queue or restore
+attachments. Coverage, fields and recovery limits are specified in [Recovery: PO SQL
+capture](RECOVERY.md#po-sql-capture).
 
 A `/po` `request_id` belongs to one operation
 and its inputs installation-wide (`po_requests`): repeated with the same inputs it answers the recorded
