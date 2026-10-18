@@ -140,7 +140,7 @@ class ExternalWeightsLoaderTests(unittest.TestCase):
                     completed = subprocess.run(
                         [sys.executable, "-c", program, directory, layout, str(int(early))],
                         env={**os.environ, "HF_HUB_OFFLINE": "1", "HF_HUB_DISABLE_SHARED_BLOBS": "0"},
-                        text=True, capture_output=True, timeout=120,
+                        text=True, capture_output=True, timeout=120, check=False,
                     )
                     self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 

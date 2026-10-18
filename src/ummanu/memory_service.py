@@ -22,8 +22,7 @@ from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 
-from ummanu.memory import DEFAULT_MODEL
-from ummanu.memory import access as memory_access
+from ummanu.memory import DEFAULT_MODEL, access as memory_access
 from ummanu.memory.canon import (  # noqa: F401  # Service-level names of the canon parsing.
     fact_content_hash,
     fact_files,
@@ -78,11 +77,11 @@ def _unit(vec) -> np.ndarray:
 
 
 def embed_doc(text: str) -> np.ndarray:
-    return _unit(list(embedder().embed([text]))[0])
+    return _unit(next(iter(embedder().embed([text]))))
 
 
 def embed_query(text: str) -> np.ndarray:
-    return _unit(list(embedder().query_embed(text))[0])
+    return _unit(next(iter(embedder().query_embed(text))))
 
 
 def db(path: str | Path | None = None) -> sqlite3.Connection:
@@ -223,7 +222,7 @@ def log_read(
         with _search_log_lock, open(SEARCH_LOG, "a", encoding="utf-8") as f:
             f.write(line + "\n")
             f.flush()
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - Audit telemetry failure cannot block memory reads.
         pass
 
 
@@ -682,7 +681,7 @@ def bootstrap_index() -> int | None:
     try:
         result = update_index()
         n = result["parity"]["indexed"]
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - Any reconciliation failure must retain a compatible index.
         has_index = index_exists()
         status, detail = index_compatibility(DB_PATH, MODEL, DIM) if has_index else ("missing", None)
         if has_index and status in {"compatible", "legacy"}:
@@ -745,7 +744,7 @@ def start_canon_watcher() -> None:
                         f"deleted={result['deleted']} reused={result['reused']}",
                         flush=True,
                     )
-            except Exception as e:  # never let the watcher kill the daemon
+            except Exception as e:  # noqa: BLE001 - Reconciliation failures must leave the watcher running.
                 print(f"memory-mcp: watcher error: {e}", flush=True)
 
     threading.Thread(target=loop, name="canon-watcher", daemon=True).start()
