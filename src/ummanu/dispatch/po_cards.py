@@ -80,7 +80,13 @@ from ummanu.dispatch.state import (
     record_attempt as _record_attempt,
     request_token,
 )
-from ummanu.po.client import OutcomeUnknown, PoServiceError, RecoveryRefused, ServiceRefused, ServiceUnavailable
+from ummanu.po.client import (
+    OutcomeUnknown,
+    PoServiceError,
+    RecoveryRefused,
+    ServiceRefused,
+    ServiceUnavailable,
+)
 from ummanu.po.queue import QueuedInput
 from ummanu.po.store import (
     COMPLETED,
