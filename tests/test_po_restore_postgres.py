@@ -175,6 +175,55 @@ class PoRestorePostgresTests(unittest.TestCase):
             self.assertNotIn(value, str(failed.exception))
             self.assertEqual(self.readback(), {name: [] for name in PO_COLUMNS})
 
+    def test_fresh_sequence_advances_before_normal_claim_and_complete_with_request_replays(self):
+        with self.client.transaction():
+            initial_sequence = self.client._query("SELECT last_value, is_called FROM po_feed_entry_id_seq")[0]
+            self.assertEqual(self.client._query("SELECT current_user"), [("ummanu_app",)])
+        imported_max = max(row["entry_id"] for row in self.records["po_feed"])
+        self.assertEqual(initial_sequence, (1, False))
+        self.assertGreater(imported_max, initial_sequence[0])
+
+        self.import_records()
+        require_po_parity(self.expected, self.readback())
+        with self.client.transaction():
+            restored_sequence = self.client._query("SELECT last_value, is_called FROM po_feed_entry_id_seq")[0]
+        self.assertGreaterEqual(restored_sequence[0], imported_max)
+        self.assertTrue(restored_sequence[1])
+
+        turn, created = self.po.claim_turn("open", "fresh input", lambda seq: self.root / str(seq),
+                                           request_id="fresh-send", metadata={"source": "owner"})
+        self.assertTrue(created)
+        self.assertEqual(turn.seq, 5)
+        self.assertTrue(self.po.complete_turn("open", turn.seq, "fresh answer"))
+        owner, agent = self.po.feed("open")[-2:]
+        self.assertGreater(owner.entry_id, imported_max)
+        self.assertGreater(agent.entry_id, imported_max)
+        self.assertGreater(agent.entry_id, owner.entry_id)
+        self.assertEqual((owner.turn_seq, owner.role, owner.text, owner.metadata),
+                         (turn.seq, "owner", "fresh input", {"source": "owner"}))
+        self.assertEqual((agent.turn_seq, agent.role, agent.text), (turn.seq, "agent", "fresh answer"))
+
+        preserved = self.readback()
+        preserved["po_turns"] = [row for row in preserved["po_turns"]
+                                 if (row["session_id"], row["seq"]) != ("open", turn.seq)]
+        preserved["po_feed"] = [row for row in preserved["po_feed"]
+                                if row["entry_id"] not in (owner.entry_id, agent.entry_id)]
+        preserved["po_requests"] = [row for row in preserved["po_requests"] if row["request_id"] != "fresh-send"]
+        require_po_parity(self.expected, preserved)
+
+        before = self.readback()
+        replayed, created = self.po.claim_turn("open", self.records["po_feed"][0]["text"],
+                                               lambda seq: self.root / str(seq), request_id="send")
+        self.assertFalse(created)
+        self.assertEqual(replayed, self.po.turn("open", 1))
+        replayed, created = self.po.claim_turn("open", "fresh input", lambda seq: self.root / str(seq),
+                                               request_id="fresh-send", metadata={"source": "owner"})
+        self.assertFalse(created)
+        self.assertEqual(replayed, self.po.turn("open", turn.seq))
+        with self.assertRaises(RequestConflict):
+            self.po.claim_turn("open", "different input", lambda seq: self.root / str(seq), request_id="send")
+        self.assertEqual(before, self.readback())
+
     def test_app_sequence_privileges_and_normal_claim_append_and_request_replays(self):
         with self.client.transaction():
             self.client._query("SELECT setval('po_feed_entry_id_seq', 1000, true)")
