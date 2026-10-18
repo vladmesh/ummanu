@@ -601,17 +601,19 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
         for fail_import in (True, False):
             spec = {"args": {**vars(self._args()), "installation_user": user}, "data_dir": str(data_dir),
                     "uid": uid, "fail_import": fail_import}
+            # From `/`: runtime-user Git children inherit the working directory, and the runner's
+            # checkout is not theirs to traverse.
             completed = subprocess.run(
                 ["sudo", "-n", "env", f"PYTHONPATH={repository}:{repository / 'src'}", sys.executable, "-B",
                  "-m", "tests.support.snapshot_recovery"],
-                input=json.dumps(spec), capture_output=True, text=True, cwd=repository, check=False,
+                input=json.dumps(spec), capture_output=True, text=True, cwd="/", check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr[-4000:])
             runs.append(json.loads(completed.stdout.splitlines()[-1]))
         failed, retried = runs
         self.assertEqual(failed["status"], "failed", failed["steps"])
         self.assertIn("PO SQL restore failed at import: injected root recovery import failure",
-                      " ".join(step[2] for step in failed["steps"]))
+                      " ".join(step[2] for step in failed["steps"]), failed["steps"])
         self.assertEqual(retried["status"], "ok", retried["steps"])
         self.assertEqual(retried["po_sql_restore"], "finished")
         for run, phase in ((failed, "holding"), (retried, "finished")):
