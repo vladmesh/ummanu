@@ -105,37 +105,57 @@ class SqlSprintAtomicityTests(SprintFixture):
 
     def test_native_mixed_close_import_remaps_ids_and_caller_rollback_removes_all_facts(self):
         data, expected = self._export_mixed_close()
-        config = PostgresBoard.shared().fresh_database()
-        self.addCleanup(PostgresBoard.shared().release_database, config.dbname)
-        app = SqlCardClient(config.for_role("app"), self.instance)
-        self.addCleanup(app.close)
-        with self.assertRaisesRegex(RuntimeError, "caller rollback"), app.transaction():
-            import_normalized_board(data, client=app, instance=self.instance)
-            require_close_set_parity(expected, app.sprints.export_close_facts())
-            raise RuntimeError("caller rollback")
-        self.assertEqual(app.sprints.export_close_facts(), {})
-        self.assertEqual(TaskReader(app).export(), [])
-        self.assertEqual(TaskWriter(app, data_dir=data).audit.events(), [])
-        import_normalized_board(data, client=app, instance=self.instance)
-        actual = app.sprints.export_close_facts()
-        require_close_set_parity(expected, actual)
-        self.assertNotEqual(expected["sprint:mixed"]["decisions"][0]["decision_id"], actual["sprint:mixed"]["decisions"][0]["decision_id"])
-        import_normalized_board(data, client=app, instance=self.instance)
-        self.assertEqual(app.sprints.export_close_facts(), actual)
+        for shape in ("fresh", "ownership"):
+            with self.subTest(target=shape):
+                if shape == "fresh":
+                    config = PostgresBoard.shared().fresh_database()
+                    self.addCleanup(PostgresBoard.shared().release_database, config.dbname)
+                else:
+                    seeded = self.make_empty_sprint_client()
+                    config = PostgresBoard.shared().config(seeded.credentials.dbname)
+                app = SqlCardClient(config.for_role("app"), self.instance)
+                self.addCleanup(app.close)
+                before = TaskReader(app).export()
+                history = TaskWriter(app, data_dir=data).audit.events()
+                if shape == "ownership":
+                    with self.assertRaisesRegex(RuntimeError, "undo fixture"), app.transaction():
+                        app._execute("UPDATE issues SET priority='P2' WHERE issue_id='open'")
+                        conflicting = TaskReader(app).export()
+                        with self.assertRaisesRegex(RestoreError, "different metadata"), app.transaction():
+                            import_normalized_board(data, client=app, instance=self.instance)
+                        self.assertEqual(TaskReader(app).export(), conflicting)
+                        self.assertEqual(app.sprints.export_close_facts(), {})
+                        self.assertEqual(TaskWriter(app, data_dir=data).audit.events(), history)
+                        raise RuntimeError("undo fixture")
+                with self.assertRaisesRegex(RuntimeError, "caller rollback"), app.transaction():
+                    import_normalized_board(data, client=app, instance=self.instance)
+                    require_close_set_parity(expected, app.sprints.export_close_facts())
+                    raise RuntimeError("caller rollback")
+                self.assertEqual(app.sprints.export_close_facts(), {})
+                self.assertEqual(TaskReader(app).export(), before)
+                self.assertEqual(TaskWriter(app, data_dir=data).audit.events(), history)
+                import_normalized_board(data, client=app, instance=self.instance)
+                actual = app.sprints.export_close_facts()
+                require_close_set_parity(expected, actual)
+                self.assertNotEqual(expected["sprint:mixed"]["decisions"][0]["decision_id"], actual["sprint:mixed"]["decisions"][0]["decision_id"])
+                import_normalized_board(data, client=app, instance=self.instance)
+                self.assertEqual(app.sprints.export_close_facts(), actual)
 
     def test_close_import_refuses_conflicting_extra_or_changed_columns_without_overwriting(self):
         data, expected = self._export_mixed_close()
-        config = PostgresBoard.shared().fresh_database()
-        self.addCleanup(PostgresBoard.shared().release_database, config.dbname)
+        seeded = self.make_empty_sprint_client()
+        config = PostgresBoard.shared().config(seeded.credentials.dbname)
         app = SqlCardClient(config.for_role("app"), self.instance)
         self.addCleanup(app.close)
         import_normalized_board(data, client=app, instance=self.instance)
-        for damage in ("reason", "column", "extra"):
+        for damage in ("reason", "column", "extra", "ownership"):
             with self.subTest(damage=damage), self.assertRaisesRegex(RuntimeError, "undo fixture"), app.transaction():
                 if damage == "reason":
                     app._execute("UPDATE sprint_decisions SET reason='conflicting stored reason' WHERE subject_kind='card'")
                 elif damage == "column":
                     app._execute("UPDATE sprints SET closeout_document='retained-document'")
+                elif damage == "ownership":
+                    app._execute("UPDATE products SET title='Conflicting product' WHERE product_id='ummanu'")
                 else:
                     app._execute("INSERT INTO sprint_issues(sprint_ref,issue_id,ordinal) VALUES ('sprint:mixed','done',99)")
                     app._execute(
@@ -143,9 +163,11 @@ class SqlSprintAtomicityTests(SprintFixture):
                         "VALUES ('sprint:mixed','issue','done','already_closed','resolved','retained extra','close-mixed',now())"
                     )
                 before = app.sprints.export_close_facts()
+                board_before = TaskReader(app).export()
                 with self.assertRaises((RestoreError, CloseCheckpointError)), app.transaction():
                     import_normalized_board(data, client=app, instance=self.instance)
                 self.assertEqual(app.sprints.export_close_facts(), before)
+                self.assertEqual(TaskReader(app).export(), board_before)
                 raise RuntimeError("undo fixture")
         require_close_set_parity(expected, app.sprints.export_close_facts())
 
@@ -163,8 +185,8 @@ class SqlSprintAtomicityTests(SprintFixture):
         data = Path(self.tmp.name) / "capture"
         init_layout(data)
         export_board(data, instance_dir=self.instance, reader=TaskReader(self.client), sprint_client=self.client)
-        config = PostgresBoard.shared().fresh_database()
-        self.addCleanup(PostgresBoard.shared().release_database, config.dbname)
+        seeded = self.make_empty_sprint_client()
+        config = PostgresBoard.shared().config(seeded.credentials.dbname)
         target = SqlCardClient(config.for_role("app"), self.instance)
         self.addCleanup(target.close)
         import_normalized_board(data, client=target, instance=self.instance)
@@ -180,8 +202,8 @@ class SqlSprintAtomicityTests(SprintFixture):
         data = Path(self.tmp.name) / "capture"
         init_layout(data)
         export_board(data, instance_dir=self.instance, reader=TaskReader(self.client), sprint_client=self.client)
-        config = PostgresBoard.shared().fresh_database()
-        self.addCleanup(PostgresBoard.shared().release_database, config.dbname)
+        seeded = self.make_empty_sprint_client()
+        config = PostgresBoard.shared().config(seeded.credentials.dbname)
         target = SqlCardClient(config.for_role("app"), self.instance)
         self.addCleanup(target.close)
         import_normalized_board(data, client=target, instance=self.instance)

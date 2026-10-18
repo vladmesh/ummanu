@@ -204,6 +204,7 @@ class ImportFollowsTheOrderTests(unittest.TestCase):
                 ("ummanu.restore.TaskReader", mock.Mock(return_value=reader)),
                 ("ummanu.restore.TaskWriter", mock.Mock(return_value=writer)),
                 ("ummanu.restore._existing_board_cards", mock.Mock(return_value={})),
+                ("ummanu.task_restore._restore_inventory", mock.Mock(return_value={})),
                 ("ummanu.restore._existing_sprints", mock.Mock(return_value={})),
                 ("ummanu.restore._restore_request_prefix", mock.Mock(return_value="restore:t:")),
                 ("ummanu.restore._validate_deferred_restore_comments", mock.Mock()),

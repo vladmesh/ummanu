@@ -166,6 +166,10 @@ def restore_cards_batched(
         )
 
     _validate_restore_inventory(existing, obligations)
+    retained_records = {
+        str(item.card["reference"]) for item in obligations
+        if _store_placed(item) and str(item.card["reference"]) in existing
+    }
     missing = sorted(
         (item for item in obligations if str(item.card["reference"]) not in existing), key=_foreign_key_rank
     )
@@ -264,6 +268,12 @@ def restore_cards_batched(
     live_metadata = [_metadata_map(answer) for answer in metadata_answers]
     write_entries: list[tuple[RestoreCardObligation, str, dict[str, Any]]] = []
     for item, task_id, metadata in zip(obligations, task_ids, live_metadata, strict=True):
+        if str(item.card["reference"]) in retained_records and any(
+            value and value != item.metadata.get(key) for key, value in _without_retired_launch_mode(metadata).items()
+        ):
+            raise TaskError(
+                "backend_error", f"existing restored reference has different metadata: {item.card['reference']}", 1
+            )
         committed = writer.audit.committed_event(item.request_id)
         row = existing[str(item.card["reference"])]
         if committed is not None:

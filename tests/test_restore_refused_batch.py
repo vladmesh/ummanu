@@ -53,6 +53,7 @@ class PoisoningStore:
         self.aborted = False
         self.calls: list[str] = []
         self.comments: list[str] = []
+        self.metadata: dict[str, str] = {}
         self.closed = False
 
     def call(self, method: str, **params: Any) -> Any:
@@ -92,6 +93,9 @@ class PoisoningStore:
 
     def _rpc_getActiveSwimlanes(self, *, project_id: int) -> list[dict[str, Any]]:
         return []
+
+    def _rpc_getTaskMetadata(self, *, task_id: int) -> dict[str, str]:
+        return dict(self.metadata)
 
 
 class _Audit:
@@ -192,6 +196,21 @@ def _card(reference: str, *, closed: bool = False) -> dict[str, Any]:
 
 
 class RefusedCardBatchTests(unittest.TestCase):
+    def test_existing_ownership_metadata_conflict_refuses_before_initialization(self) -> None:
+        store = PoisoningStore(refuse="saveTaskMetadata")
+        card = _card(ISSUE)
+        card["metadata"]["issue_priority"] = "P1"
+        store.metadata = {**card["metadata"], "issue_priority": "P2"}
+        existing = {ISSUE: store.call("getAllTasks", project_id=BOARD, status_id=1)[0]}
+        writer = SimpleNamespace(client=store, audit=_Audit())
+        with self.assertRaisesRegex(TaskError, "different metadata"):
+            restore_cards_batched(
+                writer, [card], board_id=BOARD, columns=COLUMNS, swimlanes={},
+                existing=existing, request_prefix="restore:t:",
+            )
+        self.assertEqual(store.metadata["issue_priority"], "P2")
+        self.assertEqual(store.calls[-1], "getTaskMetadata")
+
     def _create(self, store: PoisoningStore) -> TaskError:
         writer = SimpleNamespace(client=store, audit=_Audit())
         with self.assertRaises(TaskError) as raised:

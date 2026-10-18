@@ -871,12 +871,9 @@ class SqlCardClient:
         """Stored Card rows, archived included; Product, Issue and Sprint rows are not cards."""
         return int(self._query("SELECT count(*) FROM tasks")[0][0])
 
-    def restore_card_rows(self, *, record_references: Iterable[str] = ()) -> list[dict[str, Any]]:
-        """Stored Cards and captured Product/Issue parents; other ownership is not restore emptiness."""
-        references = set(record_references)
-        return self._rows() + (
-            [row for row in self.records.rows() if row["reference"] in references] if references else []
-        )
+    def restore_card_rows(self) -> list[dict[str, Any]]:
+        """Stored Card rows only; Product/Issue ownership is not restore emptiness."""
+        return self._rows()
 
     def board_cards(
         self,
