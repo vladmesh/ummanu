@@ -140,6 +140,35 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.host.reviews, [])
         self.assertEqual(len(self._comments("[completion:infra]")), 1)
 
+    def test_blocked_infra_requeued_on_the_same_card_receives_a_fresh_worker_packet(self) -> None:
+        self._kind("infra")
+        self.start_dispatcher()
+        self.tick()
+        initial = self._pilot_record()
+        self.writer.report(
+            role="worker", actor="worker", reference=CARD_REF, kind="blocked",
+            classification="wrong_task_definition", body="Execution contract requires replacement",
+            request_id=self._worker_report_request_id("blocked", "wrong_task_definition"),
+        )
+        self.assertEqual(self.tick()["to"], "blocked")
+        self.writer.move(
+            role="po", actor="operator", reference=CARD_REF, target="ready",
+            sprint_override=True, sprint_override_reason="Replace the blocked worker contract",
+            reason="Generator activated; replace the worker execution contract",
+            request_id="requeue-infra-contract",
+        )
+        self.assertEqual(self.tick()["step"], "claim")
+        replacement = self._pilot_record()
+        self.assertNotEqual(replacement["attempt_id"], initial["attempt_id"])
+        self.assertEqual(replacement["workspace"], initial["workspace"])
+        document = self._task_document()
+        self.assertIn("First TASK.md of this attempt: read it whole.", document)
+        self.assertIn("only to orchestrate an explicitly authorized remote target", document)
+        self.assertIn("## Applicable sprint local_run_exceptions\n\nnone", document)
+        self.assertIn(replacement["attempt_id"] + "-worker-report-done", document)
+        self.assertEqual(self.host.prepared, [CARD_REF, CARD_REF])
+        self._assert_no_candidate_calls()
+
     def test_an_infra_report_without_both_sections_is_refused_and_the_card_does_not_advance(self) -> None:
         self._kind("infra")
         self.start_dispatcher()

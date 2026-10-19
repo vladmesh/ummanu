@@ -184,3 +184,66 @@ class HostOwnerBehaviorTests(unittest.TestCase):
         if os.environ.get("UMMANU_REGENERATE_HOST_GOLDENS") == "1":
             artifact.write_text(json.dumps(rendered, indent=2, ensure_ascii=False) + "\n")
         self.assertEqual(rendered, json.loads(artifact.read_text()))
+
+    def test_infra_worker_preparation_replaces_the_packet_for_a_fresh_attempt(self):
+        fixture_host, task, record = host_owners.packet_fixture(self.root)
+        task["type"] = "infra"
+        fixture_host.sprint_reader.show.return_value["local_run_exceptions"] = []
+        fixture_host.production_runtime.product_root = str(self.root / "production")
+        fixture_host.catalog.integration_base = lambda *args: "main"
+        fixture_host.catalog.workspace_seed = lambda *args: "main"
+        placement = Path(record.workspace)
+        placement.mkdir()
+        initial = fixture_host._worker_task_doc(task, "main", "previous-attempt", 1)
+        (placement / "TASK.md").write_text(initial)
+        launch = host.LaunchedHead(handle="fixture", delivery_evidence={"turn_confirmed": True})
+        with (mock.patch.object(fixture_host, "restore_workspace", return_value=str(placement)),
+              mock.patch.object(fixture_host, "_launch", return_value=launch) as raised):
+            result = fixture_host.prepare_worker(
+                task, record.worker, record.head, attempt_id="fresh-attempt",
+                generation=1, require_existing_workspace=True,
+            )
+        emitted = (placement / "TASK.md").read_text()
+        self.assertIn("First TASK.md of this attempt: read it whole.", emitted)
+        self.assertIn("only to orchestrate an explicitly authorized remote target", emitted)
+        self.assertIn("## Applicable sprint local_run_exceptions\n\nnone", emitted)
+        self.assertIn("fresh-attempt-worker-report-done", emitted)
+        self.assertEqual(result["delivery_evidence"], {"turn_confirmed": True})
+        self.assertEqual(raised.call_args.kwargs["local_run_policy"][0]["exceptions"], [])
+        self.assertEqual(raised.call_args.kwargs["prompt_document"], str(placement / "TASK.md"))
+        self.assertIn("Read it first and follow it", raised.call_args.kwargs["launch_prompt"])
+
+    def test_infra_regeneration_preserves_the_frozen_guard_binding(self):
+        fixture_host, task, record = host_owners.packet_fixture(self.root)
+        task["type"] = "infra"
+        fixture_host.sprint_reader.show.return_value["local_run_exceptions"] = []
+        snapshot = fixture_host.local_run_snapshot_for_round(task, "worker", 3, {})
+        record.worker_local_run_snapshot = snapshot
+        record.report_decision = ""
+        fixture_host.catalog.integration_base = lambda *args: "main"
+        placement = Path(record.workspace)
+        placement.mkdir()
+        with mock.patch.object(fixture_host, "_launch", return_value=host.LaunchedHead(handle="fixture")) as raised:
+            fixture_host.restart_worker(task, record)
+        replacement = (placement / "TASK.md").read_text()
+        policy = raised.call_args.kwargs["local_run_policy"]
+        record.worker_local_run_snapshot = fixture_host.retained_local_run_snapshot_successor(task, 3, 4, snapshot)
+        record.report_generation = 4
+        record.worker_continuation.begin_retention(1.0)
+        record.worker_continuation.confirm_validation_move()
+        record.worker_continuation.begin_delivery("gate", 2.0)
+        with (mock.patch.object(fixture_host, "_head_status", return_value={
+                  "alive": True, "known": True, "stopped": True, "state": "live-match"}),
+              mock.patch.object(fixture_host, "_continuation_addressable", return_value=True),
+              mock.patch.object(fixture_host, "_prompt_adapter", return_value="codex"),
+              mock.patch.object(fixture_host, "_nudge_worker") as nudge):
+            fixture_host.resume_worker(task, record)
+        continuation = (placement / "TASK.md").read_text()
+        for document in (replacement, continuation):
+            self.assertIn("## Applicable sprint local_run_exceptions\n\nnone", document)
+            self.assertIn("Before effects, record", document)
+            self.assertIn("shell wrappers. Existing exception binding and the local Docker guard still apply.", document)
+            self.assertIn("no-candidate report's What was done and How to verify sections.", document)
+        self.assertEqual(policy, (snapshot["policy"], False))
+        self.assertEqual(record.worker_local_run_snapshot["policy"], snapshot["policy"])
+        self.assertIn("Generation 4", nudge.call_args.args[1].text)

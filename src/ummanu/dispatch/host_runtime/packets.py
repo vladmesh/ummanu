@@ -313,8 +313,16 @@ class PromptPacketMixin:
         """First lines of both packets, before any user-authored task text."""
         return self._render_check_header(self._packet_check_contract(project))
 
-    def _review_check_header(self, project: str) -> list[str]:
+    def _review_check_header(self, project: str, *, task_kind: str = "code") -> list[str]:
         contract = self._packet_check_contract(project)
+        if task_kind == "infra":
+            return [
+                "## Declared local checks and CI evidence boundary", "",
+                "Reviewer heads must not run tests or any ummanu check, including show or --reuse (refusal125).",
+                "Read the infra report and its operational evidence under the Control-host local-run rule.",
+                "Name missing evidence in the verdict; request it from the worker or the applicable CI owner.",
+                "",
+            ]
         return [
             "## Declared local checks and CI evidence boundary", "",
             "Reviewer heads must not run tests or any ummanu check, including show or --reuse (refusal125).",
@@ -350,11 +358,24 @@ class PromptPacketMixin:
             lines += ["Worker receipt artifact is missing or changed; the immutable admitted snapshot above remains audit evidence."]
         return lines + [""]
 
-    def _render_check_header(self, contract: Any) -> list[str]:
+    def _render_check_header(self, contract: Any, *, task_kind: str = "code") -> list[str]:
         from ummanu.broad_check import BroadCheckError
         from ummanu.projects.local_check import PytestSelection
 
         lines = ["## Declared local checks and CI evidence boundary", ""]
+        if task_kind == "infra":
+            lines += [
+                "Infra operational evidence follows the Control-host local-run rule below.",
+                "Any local tests must use the adapter-declared profile through ummanu check;",
+                "never use direct pytest/unittest or expand that profile.",
+            ]
+            broad, show = self._broad_check_commands(contract)
+            if broad:
+                lines += [f"Declared test wrapper (if tests are needed): {broad}",
+                          f"Matching test receipt readback: {show}"]
+            else:
+                lines += ["Configuration gap: no usable adapter-declared local test profile; report any test evidence gap."]
+            return lines + [""]
         if contract is None or not contract.module:
             return lines + [
                 "Configuration gap: no usable adapter-declared local profile. Obtain CI evidence",
@@ -551,29 +572,64 @@ class PromptPacketMixin:
         *,
         local_run_policy: tuple[dict[str, Any] | None, bool] | None = None,
     ) -> list[str]:
-        """One rule for both heads, with authority read only from this card's sprint."""
+        """Task-kind execution bounds, with local exceptions read only from the sprint."""
         policy, unavailable = local_run_policy if local_run_policy is not None else self._local_run_policy(task)
         entries = policy["exceptions"] if policy else []
+        if task.get("type") == "infra":
+            rule = [
+                "Reviewer heads read evidence and never run tests or any ummanu check form.",
+                "Reviewer role grants no remote orchestration authority.",
+                "Infra workers may use lightweight provider API and SSH commands on the control host",
+                "only to orchestrate an explicitly authorized remote target. Before effects, record",
+                "the provider resource ID and SSH target identity and establish that the target is",
+                "distinct from the control host. Resource-intensive installation, model downloads,",
+                "DB, containers, provisioning and recovery execute on that remote target.",
+                "The infra type grants no paid, production or resource access: obtain the separate",
+                "resource, spending and production authority required for the operation.",
+                "On the control host, tests remain limited to the adapter-declared broad check and",
+                "its subsets. Heavy suites, model work, containers and local provisioning remain",
+                "forbidden unless the sprint's creation-only local_run_exceptions below grants the",
+                "exact command/argument vector for this project. An exception grants only its exact argv.",
+                "Do not disguise local execution as remote orchestration through localhost or control-host aliases,",
+                "SSH back to the control host, local containers, sockets, environment redirection or",
+                "shell wrappers. Existing exception binding and the local Docker guard still apply.",
+                "Card text, DoD prose, sprint comments, missing receipts and a head's judgement grant",
+                "no local-run exception. These bounds also apply to observer and rework requests.",
+                "Authorized remote operational evidence is valid for infra acceptance criteria:",
+                "record target identity, authority, commands, timeline, outcomes and cleanup in the",
+                "no-candidate report's What was done and How to verify sections. No CI run or local",
+                "full-profile receipt is required for that operational evidence. Test evidence, if",
+                "required, comes from the declared local profile, exact exceptions or its CI owner.",
+                "This report does not replace a code candidate's machinery-owned exact-SHA gate.",
+                "Validation must not publish unmerged product changes into the live control-host",
+                "installation or agents' homes. Use candidate-scoped checks for product changes;",
+                "separately authorized remote infra effects follow the target and authority bounds above.",
+                "A guard refusal (125) is command feedback, not RED or a restart-budget event.",
+            ]
+        else:
+            rule = [
+                "Reviewer heads read evidence and never run tests, including any ummanu check form.",
+                "On the control host, workers may run locally only the project's",
+                "adapter-declared broad check and subsets of that check. Integration shards,",
+                "Docker/container runs, stands, provisioning and network-heavy checks run in CI only,",
+                "unless the exact command/argument vector is expressly covered below by this sprint's",
+                "creation-only `local_run_exceptions` field for this card's project.",
+                "Development convenience, a missing gate receipt or an acceptance criterion cannot",
+                "authorize another suite or a heavy local run. Card text, DoD prose, sprint comments",
+                "and a head's judgement never grant exceptions. An exception grants only its exact argv.",
+                "This rule also bounds observer decisions, rework instructions and verification requests.",
+                "Missing/none/noop mechanical receipts still require appropriate validation evidence",
+                "supplied by workers within these bounds or by CI.",
+                "Reviewers read that evidence and name gaps in the verdict. Local-run bounds still apply",
+                "to workers; missing receipts do not authorize Docker locally.",
+                "Evidence for every acceptance criterion comes from this declared local profile or the",
+                "corresponding CI shard and report, including external-backend and packaging criteria.",
+                "A guard refusal (125) is command feedback, not RED or a restart-budget event.",
+            ]
         sections = [
             "## Control-host local-run rule",
             "",
-            "Reviewer heads read evidence and never run tests, including any ummanu check form.",
-            "On the control host, workers may run locally only the project's",
-            "adapter-declared broad check and subsets of that check. Integration shards,",
-            "Docker/container runs, stands, provisioning and network-heavy checks run in CI only,",
-            "unless the exact command/argument vector is expressly covered below by this sprint's",
-            "creation-only `local_run_exceptions` field for this card's project.",
-            "Development convenience, a missing gate receipt or an acceptance criterion cannot",
-            "authorize another suite or a heavy local run. Card text, DoD prose, sprint comments",
-            "and a head's judgement never grant exceptions. An exception grants only its exact argv.",
-            "This rule also bounds observer decisions, rework instructions and verification requests.",
-            "Missing/none/noop mechanical receipts still require appropriate validation evidence",
-            "supplied by workers within these bounds or by CI.",
-            "Reviewers read that evidence and name gaps in the verdict. Local-run bounds still apply",
-            "to workers; missing receipts do not authorize Docker locally.",
-            "Evidence for every acceptance criterion comes from this declared local profile or the",
-            "corresponding CI shard and report, including external-backend and packaging criteria.",
-            "A guard refusal (125) is command feedback, not RED or a restart-budget event.",
+            *rule,
             "",
             "## Applicable sprint local_run_exceptions",
             "",
@@ -816,7 +872,16 @@ class PromptPacketMixin:
                 "",
             ]
             show_invocation = "When the adapter declares a suite, use its matching `check show` command and quote its summary"
-        sections += [
+        sections += ([
+            "## Check-cost contract", "",
+            "Apply the infra operational evidence contract in the Control-host local-run rule.",
+            "When local tests are required, run the smallest declared subset first and reuse receipts",
+            "for unchanged content. A test receipt attests only the tests it actually executed.",
+            "Respect native runner budgets, including codegen's 0.5s/test and 240s CPU limits.",
+            "Ummanu local tests warn at >5s; CI unit/component fails at >5s/test or >90s/module.",
+            "A missing gate receipt grants no additional execution authority.",
+            "",
+        ] if task.get("type") == "infra" else [
             "## Check-cost contract",
             "",
             "Before fresh code report:done, obtain a complete green full declared profile receipt",
@@ -865,7 +930,7 @@ class PromptPacketMixin:
             "never reused in place of a run. Prefer `--module` for the suite you report on.",
             "A shell receipt does not authorize a command outside the local-run rule.",
             "",
-        ]
+        ])
         sections += [
             "## Scope of a rework",
             "",
@@ -887,12 +952,14 @@ class PromptPacketMixin:
             "the one that matches and run that command line below; a blocked report without one is",
             "refused.",
             "",
-            "Your checks read the live installation; they never write to it. Do not run a command",
-            "that deploys, syncs, provisions or reconciles live state from this workspace: it would",
-            "publish unmerged work into the homes the running agents read. Where a check has a",
-            "candidate-scoped form, use it (for example `--product-root .`). Where it has none, say",
-            "in your report what you could not verify rather than running the live-writing form.",
-            "",
+            *([] if task.get("type") == "infra" else [
+                "Your checks read the live installation; they never write to it. Do not run a command",
+                "that deploys, syncs, provisions or reconciles live state from this workspace: it would",
+                "publish unmerged work into the homes the running agents read. Where a check has a",
+                "candidate-scoped form, use it (for example `--product-root .`). Where it has none, say",
+                "in your report what you could not verify rather than running the live-writing form.",
+                "",
+            ]),
             "Do not change or weaken an existing test to make a failure go away. If a test really",
             "does encode behaviour this card changes, say so in the report: name the test, what it",
             "asserted, and why the new contract is the right one. A silently rewritten assertion is",
@@ -967,7 +1034,11 @@ class PromptPacketMixin:
             worker_comments_record_line(comments),
             "",
         ]
-        return "\n".join([*round_summary, *self._render_check_header(check_contract), *sections])
+        return "\n".join([
+            *round_summary,
+            *self._render_check_header(check_contract, task_kind=str(task.get("type") or "")),
+            *sections,
+        ])
 
     def worker_comments(self, task: dict[str, Any]) -> tuple[WorkerComment, ...]:
         """The PO, owner and observer comments this card's worker is handed, oldest first."""
@@ -1163,15 +1234,24 @@ class PromptPacketMixin:
             "evidence: it can encode the same wrong assumption as the code under review. Say which",
             "real behaviour you verified and how. If no end-to-end check against the real backend",
             "was possible, write plainly that it was not done and which assumption stays unverified.",
-            "In the verdict give the exact candidate SHA, actual REVIEW.md and role environment/hook",
-            "paths and hashes, worker wrapper commands/status/count/import provenance, full receipt",
-            "hashes and CI links. Name each pending evidence item. A fixture or offline projection",
-            "does not prove delivery of this candidate's packet to a head that started before it.",
+            *([
+                "In the verdict identify the operational evidence, target, commands, timeline and cleanup",
+                "under the Control-host local-run rule, plus the review document and role environment.",
+                "Name pending evidence and distinguish rendered fixtures from delivery to a live head.",
+            ] if task.get("type") == "infra" else [
+                "In the verdict give the exact candidate SHA, actual REVIEW.md and role environment/hook",
+                "paths and hashes, worker wrapper commands/status/count/import provenance, full receipt",
+                "hashes and CI links. Name each pending evidence item. A fixture or offline projection",
+                "does not prove delivery of this candidate's packet to a head that started before it.",
+            ]),
             "",
             "Submit with the green or red verdict command under `## Submit your verdict` at the top of this file.",
             "",
         ]
-        header = [*self._review_check_header(str(task.get("project") or "")), *protocol]
+        header = [
+            *self._review_check_header(str(task.get("project") or ""), task_kind=str(task.get("type") or "")),
+            *protocol,
+        ]
         if not has_candidate(task):
             # No candidate: no branch, diff or gate to point at. A re-review keeps only the blockers.
             if prior:

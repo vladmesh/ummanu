@@ -408,8 +408,7 @@ class LocalRunPacketTests(unittest.TestCase):
             self.assertEqual(parsed.module_arg, list(self.contract.args))
 
     def test_reviewer_observes_heavy_run_excludes_results_and_requires_valid_evidence(self) -> None:
-        """Every card type carries the local-run sections in both packets, and the reviewer's part of
-        the rule, which classifies an observed heavy run, is one text whatever the type."""
+        """Task-kind execution bounds preserve the common reviewer disposition of excessive local runs."""
         rules = set()
         for kind in ("code", "research", "infra"):
             with self.subTest(kind=kind):
@@ -419,5 +418,11 @@ class LocalRunPacketTests(unittest.TestCase):
                     self.assertIn("\n## Applicable sprint local_run_exceptions\n", packet)
                 rule = reviewer.partition("\n## Control-host local-run rule\n")[2].partition("\n## No subagents\n")[0]
                 self.assertIn("non-blocking", rule)
-                rules.add(rule)
+                rules.add(rule.partition("An observed excessive local heavy run")[2])
+                if kind == "infra":
+                    self.assertIn("Reviewer role grants no remote orchestration authority.", rule)
+                    self.assertIn("Authorized remote operational evidence is valid for infra acceptance criteria", rule)
+                    self.assertIn("shell wrappers. Existing exception binding and the local Docker guard still apply.", rule)
+                else:
+                    self.assertIn("Evidence for every acceptance criterion comes from this declared local profile", rule)
         self.assertEqual(len(rules), 1)
