@@ -1914,49 +1914,81 @@ class SprintWriter(SprintLifecycleMixin):
         return result
 
     def charge_manual_e2e(
-        self, *, role: str, actor: str, reference: str, run: str, card: str, request_id: str | None = None
+        self, *, role: str, actor: str, reference: str, card: str, run: str | None = None,
+        stand_intent: str | None = None, request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Charge one manually dispatched e2e run of `card` to its open sprint's budget; role
-        `po` only. Keyed by the run id: a repeat charges nothing, and a spent budget refuses.
+        """PO only: charge a GitHub run or physical stand intent once against an open sprint.
+        A stand intent binds permanently to one sprint/card and proves no provisioning or execution.
         """
         self._role(role, {"po"}, actor=actor)
-        run_id = sprint_e2e.manual_run_id(run)
+        if (run is None) == (stand_intent is None):
+            raise TaskError("validation", "give exactly one of --run or --stand-intent", 2)
+        run_id = sprint_e2e.manual_run_id(run) if run is not None else None
+        if stand_intent is not None:
+            stand_intent = sprint_e2e.stand_intent_id(stand_intent)
         card = str(card or "").strip()
         if not card:
             raise TaskError("validation", "--card names the card the run belongs to; it is empty", 2)
-        if TaskReader(self.client).show(card).get("sprint") != reference:
-            raise TaskError("validation", f"{card} is not a card of {reference}", 2)
         return self._charge_manual_e2e_atomic(
             role=role,
             actor=actor,
             reference=reference,
             run_id=run_id,
+            stand_intent=stand_intent,
             card=card,
-            request_id=request_id or f"e2e-charge-{run_id}",
+            request_id=request_id or (
+                f"e2e-charge-stand-intent-{stand_intent}" if stand_intent is not None else f"e2e-charge-{run_id}"
+            ),
         )
 
     @_sql_atomic
     def _charge_manual_e2e_atomic(
-        self, *, role: str, actor: str, reference: str, run_id: str, card: str, request_id: str
+        self, *, role: str, actor: str, reference: str, run_id: str | None,
+        stand_intent: str | None, card: str, request_id: str,
     ) -> dict[str, Any]:
+        if stand_intent is not None:
+            # Caller-owned transactions skip the decorator's cross-sprint admission lock.
+            self.client._execute("SELECT pg_advisory_xact_lock(%s)", (1_600,))
         self.client._execute("SELECT ref FROM sprints WHERE ref = %s FOR UPDATE", (reference,))
-        dispatch_id = sprint_e2e.MANUAL_DISPATCH_PREFIX + run_id
+        if TaskReader(self.client).show(card).get("sprint") != reference:
+            raise TaskError("validation", f"{card} is not a card of {reference}", 2)
+        if stand_intent is not None:
+            dispatch_id = sprint_e2e.STAND_INTENT_PREFIX + stand_intent
+            payload = {"stand_intent": stand_intent, "card": card, "dispatch_id": dispatch_id}
+        else:
+            assert run_id is not None
+            dispatch_id = sprint_e2e.MANUAL_DISPATCH_PREFIX + run_id
+            payload = {"run": run_id, "card": card, "dispatch_id": dispatch_id}
         known = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
         if known is not None:
-            payload = known.get("payload") if isinstance(known.get("payload"), dict) else {}
-            if (known.get("kind"), known.get("ref"), payload.get("run"), payload.get("card")) != (
+            previous = known.get("payload") if isinstance(known.get("payload"), dict) else {}
+            same_identity = previous == payload if stand_intent is not None else (
+                previous.get("run"), previous.get("card")
+            ) == (run_id, card)
+            if (known.get("kind"), known.get("ref"), same_identity) != (
                 "e2e_charged",
                 reference,
-                run_id,
-                card,
+                True,
             ):
                 raise TaskError(
                     "validation",
                     f"request id {request_id!r} already belongs to another sprint write; a charge is "
-                    "repeated only with the same sprint, --run and --card",
+                    "repeated only with the same sprint, run or stand intent, and --card",
                     2,
                 )
-        else:
+        if stand_intent is not None:
+            bindings = self.client._query(
+                "SELECT sprint_ref, task_ref FROM sprint_e2e_charges WHERE dispatch_id = %s", (dispatch_id,)
+            )
+            if bindings and tuple(bindings[0]) != (reference, card):
+                bound_sprint, bound_card = bindings[0]
+                raise TaskError(
+                    "stand_intent_conflict",
+                    f"stand intent {stand_intent!r} is already charged to {bound_sprint}/{bound_card}; "
+                    "it cannot be rebound to another sprint or card",
+                    2,
+                )
+        if known is None:
             sprint = self.reader.show(reference)
             status = str(sprint.get("status") or "")
             if status != SprintState.OPEN.value:
@@ -1982,7 +2014,7 @@ class SprintWriter(SprintLifecycleMixin):
             actor,
             reference,
             request_id,
-            {"run": run_id, "card": card, "dispatch_id": dispatch_id},
+            payload,
             mutation,
         )
 

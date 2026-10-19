@@ -17,9 +17,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes.sprints import SprintBackendFixture, _write_project_registry
+from tests.fakes.sprints import SprintBackendFixture, SprintFixture, _write_project_registry
 from tests.observer_identity import as_observer
 from tests.sprint_close_fixtures import close_decisions
+from ummanu.board.e2e_record import E2eRun, E2eState, e2e_state
 from ummanu.data import export_board, init_layout, normalize_sprint_entity
 from ummanu.restore import (
     RestoreError,
@@ -72,6 +73,49 @@ RESUME = {
     "next_safe_step": "run the suite",
     "recorded_at": "2026-07-20T00:00:00Z",
 }
+
+
+class ManualChargeRestoreTests(SprintFixture):
+    def test_native_stand_github_and_automatic_receipts_survive_snapshot_restore_and_replay(self) -> None:
+        reference = self.writer.create(
+            role="po", actor="po", goal="Restore paid intents", reference="sprint:paid",
+            product="ummanu", issues=["issue:open"], projects=["ummanu"],
+            observer=head_choice("codex-observer"), request_id="create-paid",
+        )["sprint"]["ref"]
+        self.arrange_card_sprint("ummanu-12", reference)
+        fields = {"role": "po", "actor": "po", "reference": reference, "card": "ummanu-12"}
+        stand = self.writer.charge_manual_e2e(**fields, stand_intent="memory-restore-r1", request_id="stand")
+        github = self.writer.charge_manual_e2e(**fields, run="123", request_id="github")
+        run = E2eRun(dispatch_id="automatic-e2e-1", sha="a" * 40, repo="owner/repo", branch="main",
+                     workflow="e2e.yml", intent_at=stand["sprint"]["e2e"]["charges"][0]["at"])
+        automatic = TaskWriter(self.client, data_dir=self.tmp.name).record_e2e_intent(
+            role="dispatcher", actor="dispatcher", reference="ummanu-12", state=E2eState(runs=[run]).text(),
+            sprint=reference, dispatch_id=run.dispatch_id,
+        )
+        self.assertTrue(automatic["charged"])
+        before = self.sprint(reference)["e2e"]
+        events = self.writer.audit.events(reference, kind="e2e_charged")
+        source = Path(self.tmp.name)
+        init_layout(source)
+        export_board(source, instance_dir=self.instance, reader=TaskReader(self.client), sprint_client=self.client)
+        target = source / "recovered"
+        init_layout(target)
+        shutil.copytree(source / "board", target / "board", dirs_exist_ok=True)
+        client = self.make_target_client()
+        import_normalized_board(target, client=client, instance=self.instance)
+        restored = SprintWriter(client, data_dir=target, instance=self.instance)
+        self.assertEqual(restored.reader.show(reference)["e2e"], before)
+        self.assertEqual(restored.audit.events(reference, kind="e2e_charged"), events)
+        self.assertEqual(e2e_state(TaskReader(client).show("ummanu-12")).runs[0], run)
+        self.assertEqual(restored.charge_manual_e2e(**fields, stand_intent="memory-restore-r1", request_id="stand")["event_id"],
+                         stand["event_id"])
+        self.assertEqual(restored.charge_manual_e2e(**fields, run="123", request_id="github")["event_id"], github["event_id"])
+        self.assertEqual(restored.charge_manual_e2e(**fields, stand_intent="memory-restore-r1", request_id="stand-retry")["action"],
+                         "already_charged")
+        self.assertEqual(restored.charge_manual_e2e(**fields, run="123", request_id="github-retry")["action"], "already_charged")
+        import_normalized_board(target, client=client, instance=self.instance)
+        self.assertEqual(restored.reader.show(reference)["e2e"], before)
+        self.assertEqual(restored.audit.events(reference, kind="e2e_charged"), events)
 
 
 class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):

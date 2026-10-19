@@ -263,10 +263,14 @@ def _add_po_edit_subcommands(commands) -> None:
     _add_po_edit_arguments(switched, run_set_po_session, request_id_required=True)
     charged = commands.add_parser(
         "e2e-charge",
-        help="PO only: charge one manually dispatched e2e run to the sprint's e2e budget before the run; "
-        "a repeat of the same run charges nothing",
+        help="PO only: charge a GitHub run or precharge a physical stand intent before provisioning",
     )
-    charged.add_argument("--run", required=True, help="the workflow run URL, or its run id")
+    identity = charged.add_mutually_exclusive_group(required=True)
+    identity.add_argument("--run", help="the GitHub workflow run URL, or its numeric run id")
+    identity.add_argument(
+        "--stand-intent", help="physical stand identity before provisioning: 1-128 ASCII letters, digits, ._-; "
+        "start with a letter or digit; replay charges once for the same sprint/card",
+    )
     charged.add_argument("--card", required=True, help="the sprint card the run verifies")
     _add_po_edit_arguments(charged, run_e2e_charge)
 
@@ -666,6 +670,7 @@ def run_e2e_charge(args: argparse.Namespace) -> int:
             actor=args.actor or args.role,
             reference=args.ref,
             run=args.run,
+            stand_intent=args.stand_intent,
             card=args.card,
             request_id=args.request_id,
         ),
