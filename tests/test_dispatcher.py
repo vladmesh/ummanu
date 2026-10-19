@@ -8387,7 +8387,10 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             verdict_body = bodies / f"ummanu-verdict-ummanu-510-{record['review_baseline']}.md"
             self.assertIn(f"--body-file {verdict_body}", verdict_line)
             self.assertIn(f"--request-id {self._review_verdict_request_id('red')}", verdict_line)
-            verdict_body.write_text("reviewer verdict from the private body file", encoding="utf-8")
+            verdict_body.write_text(
+                "reviewer verdict from the private body file\nOpen blockers: BLOCKER-handoff",
+                encoding="utf-8",
+            )
 
             argv, code, errors = self._run_handed_command(verdict_line)
 
