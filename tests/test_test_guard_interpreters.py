@@ -14,6 +14,7 @@ from unittest import mock
 
 from tests.support.local_check_fixture import LocalCheckFixture, role_git_env
 from tests.support.managed_venv import guarded_product_env
+from tests.support.shell import shell_tools
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.runtime import role_env, test_guard
 
@@ -120,7 +121,16 @@ print(json.dumps({'preloaded': preloaded, 'guard': guard.__file__, 'parser_hash'
             result = self.launch(role, ["python", "-c", "import unittest, pytest; print('libraries-ok')"])
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "libraries-ok\n")
-            result = self.launch(role, ["/bin/sh", "-lc", role_env.role_shell_command(
+
+    def test_shell_refusal_ignores_hostile_startup_files(self) -> None:
+        home = self.scratch / "home"
+        home.mkdir()
+        for filename in (".profile", ".bash_profile", ".bashrc"):
+            (home / filename).write_text("printf 'startup-noise\\n' >&2\nexit 17\n")
+        self.env["HOME"] = str(home)
+        shell = shell_tools(self.scratch / "shell-bin") / "bash"
+        for role in ("worker", "reviewer"):
+            result = self.launch(role, [str(shell), "-lc", role_env.role_shell_command(
                 role, "python3 -m unittest tests.test_local.Cases.test_one", workspace=self.root)])
             self.refused(result)
 
