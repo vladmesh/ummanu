@@ -109,10 +109,11 @@ The startup fixtures replace serving and unrelated read sources and touch no soc
 runtime/backend, API/CLI lifecycle, transport and recovery checks remain in their native CI shards.
 
 `tests.test_task_protocol_owners` (unit) checks DEC-01's six task files, unique owning
-definitions and exact baseline ASTs (including decorators/defaults/annotations), operative
+definitions and exact ASTs (including decorators/defaults/annotations), operative
 instance and owner-global patches, shared error identities and recovery refusal distinctions.
 `docs/task-protocol-inventory.json` is a capture of dc84b45e source, not an independently
-executed baseline. Existing task/board, dispatcher and recovery fault suites keep their
+executed baseline; `ast_deltas` records expected AST hashes for changed contracts without replacing
+the baseline capture. Existing task/board, dispatcher and recovery fault suites keep their
 CI manifest owners. The `task-protocol-graph` workflow runs on task-owner pull requests or manual
 dispatches, using the frozen, byte-identical
 ummanu-220 research scanner against its exact dispatched SHA in CI and uploads the uncut

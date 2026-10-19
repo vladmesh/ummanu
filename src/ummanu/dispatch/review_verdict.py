@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ummanu.board.completion_evidence import has_candidate
-from ummanu.board.review_blockers import open_blockers
+from ummanu.board.review_blockers import repeated_open_blockers
 from ummanu.dispatch import attempt_accounting, e2e_stage, release_lifecycle
 from ummanu.dispatch.assessment_park import begin_park, complete_park
 from ummanu.dispatch.gate import GateResult
@@ -137,20 +137,6 @@ def advance_review_verdict(
             + (f" Repeated open blockers: {', '.join(repeated)}." if repeated else "")
         ),
     )
-
-
-def repeated_open_blockers(task: dict[str, Any]) -> tuple[str, ...]:
-    """Intersect the last two verdicts' explicit open sets only when both are RED."""
-    verdicts = [
-        comment for comment in task.get("comments") or []
-        if comment.get("marker") in {"review:red", "review:green"}
-    ]
-    if len(verdicts) < 2 or any(c["marker"] != "review:red" for c in verdicts[-2:]):
-        return ()
-    previous, current = (open_blockers(c["body"]) for c in verdicts[-2:])
-    if previous is None or current is None:
-        return ()
-    return tuple(sorted(previous & current))
 
 
 def parks_for_decision(runtime: Any, task: dict[str, Any]) -> bool:

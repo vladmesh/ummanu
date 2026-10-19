@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
@@ -75,7 +76,7 @@ from ummanu.board.production_rights import (
     touches_production as card_production,
 )
 from ummanu.board.protocol_artifacts import ArtifactOwnershipViolation, validate_rework_prerequisites
-from ummanu.board.review_blockers import open_blockers
+from ummanu.board.review_blockers import BLOCKER, open_blockers, repeated_open_blockers
 from ummanu.board.roles import (
     BOARD_ROLES,
     COMMENT_ROLES,
@@ -2219,6 +2220,16 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                     "replayed": True,
                 }
             if decision_kind is TaskDecision.REWORK:
+                named = set(re.findall(BLOCKER, body))
+                missing = [blocker for blocker in repeated_open_blockers(current) if blocker not in named]
+                if missing:
+                    raise TaskError(
+                        "validation",
+                        f"rework decision is missing repeated blocker IDs: {', '.join(missing)}. "
+                        "A repeated blocker needs a changed approach (narrowed or rejected requirement, "
+                        "deferral with an issue, structural contract) or a reslice.",
+                        2,
+                    )
                 try:
                     validate_rework_prerequisites(
                         declared_prerequisites,

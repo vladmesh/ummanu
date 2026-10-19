@@ -12,7 +12,9 @@
     "src/ummanu/board/task_protocol/rows.py",
     "src/ummanu/board/task_protocol/sprint_guard.py"
   ],
-  "ast_deltas": [],
+  "ast_deltas": {
+    "TaskWriter.decide": "f19db76f906da6894ca748f7f8ec8a3cc8a61a48349bd53e967ed4f2add917da"
+  },
   "definitions": {
     "MASQUERADE": {"old_owner": "src/ummanu/tasks.py", "old_line": 148, "owner": "src/ummanu/board/task_protocol/rows.py", "line": 39, "baseline_ast_sha256": "b63627f81c5ab1f58911aac0beb27e14dbd386a6aa28a19c44305cb5e33f8f60", "signature": null, "returns": null, "decorators": [], "old_globals": {"Role": "ummanu.board.roles.Role"}, "owning_globals": {"Role": "ummanu.board.roles.Role"}, "lexical_imports": [], "consumers": ["src/ummanu/board/task_protocol/rows.py:46:global"]},
     "admit_role": {"old_owner": "src/ummanu/tasks.py", "old_line": 151, "owner": "src/ummanu/board/task_protocol/rows.py", "line": 42, "baseline_ast_sha256": "835619910aa7679ede8e10680cf6e7b9985b4c560c00853926afe5b06766f710", "signature": "role: Role | str, actor: str, allowed: Collection[Role | str]", "returns": "Role", "decorators": [], "old_globals": {"Collection": "collections.abc.Collection", "MASQUERADE": "local:MASQUERADE", "Role": "ummanu.board.roles.Role", "TaskError": "ummanu.kernel.errors.TaskError"}, "owning_globals": {"Collection": "collections.abc.Collection", "MASQUERADE": "local:MASQUERADE", "Role": "ummanu.board.roles.Role", "TaskError": "ummanu.kernel.errors.TaskError"}, "lexical_imports": [], "consumers": ["src/ummanu/board/reference_repair.py:19:owner-import", "src/ummanu/board/task_protocol/recovery.py:974:global", "src/ummanu/product_issues.py:21:import", "src/ummanu/sprint_commands.py:42:import", "src/ummanu/sprints.py:60:owner-import", "tests/po_fake_store.py:47:import", "tests/test_kernel_import_boundary.py:173:import", "tests/test_observer_voice.py:29:import", "tests/test_po_production_rights.py:55:import"]},

@@ -875,6 +875,34 @@ class PacketHeaderTests(unittest.TestCase):
             scope,
         )
 
+    def test_structural_rework_packets_bound_repairs_and_route_impossible_requirements(self):
+        fixture = PacketFixture()
+        host = self.host(fixture)
+        for sprint in (None, "sprint:fixture"):
+            with self.subTest(sprint=sprint):
+                fixture.task["sprint"] = sprint
+                worker = host._worker_task_doc(
+                    fixture.task, "main", "attempt-1", 3, fixture.decision, record=self.record()
+                )
+                scope = " ".join(worker.split("## Scope of a rework", 1)[1].split("\n## ", 1)[0].split())
+                self.assertIn("Repair a structural decision inside its named boundary with no domain expansion.", scope)
+                self.assertIn(
+                    "Report an unbounded structural decision with `report:blocked --classification wrong_task_definition`.",
+                    scope,
+                )
+                self.assertIn("Evidence that a requirement cannot be done as written belongs in that blocked report", scope)
+                self.assertIn(
+                    "name the conflict and the decision needed from the observer, or on a card with no sprint "
+                    "from the PO that cut it.", scope,
+                )
+        reviewer = " ".join(host._review_prompt(fixture.task, "attempt-1", 4, record=self.record()).split())
+        self.assertIn("On re-review after a structural decision, audit its named boundary and the prior blocker IDs.", reviewer)
+        self.assertIn("Do not re-review unrelated unchanged diff.", reviewer)
+        self.assertIn(
+            "A new finding outside the named boundary blocks only under the blocking boundary in docs/PROTOCOLS.md",
+            reviewer,
+        )
+
     def test_no_candidate_reviewer_keeps_header_and_dispositions(self):
         fixture = PacketFixture()
         fixture.task["type"] = "research"

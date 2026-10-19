@@ -123,7 +123,7 @@ prove it; the dispatcher owns redelivery.
 {
   "selected_step": "what you are doing now",
   "selected_why": "why this specifically",
-  "rejected_alternatives": "what you considered and why you deferred it",
+  "rejected_alternatives": "each deliberately skipped path: <limit>, <when to upgrade>",
   "current_task": "the ref of the current card, or an explicit 'no active card'",
   "dod_state": "which DoD items are closed and by what evidence, and which are not",
   "next_safe_step": "what to do next if the session is cut off right now"
@@ -320,10 +320,16 @@ Record the class and evidence in the card or resume:
 - wrong architecture or card cut: close or preempt this attempt and recut differently (smaller, larger
   or another approach);
 - hardening or compatibility outside the sprint: defer it or take it to the user;
-- blockers the previous round's own repairs introduced: another round buys one more moved defect. Fix
-  the structure: name the single place that must enforce the invariant, its order and what takes
-  precedence during recovery, and require the report to show every path reaches it. Refining that rule
-  after a round is normal; a third round on the same moving defect is not.
+- a first RED: local rework;
+- a repeated blocker or a second RED of one invariant family: require a bounded structural-rework
+  contract or reslice or defer. Name the producer, the states the current reader accepts, the consumers,
+  the existing trust boundary and explicit exclusions. Cover only values the current producer emits,
+  states the current reader accepts and existing security or compatibility promises. Name the single
+  place that must enforce the invariant, its order and recovery precedence; require the report to show
+  every path inside the boundary reaches it. If the boundary is not finite, or needs a new product
+  decision or a wider trust model, reslice, defer with an issue, or cut a PO decision card. A rework
+  decision must name every repeated open ID and the changed approach: narrow or reject the requirement,
+  defer with an issue, or give the structural contract.
 
 A red review with a local defect needs no intervention. Preempt a wrong cut whose work observably breaks
 the sprint contract: name the DoD item ignored or boundary crossed; comment on the card; move it to
