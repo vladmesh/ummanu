@@ -10,9 +10,9 @@ Tests
 5. Test observable behaviour through the public seam. Why: shape tests break on refactor and protect nothing.
 6. Do not add a test that:
    - asserts a removed name, file, field, flag or wording is absent;
-   - reads checked-in docs, prompts, skills, Markdown or product source as text; runtime product output is exempt;
-   - compares a constant with its own literal, or repeats an existing test.
-   Why: deleting code and its tests and passing the suite proves a removal; a boundary is a lint rule.
+   - reads checked-in docs, prompts, skills, Markdown or product source as text (inspect.getsource, read_text of .py, grep or AST scan of src); runtime product output is exempt;
+   - compares a constant with its literal, or repeats a test.
+   Why: passing after deleting code and tests proves removal; boundaries belong in lint.
 7. Delete the tests of code you delete. Why: they either fail or keep testing nothing.
 
 Code

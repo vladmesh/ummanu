@@ -7854,6 +7854,39 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIn("Repeated open blockers: BLOCKER-contract", card["comments"][-1]["body"])
         self.assertEqual(self.host.calls.count("resume_worker"), 1)
 
+    def test_repeated_blocker_requires_named_decision_before_next_worker_round(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self.tick()
+        body = "Open blockers: BLOCKER-contract"
+        self.assertEqual(self._red_round(1, body)["to"], "assessment")
+        self._decide("rework", request_id="first-local-rework")
+        self.assertEqual(self.tick()["action"], "review-red-reused-worker")
+        self.assertEqual(self._red_round(2, body)["to"], "assessment")
+        parked = self.reader.show("ummanu-510")
+        record = self._pilot_record()
+
+        with self.assertRaisesRegex(TaskError, "missing repeated blocker IDs: BLOCKER-contract") as raised:
+            self._decide("rework", "Fix the invariant again.", request_id="changed-approach")
+
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertEqual(self.reader.show("ummanu-510"), parked)
+        self.assertEqual(self._pilot_record(), record)
+        self.tick()
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "assessment")
+        self.assertEqual(self.host.calls.count("resume_worker"), 1)
+
+        decision = "BLOCKER-contract: structural contract: enforce the invariant at the current reader."
+        self._decide("rework", decision, request_id="changed-approach")
+        self.assertEqual(self.reader.show("ummanu-510")["comments"][-1]["marker"], "decision:rework")
+        self.assertEqual(self.tick()["action"], "review-red-reused-worker")
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "in_progress")
+        self.assertEqual(self.host.calls.count("resume_worker"), 2)
+        self._assert_one_generation(3)
+        instruction = self._task_document().split("## Observer rework decision to follow", 1)[1].split("\n## ", 1)[0]
+        self.assertIn(decision, instruction)
+        self.assertEqual(self._pilot_record()["report_decision"], decision)
+
     def test_third_red_review_blocks_a_card_with_no_observer(self) -> None:
         """Criterion: a card nobody decides for consumes a bounded number of rounds and stops.
 

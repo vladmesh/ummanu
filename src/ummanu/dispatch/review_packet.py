@@ -312,6 +312,10 @@ def render_review_evidence(
         "Prior blocker dispositions (reported fixed status is not automatic GREEN):",
         evidence.diagnostic,
         "",
+        "On re-review after a structural decision, audit its named boundary and the prior blocker IDs.",
+        "Do not re-review unrelated unchanged diff. A new finding outside the named boundary blocks",
+        "only under the blocking boundary in docs/PROTOCOLS.md, Code style in the worker and review packets.",
+        "",
     ]
     statuses = dispositions(evidence)
     reviewer_ids = set(re.findall(BLOCKER, evidence.findings))

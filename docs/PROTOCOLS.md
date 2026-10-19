@@ -2932,6 +2932,26 @@ round. The reason names the repeated IDs and says the PO that cut the card decid
 and its wording. Only the terminals stop; the workspace and branch are kept. With an observer the
 card parks in Assessment as usual, with the repeated IDs added to its move reason.
 
+`task decide --kind rework` refuses a body that omits any repeated open ID, listing the missing IDs
+in a validation error before recording a decision. A repeated blocker needs a changed approach:
+narrow or reject the requirement, defer with an issue, give a structural contract, or reslice.
+Accept, reslice and rework without a repeat are unaffected; intake checks ID coverage, not substance.
+
+A first RED stays a local rework. After a repeated blocker or a second RED of one invariant family,
+the observer gives a finite structural-rework contract or reslices or defers. The contract names the
+producer, the states the current reader accepts, the consumers, the existing trust boundary and
+explicit exclusions. It covers only values the current producer emits, states the current reader
+accepts and existing security or compatibility promises; it names the single invariant enforcement
+point, its order and recovery precedence. If that boundary is not finite, or needs a new product
+decision or a wider trust model, reslice, defer with an issue, or cut a PO decision card.
+
+The worker repairs inside the named boundary with no domain expansion. An unbounded structural
+decision, or evidence that a requirement cannot be done as written, goes into
+`report:blocked --classification wrong_task_definition`, naming the conflict and the decision needed
+from the observer, or on a card with no sprint from the PO that cut it. Re-review audits the named
+boundary and prior IDs without re-reviewing unrelated unchanged diff. A new finding outside that
+boundary blocks only under [the blocking boundary](#code-style-in-the-worker-and-review-packets).
+
 A card with no observer (no sprint, a sprint declaring `none`, a closed sprint, or an unreadable sprint
 board) is bounded by a ceiling on substantive red reviews. The count is the card's own `review:red`
 comments (a retried verdict write dedupes on its request id). Red mechanical gates and red CI rollups

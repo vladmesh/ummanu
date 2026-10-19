@@ -3867,6 +3867,70 @@ class AssessmentStateTests(CardStoreCase):
         )
         self.assertEqual(self.writer.audit.events("ummanu-468", kind="card.decided")[0]["data"]["decision"], "rework")
 
+    def test_rework_names_every_repeated_id_and_refusal_keeps_request_available(self) -> None:
+        self._park()
+        self.reserve_project()
+        for index, ids in enumerate(("BLOCKER-a, BLOCKER-b, BLOCKER-closed", "BLOCKER-a, BLOCKER-b, BLOCKER-new")):
+            self.writer.verdict(
+                role="reviewer", actor="reviewer", reference="ummanu-468", kind="red",
+                body=f"Open blockers: {ids}", request_id=f"repeat-red-{index}",
+            )
+        before = self.writer.reader.show("ummanu-468")
+        for body, missing in (("Try again", "BLOCKER-a, BLOCKER-b"), ("BLOCKER-a BLOCKER-b-extra", "BLOCKER-b")):
+            with self.subTest(body=body), self.assertRaises(TaskError) as raised:
+                self.writer.decide(
+                    role="observer", actor="observer", reference="ummanu-468", kind="rework",
+                    body=body, request_id="repeat-disposition",
+                )
+            self.assertEqual(raised.exception.code, "validation")
+            self.assertIn(f"missing repeated blocker IDs: {missing}.", raised.exception.message)
+            self.assertIn("changed approach", raised.exception.message)
+            self.assertIn("narrowed or rejected requirement", raised.exception.message)
+            self.assertIn("deferral with an issue, structural contract) or a reslice", raised.exception.message)
+            self.assertEqual(self.writer.reader.show("ummanu-468"), before)
+            self.assertEqual(self.writer.audit.events("ummanu-468", kind="card.decided"), [])
+
+        result = self.writer.decide(
+            role="observer", actor="observer", reference="ummanu-468", kind="rework",
+            body="BLOCKER-a and BLOCKER-b: repair inside the named structural boundary.",
+            request_id="repeat-disposition",
+        )
+        self.assertFalse(result["replayed"])
+        self.assertEqual(len(self.writer.audit.events("ummanu-468", kind="card.decided")), 1)
+
+    def test_repeated_ids_do_not_restrict_accept_or_reslice(self) -> None:
+        self.reserve_project()
+        for index in range(2):
+            self.writer.verdict(
+                role="reviewer", actor="reviewer", reference="ummanu-468", kind="red",
+                body="Open blockers: BLOCKER-contract", request_id=f"repeat-red-{index}",
+            )
+        for kind in ("accept", "reslice"):
+            with self.subTest(kind=kind):
+                self._park(request_id=f"park-{kind}")
+                result = self._decide(kind)
+                self.assertFalse(result["replayed"])
+
+    def test_rework_without_repeated_ids_needs_no_blocker_name(self) -> None:
+        self.reserve_project()
+        for index, (kind, body) in enumerate((
+            ("red", "Open blockers: BLOCKER-old"),
+            ("red", "Open blockers: BLOCKER-current"),
+            ("green", "Complete"),
+            ("red", "Open blockers: BLOCKER-current"),
+        )):
+            self.writer.verdict(
+                role="reviewer", actor="reviewer", reference="ummanu-468", kind=kind,
+                body=body, request_id=f"verdict-{index}",
+            )
+            with self.subTest(index=index):
+                self._park(request_id=f"park-{index}")
+                result = self.writer.decide(
+                    role="observer", actor="observer", reference="ummanu-468", kind="rework",
+                    body="Repair the local finding.", request_id=f"local-rework-{index}",
+                )
+                self.assertFalse(result["replayed"])
+
     def test_decide_cli_persists_declared_protocol_prerequisites(self) -> None:
         self._park()
         data_dir = Path(self.tmpdir.name) / "cli"
