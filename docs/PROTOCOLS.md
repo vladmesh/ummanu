@@ -2973,7 +2973,8 @@ rejected SHA stay inside their attempt. A return to Ready followed by a new clai
 number comes from the journal, so it survives a lost record and a restore. Both an operator retry of a
 blocked card and a preempt or requeue of a live card count as a return to Ready: the dispatcher issues a
 new attempt id then (so the next claim is not answered by the old committed claim) and stops the previous
-attempt's heads.
+attempt's heads. A previous head whose stop is unconfirmed makes the claim the claim-skip
+`old-head-stop-unconfirmed`, naming that run and the refusal; the card stays in Ready.
 
 ```json
 {"kind": "routing", "ref": "PROJECT-N", "payload": {

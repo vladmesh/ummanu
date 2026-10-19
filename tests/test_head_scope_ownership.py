@@ -389,6 +389,57 @@ class OwnershipTests(unittest.TestCase):
             owner.stop_and_prove_empty()
         self.assertFalse(ScopedHeadLifecycle.read_owner(owner.directory)["cleanup_complete"])
 
+    def ownerless_run(self, run_id: str, *kinds: str) -> HeadRun:
+        """A scoped run whose owner record is gone, its journal holding `kinds` in order."""
+        directory = self.root / run_id
+        directory.mkdir()
+        if kinds:
+            with JournalWriter(directory / protocol.JOURNAL_NAME, run_id) as journal:
+                for kind in kinds:
+                    journal.append(kind, head_pid=222)
+        (directory / protocol.PID_FILE_NAME).write_text("{}")
+        return HeadRun(run_id=run_id, spec=HeadSpec.from_profile("fixture", {"adapter": "codex"}),
+                       workspace=str(self.root), task_ref=TaskRef.card("card:fixture"), role="reviewer",
+                       scope_generation="lost-generation")
+
+    def test_ownerless_run_whose_journal_shows_its_exit_is_stopped_without_a_signal(self) -> None:
+        run = self.ownerless_run("ended", RUN_STARTED, RUN_EXITED)
+        unit = self.root / "cgroups" / "system.slice" / scope_unit(run.run_id)
+        unit.mkdir(parents=True)
+        (unit / "cgroup.events").write_text("populated 0\n")
+        runtime = LocalPtyHeadRuntime(self.root, head_process_status=lambda *a, **k: {"state": "dead"},
+                                      stop_timeout=0)
+        with mock.patch.object(runtime, "_ask_to_stop") as socket, \
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run") as backend:
+            stopped = runtime.stop(run, StopInitiator(actor="fixture"))
+        self.assertTrue(stopped.ok, stopped.reason)
+        self.assertTrue(stopped.run.settled)
+        socket.assert_not_called()
+        backend.assert_not_called()
+
+    def test_ownerless_run_without_present_proof_of_its_end_still_refuses(self) -> None:
+        cases = {
+            "never-exited": ((RUN_STARTED,), "dead", None),
+            "restarted-after-exit": ((RUN_STARTED, RUN_EXITED, RUN_STARTED), "dead", None),
+            "live-identity": ((RUN_STARTED, RUN_EXITED), "live-match", None),
+            "populated-scope": ((RUN_STARTED, RUN_EXITED), "dead", "populated 1\n"),
+        }
+        for run_id, (kinds, identity, membership) in cases.items():
+            with self.subTest(run_id):
+                run = self.ownerless_run(run_id, *kinds)
+                if membership is not None:
+                    unit = self.root / "cgroups" / "system.slice" / scope_unit(run_id)
+                    unit.mkdir(parents=True)
+                    (unit / "cgroup.events").write_text(membership)
+                runtime = LocalPtyHeadRuntime(
+                    self.root, head_process_status=lambda *a, state=identity, **k: {"state": state}, stop_timeout=0
+                )
+                with mock.patch.object(runtime, "_ask_to_stop") as socket:
+                    stopped = runtime.stop(run, StopInitiator(actor="fixture"))
+                self.assertFalse(stopped.ok)
+                self.assertIn("lost its owner", stopped.reason)
+                socket.assert_not_called()
+
     def test_unreadable_membership_cannot_settle_exact_generation(self) -> None:
         owner = self.owner("unreadable-membership")
         membership = self.membership(owner)
