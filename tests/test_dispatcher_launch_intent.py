@@ -805,6 +805,8 @@ class LaunchIntentTests(unittest.TestCase):
         )
 
     def verdict(self, kind: str, body: str, request_id: str) -> None:
+        if kind == "red":
+            body += "\nOpen blockers: BLOCKER-fixture"
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
@@ -4252,7 +4254,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             actor="reviewer",
             reference=REF,
             kind="red",
-            body="needs work",
+            body="needs work\nOpen blockers: BLOCKER-fixture",
             request_id="verdict-red",
         )
         self.tick()  # the verdict parks the card

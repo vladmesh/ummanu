@@ -182,3 +182,20 @@ class ClaimBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(launch.call_args.args[2].attempt_id, "old-attempt")
         self.assertEqual(self.payload, {})
+
+    def test_repeated_review_block_requeue_claims_a_new_attempt_on_the_retained_workspace(self):
+        self.runtime.audit.events.return_value = [self.block("red-review-repeated-blockers")]
+        with mock.patch.object(claim, "launch_worker_after_claim", return_value={"status": "ok"}) as launch:
+            outcome = claim.claim_ready_task(
+                self.runtime, self.task, self.records, self.payload, "old-attempt"
+            )
+        self.assertEqual(outcome["status"], "ok")
+        record = self.records["sample-1"]
+        self.assertNotEqual(record.attempt_id, "old-attempt")
+        self.assertEqual(
+            self.runtime.writer.claim.call_args.kwargs["request_id"],
+            attempt_request_id(record.attempt_id, "claim", "sample-1"),
+        )
+        self.assertEqual(self.payload["attempts"][0]["attempt_id"], record.attempt_id)
+        launch.assert_called_once()
+        self.assertTrue(launch.call_args.kwargs["require_existing_workspace"])

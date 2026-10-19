@@ -2918,7 +2918,19 @@ instance file. An unresolvable data directory is a usage error. The `data`, `bac
 commands skip `UMMANU_DATA_DIR` on purpose: they write the data plane of the installation `--instance`
 names, and every role head inherits the variable pointing at the live one.
 
-### The no-observer ceiling
+### Repeated blockers and the no-observer ceiling
+
+A RED verdict carries exactly one line `Open blockers: BLOCKER-a, BLOCKER-b`, with at least one
+stable ID listing every blocker still open after the round, new and retained. Closed and
+observer-rejected IDs are excluded. Verdict intake refuses a RED without this line; GREEN is
+unchanged. A repeat is an ID in both the current RED's line and the immediately previous verdict's
+line, only when that verdict is also RED. A GREEN or a previous RED without the line breaks the
+comparison; historical prose does not supply an open set.
+
+A repeated blocker on a card with no observer moves it to Blocked instead of opening another worker
+round. The reason names the repeated IDs and says the PO that cut the card decides between its goal
+and its wording. Only the terminals stop; the workspace and branch are kept. With an observer the
+card parks in Assessment as usual, with the repeated IDs added to its move reason.
 
 A card with no observer (no sprint, a sprint declaring `none`, a closed sprint, or an unreadable sprint
 board) is bounded by a ceiling on substantive red reviews. The count is the card's own `review:red`
@@ -3430,7 +3442,8 @@ Validate; see [Rejected SHAs and gate infrastructure reruns](#rejected-shas-and-
 A substantive red mechanical gate opens the rework directly. A red review on a card whose sprint
 declares a concrete observer parks it in Assessment once the reviewer's stop is confirmed, and the
 transition runs on the tick that performs a recorded `rework` decision. A red review on a card with no
-observer opens the rework directly after the confirmed stop, up to the no-observer ceiling. Nothing else
+observer opens the rework directly after the confirmed stop unless
+[repeated blockers or the no-observer ceiling](#repeated-blockers-and-the-no-observer-ceiling) stop it. Nothing else
 moves a card to In progress for rework. The transition order:
 
 1. The red intent — phase, baseline of the report it closes, reserved generation, opening observer

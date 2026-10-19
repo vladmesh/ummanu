@@ -217,7 +217,7 @@ class LegacyRecordBlocksTheCardTests(DispatcherRuntimeFixture, unittest.TestCase
             actor="reviewer",
             reference="ummanu-510",
             kind="red",
-            body="fix it",
+            body="fix it\nOpen blockers: BLOCKER-fixture",
             request_id="review-red",
         )
 

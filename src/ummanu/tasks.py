@@ -75,6 +75,7 @@ from ummanu.board.production_rights import (
     touches_production as card_production,
 )
 from ummanu.board.protocol_artifacts import ArtifactOwnershipViolation, validate_rework_prerequisites
+from ummanu.board.review_blockers import open_blockers
 from ummanu.board.roles import (
     BOARD_ROLES,
     COMMENT_ROLES,
@@ -2064,6 +2065,13 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
     ) -> dict[str, Any]:
         role = self._role(role, {Role.REVIEWER}, actor=actor)
         body = self._redact_for_board(body)
+        if kind == "red" and open_blockers(body) is None:
+            raise TaskError(
+                "validation",
+                "a red verdict requires exactly one line listing at least one open blocker: "
+                "Open blockers: BLOCKER-a, BLOCKER-b",
+                2,
+            )
         if kind not in {"green", "red"} or not body.strip():
             raise TaskError("validation", "verdicts require a non-empty body", 2)
         current = self.reader.show(reference)

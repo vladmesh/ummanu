@@ -788,6 +788,7 @@ def _claim_terminal_paths(runtime: Any, ref: str, attempt_id: str) -> tuple[bool
         "review-freeze-red-blocked",
         "review-inventory-blocked",
         "review-wait-stall",
+        "red-review-repeated-blockers",
         "stale-done-rework-blocked",
     )
     # A card refused at admission never had a workspace, so coming back to Ready is a fresh

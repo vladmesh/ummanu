@@ -173,7 +173,7 @@ class IssueB5195041LegacyIdlePathTests(LegacyPathTests):
             actor="reviewer",
             reference=CARD_REF,
             kind="red",
-            body="fix it",
+            body="fix it\nOpen blockers: BLOCKER-fixture",
             request_id="review-red",
         )
         parked = self.tick()

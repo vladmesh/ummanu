@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ummanu.board.completion_evidence import has_candidate
+from ummanu.board.review_blockers import open_blockers
 from ummanu.dispatch import attempt_accounting, e2e_stage, release_lifecycle
 from ummanu.dispatch.assessment_park import begin_park, complete_park
 from ummanu.dispatch.gate import GateResult
@@ -95,14 +96,15 @@ def advance_review_verdict(
     # Preserve the verdict as evidence. The packet renderer supplies its data boundary;
     # flattening/truncating here loses stable IDs and their relationships permanently.
     record.previous_blockers = _last_review_red_body(task) or ""
+    repeated = repeated_open_blockers(task)
     if not parks_for_decision(runtime, task):
         # No observer to release it: the verdict acts on its own tick, and the worker that
         # wrote the code is still suspended, so the verdict goes to that conversation.
-        # Except at the ceiling: a card nobody watches has to stop asking for more rounds.
+        # A repeat or the ceiling leaves the decision with the PO that cut the card.
         reds = _red_review_count(task)
-        if reds >= RED_REVIEW_CEILING:
-            return block_red_review_ceiling(
-                runtime, task, record, records, payload, attempt_id, reds=reds
+        if repeated or reds >= RED_REVIEW_CEILING:
+            return block_unobserved_red_review(
+                runtime, task, record, records, payload, attempt_id, reds=reds, repeated=repeated
             )
         return _begin_red_transition(
             runtime,
@@ -132,8 +134,23 @@ def advance_review_verdict(
             "review:red. The card is parked in Assessment: the reviewer is stopped and "
             "the worker of this round is held, waiting for an accept, rework or reslice "
             "decision."
+            + (f" Repeated open blockers: {', '.join(repeated)}." if repeated else "")
         ),
     )
+
+
+def repeated_open_blockers(task: dict[str, Any]) -> tuple[str, ...]:
+    """Intersect the last two verdicts' explicit open sets only when both are RED."""
+    verdicts = [
+        comment for comment in task.get("comments") or []
+        if comment.get("marker") in {"review:red", "review:green"}
+    ]
+    if len(verdicts) < 2 or any(c["marker"] != "review:red" for c in verdicts[-2:]):
+        return ()
+    previous, current = (open_blockers(c["body"]) for c in verdicts[-2:])
+    if previous is None or current is None:
+        return ()
+    return tuple(sorted(previous & current))
 
 
 def parks_for_decision(runtime: Any, task: dict[str, Any]) -> bool:
@@ -404,7 +421,7 @@ def read_merge_gate(
     return None, result
 
 
-def block_red_review_ceiling(
+def block_unobserved_red_review(
     runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,
@@ -413,14 +430,22 @@ def block_red_review_ceiling(
     attempt_id: str,
     *,
     reds: int,
+    repeated: tuple[str, ...],
 ) -> dict[str, Any]:
-    """The last red review a card with no observer gets: Blocked instead of another round.
-
-    The verdict is still recorded against the heads that earned it; what does not happen is the red
-    transition. The workspace's terminals are stopped rather than the workspace removed, so the
-    checkout and the branch stay where the last round left them.
-    """
+    """Stop an unobserved RED at a repeat or the ceiling, keeping its workspace and branch."""
     runtime._record_verdict_routing(task["ref"], record, "red")
+    reason = (
+        f"review:red. Repeated open blockers: {', '.join(repeated)}. The card is Blocked "
+        "instead of opening another worker round. The PO that cut the card decides between "
+        "the card's goal and its wording. The workspace and the branch are kept as the last "
+        "round left them."
+        if repeated else
+        f"review:red. This card has now collected {reds} substantive red reviews and its "
+        f"sprint has no observer to decide for it, so the no-observer ceiling of "
+        f"{RED_REVIEW_CEILING} is reached: the card is Blocked instead of opening another "
+        f"worker round. The workspace and the branch are kept as the last round left "
+        f"them; unblock the card to continue."
+    )
     return release_lifecycle.block_merge_path(runtime,
         task,
         record,
@@ -428,14 +453,8 @@ def block_red_review_ceiling(
         payload,
         attempt_id,
         blocked_reason="review",
-        action="red-review-ceiling",
-        reason=(
-            f"review:red. This card has now collected {reds} substantive red reviews and its "
-            f"sprint has no observer to decide for it, so the no-observer ceiling of "
-            f"{RED_REVIEW_CEILING} is reached: the card is Blocked instead of opening another "
-            f"worker round. The workspace and the branch are kept as the last round left "
-            f"them; unblock the card to continue."
-        ),
+        action="red-review-repeated-blockers" if repeated else "red-review-ceiling",
+        reason=reason,
         step="review",
-        outcome="red review ceiling reached",
+        outcome="repeated review blockers" if repeated else "red review ceiling reached",
     )
