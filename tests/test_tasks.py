@@ -1168,7 +1168,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             actor="r",
             reference="ummanu-468",
             kind="red",
-            body=ordinary,
+            body=ordinary + "\nOpen blockers: BLOCKER-fixture",
             request_id="ordinary-long-verdict",
         )
 
@@ -5678,7 +5678,7 @@ class RequestIdOwnershipTests(RequestIdOwnershipFixture):
                 actor="r",
                 reference="ummanu-468",
                 kind="red",
-                body="the gate is red",
+                body="the gate is red\nOpen blockers: BLOCKER-fixture",
                 request_id="round-1",
             )
 

@@ -8,10 +8,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from ummanu.board.audit_contract import is_protocol_event
+from ummanu.board.review_blockers import BLOCKER
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id
 from ummanu.tasks import assessment_resolution, specification_revision
-
-BLOCKER = r"BLOCKER-[A-Za-z0-9][A-Za-z0-9_-]*"
 
 
 def data_block(body: str) -> list[str]:

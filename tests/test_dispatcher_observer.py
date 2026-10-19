@@ -453,7 +453,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             actor="reviewer",
             reference="ummanu-510",
             kind="red",
-            body="guarded budget event",
+            body="guarded budget event\nOpen blockers: BLOCKER-fixture",
             request_id="guard-red-review",
         )
         with unfiltered_audit_reads_raise() as violations:
@@ -3500,7 +3500,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             actor="reviewer",
             reference="ummanu-510",
             kind="red",
-            body="fix it",
+            body="fix it\nOpen blockers: BLOCKER-fixture",
             request_id="red-review",
         )
         first = self.runtime.production_tick()
@@ -3671,7 +3671,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             actor="reviewer",
             reference="ummanu-510",
             kind="red",
-            body="later budget event",
+            body="later budget event\nOpen blockers: BLOCKER-fixture",
             request_id="later-red-review",
         )
 
@@ -4878,7 +4878,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             actor="reviewer",
             reference="ummanu-510",
             kind="red",
-            body="fix it",
+            body="fix it\nOpen blockers: BLOCKER-fixture",
             request_id="red-review-first-sprint",
         )
 
@@ -4931,7 +4931,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             actor="reviewer",
             reference="ummanu-511",
             kind="red",
-            body="needs work",
+            body="needs work\nOpen blockers: BLOCKER-fixture",
             request_id="rework-red-verdict",
         )
 
@@ -4961,7 +4961,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             actor="reviewer",
             reference="ummanu-510",
             kind="red",
-            body="fix it",
+            body="fix it\nOpen blockers: BLOCKER-fixture",
             request_id="red-first-sprint",
         )
         self.charge("ummanu-510", "blocked-first-sprint")

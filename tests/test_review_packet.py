@@ -755,6 +755,9 @@ class PacketHeaderTests(unittest.TestCase):
         self.assertIn("source_event: observer-decision-1", reviewer)
         self.assertIn("BLOCKER-later: deferred; issue: issue:abc123", reviewer)
         self.assertIn("перенести в интеграционный шард", reviewer)
+        self.assertIn("Include exactly one line `Open blockers: BLOCKER-a, BLOCKER-b` with at least one ID.", reviewer)
+        self.assertIn("List every ID still blocking after this round, new and retained; exclude closed and", reviewer)
+        self.assertIn("observer-rejected IDs from that line.", reviewer)
 
     def test_a_long_re_review_opens_with_the_verdict_commands_and_references_the_full_evidence(self):
         fixture = PacketFixture()

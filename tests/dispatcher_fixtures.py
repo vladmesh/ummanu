@@ -264,13 +264,16 @@ class DispatcherRuntimeFixture:
         )
 
     def _review_red(self, request_id: str = "", body: str = "fix the hermetic test") -> None:
+        request_id = request_id or self._review_verdict_request_id("red")
+        if "Open blockers:" not in body:
+            body += "\nOpen blockers: BLOCKER-" + hashlib.sha256(request_id.encode()).hexdigest()[:12]
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
             reference="ummanu-510",
             kind="red",
             body=body,
-            request_id=request_id or self._review_verdict_request_id("red"),
+            request_id=request_id,
         )
 
     def _review_verdict_request_id(self, kind: str) -> str:

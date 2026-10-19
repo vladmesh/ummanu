@@ -1670,7 +1670,7 @@ Per sprint: the declared observer and its bound writes, the observer fence when 
 the budget counter and hard stop, and the claim suppression a blocked card causes.
 
 A sprint opened with `--observer none` has no observer at all: no resume entries, no parking; its
-cards are bounded by the [no-observer ceiling](PROTOCOLS.md#the-no-observer-ceiling). Plan it as work a
+cards stop at [repeated blockers or the no-observer ceiling](PROTOCOLS.md#repeated-blockers-and-the-no-observer-ceiling). Plan it as work a
 person checks on.
 
 ### Rolling back to one open sprint
