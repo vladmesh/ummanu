@@ -803,6 +803,75 @@ class PacketHeaderTests(unittest.TestCase):
                 )
                 self.assertEqual("`BLOCKER-style-S<n>`" in reviewer, code)
 
+    def test_reviewer_receives_one_blocking_boundary_and_tail_issue_instruction(self):
+        fixture = PacketFixture()
+        reviewer = self.host(fixture)._review_prompt(fixture.task, "attempt-1", 4, record=self.record())
+        text = " ".join(reviewer.split())
+        self.assertEqual(text.count("Apply the blocking boundary"), 1)
+        for ground in (
+            "a path named by the card AC or sprint DoD",
+            "a value the current producer emits or a state the current reader accepts",
+            "a regression of existing behaviour",
+            "a security or data-loss outcome on a reachable path",
+            "missing mandatory evidence",
+        ):
+            with self.subTest(ground=ground):
+                self.assertIn(ground, text)
+        self.assertIn(
+            "A finding needing only damaged or hand-edited input from a trusted role, a crash or race window, "
+            "a historical format absent from the live installation, or behaviour the AC do not promise is a "
+            "non-blocking observation with a proposed tail-issue line.",
+            text,
+        )
+        self.assertIn(
+            "If such an edge can lose data or breach security, it blocks only for a fail-closed refusal, "
+            "not a new branch of logic.",
+            text,
+        )
+        self.assertIn("state the concrete reachable scenario (except S1-S4)", text)
+        self.assertIn(
+            "A violation of S1-S4 is a RED blocker `BLOCKER-style-S<n>` with file:line; it needs no runtime scenario.",
+            text,
+        )
+
+    def test_generated_packets_exempt_runtime_output_and_synthetic_fixture_data_from_style_blockers(self):
+        fixture = PacketFixture()
+        host = self.host(fixture)
+        reviewer = host._review_prompt(fixture.task, "attempt-1", 4, record=self.record())
+        style = " ".join(reviewer.split("## Style checklist", 1)[1].split())
+        self.assertIn("reads checked-in docs, prompts, skills or Markdown, or reads product source as text", style)
+        self.assertIn(
+            "Runtime output the product generates and delivers (worker TASK.md, REVIEW.md, rendered reports) is exempt.",
+            style,
+        )
+        self.assertIn(
+            "References to real cards, sprints, issues, PRs or dates in code, comments, docstrings or test names.",
+            style,
+        )
+        self.assertIn(
+            "Synthetic fixture values fed as data to the system under test (refs, sprint ids, timestamps) are exempt.",
+            style,
+        )
+        worker = host._worker_task_doc(fixture.task, "main", "attempt-1", 3, fixture.decision, record=self.record())
+        self.assertIn("reads checked-in docs, prompts, skills, Markdown or product source as text", worker)
+        self.assertIn("runtime product output is exempt", worker)
+        self.assertIn("No real work-item ids or dates in code, comments, docstrings or test names", worker)
+        self.assertIn("synthetic fixture data is exempt", worker)
+
+    def test_worker_rework_owes_no_observations_and_escalates_unbounded_acceptance_criteria(self):
+        fixture = PacketFixture()
+        worker = self.host(fixture)._worker_task_doc(
+            fixture.task, "main", "attempt-1", 3, fixture.decision, record=self.record()
+        )
+        scope = " ".join(worker.split("## Scope of a rework", 1)[1].split("\n## ", 1)[0].split())
+        self.assertIn("Use the blocking boundary in docs/PROTOCOLS.md", scope)
+        self.assertIn("A non-blocking observation is not owed in the rework.", scope)
+        self.assertIn(
+            "If AC demand covering every edge, report:blocked with classification wrong_task_definition "
+            "and name the boundary decision needed.",
+            scope,
+        )
+
     def test_no_candidate_reviewer_keeps_header_and_dispositions(self):
         fixture = PacketFixture()
         fixture.task["type"] = "research"
