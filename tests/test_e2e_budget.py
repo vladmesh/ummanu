@@ -697,8 +697,163 @@ class SprintBudgetEntityTests(SprintFixture):
         self.assertEqual(self.sprint("sprint:13")["e2e"]["summary"], "e2e: 0 of 3")
 
 
-    def charge(self, run: str, *, card: str = "ummanu-12", reference: str = "sprint:14", **fields: Any) -> dict[str, Any]:
+    def charge(self, run: str | None = None, *, card: str = "ummanu-12", reference: str = "sprint:14", **fields: Any) -> dict[str, Any]:
         return self.writer.charge_manual_e2e(role="po", actor="po", reference=reference, run=run, card=card, **fields)
+
+    def test_stand_cli_precharges_once_and_preserves_typed_audit_and_github_namespace(self) -> None:
+        self._create(goal="physical stand", reference="sprint:14", e2e_budget=2)
+        self.arrange_card_sprint("ummanu-12", "sprint:14")
+        code, output, errors = self.cli(
+            "sprint", "e2e-charge", "--ref", "sprint:14", "--role", "po", "--stand-intent", "123",
+            "--card", "ummanu-12",
+        )
+        self.assertEqual(code, 0, errors)
+        first = json.loads(output)
+        self.assertEqual(self.charge(stand_intent="123")["event_id"], first["event_id"])
+        self.assertEqual(self.charge(stand_intent="123", request_id="retry")["action"], "already_charged")
+        [event] = self.writer.audit.events("sprint:14", kind="e2e_charged")
+        self.assertEqual(event["payload"], {"stand_intent": "123", "card": "ummanu-12", "dispatch_id": "stand-intent-123"})
+        self.charge("https://github.com/owner/repo/actions/runs/123")
+        self.assertEqual(self.charge("123", request_id="github-retry")["action"], "already_charged")
+        code, output, errors = self.cli("sprint", "show", "--ref", "sprint:14")
+        self.assertEqual(code, 0, errors)
+        shown = json.loads(output)["e2e"]
+        self.assertEqual((shown["budget"], shown["used"]), (2, 2))
+        self.assertEqual({item["dispatch_id"] for item in shown["charges"]}, {"stand-intent-123", "manual-run-123"})
+        self.assertEqual(len(self.writer.audit.events("sprint:14", kind="e2e_charged")), 2)
+
+    def test_stand_request_conflicts_and_card_rebinding_refuse_without_spending(self) -> None:
+        other = TaskWriter(self.client, data_dir=self.tmp.name).create(
+            role="po", actor="po", project="ummanu", task_type="code", title="other", target="ready",
+            request_id="other-card",
+        )["task"]["ref"]
+        self._create(goal="physical stand", reference="sprint:14")
+        for card in ("ummanu-12", other):
+            self.arrange_card_sprint(card, "sprint:14")
+        first = self.charge(stand_intent="memory-restore-r1", request_id="precharge")
+        for fields, code in (
+            ({"stand_intent": "other", "request_id": "precharge"}, "validation"),
+            ({"run": "123", "request_id": "precharge"}, "validation"),
+            ({"stand_intent": "memory-restore-r1", "card": other, "request_id": "precharge"}, "validation"),
+            ({"stand_intent": "memory-restore-r1", "card": other, "request_id": "rebind"}, "stand_intent_conflict"),
+        ):
+            with self.subTest(fields=fields), self.assertRaises(TaskError) as raised:
+                self.charge(**fields)
+            self.assertEqual(raised.exception.code, code)
+        self.assertEqual(self.sprint("sprint:14")["e2e"], first["sprint"]["e2e"])
+        self.assertEqual(len(self.writer.audit.events("sprint:14", kind="e2e_charged")), 1)
+
+    def test_stand_identity_cannot_spend_a_second_sprint_budget(self) -> None:
+        self._create(goal="physical stand", reference="sprint:14")
+        self.arrange_card_sprint("ummanu-12", "sprint:14")
+        self.charge(stand_intent="memory-restore-r1", request_id="precharge")
+        self.writer.restore_create(reference="sprint:other", goal="other", status="open",
+                                   observer=head_choice("codex-observer"), request_id="other-sprint")
+        self.arrange_card_sprint("ummanu-12", "sprint:other")
+        with self.assertRaises(TaskError) as raised:
+            self.charge(stand_intent="memory-restore-r1", reference="sprint:other", request_id="rebind")
+        self.assertEqual(raised.exception.code, "stand_intent_conflict")
+        self.assertIn("sprint:14/ummanu-12", raised.exception.message)
+        self.assertEqual(self.sprint("sprint:other")["e2e"]["used"], 0)
+        self.assertEqual(self.sprint("sprint:14")["e2e"]["used"], 1)
+        self.assertEqual(self.writer.audit.events("sprint:other", kind="e2e_charged"), [])
+
+    def test_stand_admission_refuses_foreign_missing_card_and_exhausted_budget_without_audit(self) -> None:
+        self._create(goal="physical stand", reference="sprint:14", e2e_budget=0)
+        for card in ("ummanu-12", "ummanu-missing", ""):
+            with self.subTest(card=card), self.assertRaises(TaskError):
+                self.charge(stand_intent="memory-restore-r1", card=card)
+        self.arrange_card_sprint("ummanu-12", "sprint:14")
+        with self.assertRaises(TaskError) as raised:
+            self.charge(stand_intent="memory-restore-r1")
+        self.assertEqual(raised.exception.code, "e2e_budget_spent")
+        self.assertEqual(self.sprint("sprint:14")["e2e"]["used"], 0)
+        self.assertEqual(self.writer.audit.events("sprint:14", kind="e2e_charged"), [])
+        self.assertEqual(self.writer.audit.status()["pending"], 0)
+
+    def test_stand_admission_honors_owner_refusal_and_terminal_sprints(self) -> None:
+        self._create(goal="physical stand", reference="sprint:14")
+        self.arrange_card_sprint("ummanu-12", "sprint:14")
+        self.writer.record_owner_decisions(
+            role="po", actor="po", reference="sprint:14", request_id="refuse",
+            entries=[{"id": "stop", "kind": "e2e_refusal", "scope": "sprint", "value": "no_more_e2e",
+                      "quotation": "No more paid stands."}],
+        )
+        with self.assertRaises(TaskError) as raised:
+            self.charge(stand_intent="memory-restore-r1")
+        self.assertEqual(raised.exception.code, "e2e_budget_spent")
+        for status in ("closed", "stopped"):
+            self.arrange_metadata("sprint:14", sprint_status=status)
+            with self.subTest(status=status), self.assertRaises(TaskError) as raised:
+                self.charge(stand_intent="memory-restore-r1")
+            self.assertEqual(raised.exception.code, "closed")
+        self.assertEqual(self.sprint("sprint:14")["e2e"]["used"], 0)
+        self.assertEqual(self.writer.audit.events("sprint:14", kind="e2e_charged"), [])
+        self.assertEqual(self.writer.audit.status()["pending"], 0)
+
+    def _race_stand_charges(self, left: dict[str, str], right: dict[str, str]) -> list[str]:
+        second = CardStoreClient(self.client.credentials, self.tmp.name)
+        self.addCleanup(second.close)
+        racer = SprintWriter(second, data_dir=self.tmp.name, instance=self.instance)
+        barrier = threading.Barrier(2, timeout=5)
+        outcomes: dict[int, str] = {}
+
+        def race(index: int, writer: SprintWriter, fields: dict[str, str]) -> None:
+            try:
+                barrier.wait()
+                with writer.client.transaction():
+                    result = writer.charge_manual_e2e(**{
+                        "role": "po", "actor": "po", "reference": "sprint:14", "card": "ummanu-12", **fields,
+                    })
+                outcomes[index] = result["action"]
+            except TaskError as exc:
+                outcomes[index] = exc.code
+
+        threads = [threading.Thread(target=race, args=(index, writer, fields))
+                   for index, (writer, fields) in enumerate(((self.writer, left), (racer, right)))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(len(outcomes), 2, outcomes)
+        return sorted(outcomes.values())
+
+    def test_concurrent_stand_intents_obey_the_atomic_last_run_cap(self) -> None:
+        self._create(goal="physical stand", reference="sprint:14", e2e_budget=1)
+        self.arrange_card_sprint("ummanu-12", "sprint:14")
+        self.assertEqual(self._race_stand_charges({"stand_intent": "left"}, {"stand_intent": "right"}),
+                         ["e2e_budget_spent", "e2e_charged"])
+        self.assertEqual(self.sprint("sprint:14")["e2e"]["used"], 1)
+        self.assertEqual(len(self.writer.audit.events("sprint:14", kind="e2e_charged")), 1)
+
+    def test_concurrent_replays_of_one_stand_intent_make_one_charge_and_audit(self) -> None:
+        self._create(goal="physical stand", reference="sprint:14", e2e_budget=2)
+        self.arrange_card_sprint("ummanu-12", "sprint:14")
+        self.assertEqual(self._race_stand_charges(
+            {"stand_intent": "shared", "request_id": "left"}, {"stand_intent": "shared", "request_id": "right"},
+        ), ["already_charged", "e2e_charged"])
+        self.assertEqual(self.sprint("sprint:14")["e2e"]["used"], 1)
+        self.assertEqual(len(self.writer.audit.events("sprint:14", kind="e2e_charged")), 1)
+
+    def test_concurrent_stand_bindings_across_sprints_refuse_the_loser(self) -> None:
+        other = TaskWriter(self.client, data_dir=self.tmp.name).create(
+            role="po", actor="po", project="ummanu", task_type="code", title="other", target="ready",
+            request_id="other-card",
+        )["task"]["ref"]
+        self._create(goal="physical stand", reference="sprint:14")
+        self.writer.restore_create(reference="sprint:other", goal="other", status="open",
+                                   observer=head_choice("codex-observer"), request_id="other-sprint")
+        self.arrange_card_sprint("ummanu-12", "sprint:14")
+        self.arrange_card_sprint(other, "sprint:other")
+        self.assertEqual(self._race_stand_charges(
+            {"stand_intent": "shared", "request_id": "left"},
+            {"stand_intent": "shared", "request_id": "right", "reference": "sprint:other", "card": other},
+        ), ["e2e_charged", "stand_intent_conflict"])
+        sprints = [self.sprint(ref) for ref in ("sprint:14", "sprint:other")]
+        self.assertEqual(sum(sprint["e2e"]["used"] for sprint in sprints), 1)
+        self.assertEqual(sum(len(sprint["e2e"]["charges"]) for sprint in sprints), 1)
+        self.assertEqual(sum(len(self.writer.audit.events(sprint["ref"], kind="e2e_charged")) for sprint in sprints), 1)
 
     def test_a_manual_run_is_charged_once_by_its_run_id_and_refused_past_the_budget(self) -> None:
         self._create(goal="manual", reference="sprint:14", e2e_budget=1)

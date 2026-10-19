@@ -159,6 +159,22 @@ def cap_text(raises: list[dict[str, Any]]) -> str:
 #: The dispatch-id prefix of a run the PO dispatched by hand and charged with `sprint e2e-charge`.
 MANUAL_DISPATCH_PREFIX = "manual-run-"
 _MANUAL_RUN = re.compile(r"(?:https://github\.com/[^/\s]+/[^/\s]+/actions/runs/)?([0-9]+)(?:/[^\s]*)?")
+STAND_INTENT_PREFIX = "stand-intent-"
+_STAND_INTENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def stand_intent_id(intent: str) -> str:
+    """A physical stand intent is a case-sensitive ASCII token of at most 128 characters."""
+    from ummanu.kernel.errors import TaskError
+
+    if not isinstance(intent, str) or _STAND_INTENT.fullmatch(intent) is None:
+        raise TaskError(
+            "validation",
+            "--stand-intent needs 1-128 ASCII letters, digits, dots, underscores or hyphens, "
+            "starting with a letter or digit",
+            2,
+        )
+    return intent
 
 
 def manual_run_id(run: str) -> str:

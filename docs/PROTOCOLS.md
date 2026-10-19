@@ -1752,19 +1752,37 @@ payload names `add` (the owner's N), `authorized_by` (the comment's event id) an
 or stopped sprint refuses it. The waiting
 cards dispatch on the next tick, and the PO completes the decision card as usual.
 
-**A run dispatched by hand.** A stand run the PO starts itself (`workflow_dispatch`) is charged before
-the run:
+A manually started e2e run spends the sprint's existing budget through `sprint e2e-charge`.
+For a physical stand, precharge its intent before provisioning:
+
+```bash
+python3 -P -m ummanu sprint e2e-charge --ref <sprint> --role po --stand-intent memory-restore-r1 --card <card> --request-id memory-restore-r1-precharge
+```
+
+`--stand-intent` is a case-sensitive token of 1-128 ASCII letters, digits, dots, underscores or
+hyphens, starting with a letter or digit. The charge uses dispatch id `stand-intent-<intent>` and one
+`e2e_charged` audit event with `stand_intent`, `card`, and `dispatch_id`. Its default request id is
+`e2e-charge-stand-intent-<intent>`. The receipt records paid intent only; it proves no VM allocation
+or execution. The infrastructure card adds the real VM identity and execution evidence afterwards.
+
+For a GitHub Actions workflow run, use the mutually exclusive `--run` form:
 
 ```bash
 python3 -P -m ummanu sprint e2e-charge --ref <sprint> --role po --run <run URL or id> --card <card> [--request-id ID]
 ```
 
-`--role po` only, `--card` a card of that sprint, `--run` a GitHub Actions run URL or its numeric id.
-The charge is the dispatcher's conditional charge with dispatch id `manual-run-<run id>`, recorded with
-one `e2e_charged` audit event (`run`, `card`, `dispatch_id`); the default request id is
-`e2e-charge-<run id>`. A run already charged answers `already_charged` and charges nothing. A spent
-budget or a standing `e2e_refusal` refuses it (`e2e_budget_spent`, exit status 3) and nothing is
-written; a sprint that is not open is refused (`closed`).
+`--run` accepts a GitHub Actions run URL or its numeric id. Its dispatch id is `manual-run-<run id>`,
+its audit payload is `run`, `card`, `dispatch_id`, and its default request id is `e2e-charge-<run id>`.
+A numeric stand intent has a separate identity from the same numeric GitHub run.
+
+Both forms require `--role po` and a `--card` belonging to the named open sprint. They use the
+dispatcher's conditional charge without increasing grants. A repeat with the same request id
+returns its audit receipt; an already charged identity with a new request id answers
+`already_charged` without another charge or audit event. A stand intent stays bound to its original
+sprint/card: a different binding fails with `stand_intent_conflict` (exit status 2); a conflicting
+request id fails validation. A spent budget or a standing `e2e_refusal` refuses a new charge
+(`e2e_budget_spent`, exit status 3) without a write; a sprint that is not open is refused (`closed`).
+Sprint show and snapshot export/restore retain the dispatch identity and charge linkage.
 
 **Budget spent, a card outside every sprint.** At its cap the stage dispatches nothing:
 

@@ -96,6 +96,7 @@ integration-heads tests/test_dispatcher_review_lifecycle.py
 integration-dispatcher tests/test_dispatcher_no_candidate.py
 integration-dispatcher tests/test_e2e_stage.py
 integration-dispatcher tests/test_e2e_budget.py
+unit tests/test_manual_e2e_charge.py
 integration-dispatcher tests/test_e2e_after_merge.py
 integration-dispatcher tests/test_dispatcher_sprint_admission.py
 integration-dispatcher tests/test_git_workspace_manager.py
