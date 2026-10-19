@@ -7660,7 +7660,11 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(len(after), before + 1, "round 2 verdict was deduped away")
         self.assertIn("round 2", after[-1]["body"])
 
-        reworked = self._park_and_decide("rework", request_id="decision-rework-round-2")
+        reworked = self._park_and_decide(
+            "rework",
+            reason="BLOCKER-fixture: repair the invariant at its existing enforcement boundary.",
+            request_id="decision-rework-round-2",
+        )
         self.assertEqual(reworked["action"], "rework-started")
         self.assertEqual(self.reader.show("ummanu-510")["state"], "in_progress")
 
