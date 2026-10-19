@@ -256,11 +256,14 @@ class ScopeBackendTests(unittest.TestCase):
         child_file = self.root / "detached.pid"
         handle = self.start(
             "import subprocess,sys,time,pathlib; "
+            "from ummanu._fsutil import write_text_atomic; "
             "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],start_new_session=True); "
-            f"pathlib.Path({str(child_file)!r}).write_text(str(p.pid));time.sleep(30)"
+            f"write_text_atomic(pathlib.Path({str(child_file)!r}),str(p.pid));time.sleep(30)"
         )
-        await_fact(child_file.exists, "detached child was not created")
+        await_fact(child_file.exists, "detached child did not publish its PID")
         child = int(child_file.read_text())
+        self.assertGreater(child, 0)
+        os.kill(child, 0)
         self.assertNotEqual(os.getpgid(child), os.getpgid(handle.head_pid))
         run = HeadRun(run_id=handle.run_id, spec=HeadSpec.from_profile("fixture", {"adapter": "codex"}),
                       workspace=str(self.root), task_ref=TaskRef.card("ci:owned-fixture"), role="worker",
@@ -379,9 +382,10 @@ class PoScopeBackendTests(unittest.TestCase):
             if session.session_id == session_id and not failed_runs:
                 wrapper = (
                     "import subprocess,sys,os,pathlib; "
+                    "from ummanu._fsutil import write_text_atomic; "
                     "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'], "
                     "start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
-                    f"pathlib.Path({str(child_file)!r}).write_text(str(p.pid)); "
+                    f"write_text_atomic(pathlib.Path({str(child_file)!r}),str(p.pid)); "
                     "os.execvp(sys.argv[1],sys.argv[1:])"
                 )
                 argv = [sys.executable, "-c", wrapper, *argv]
@@ -398,8 +402,10 @@ class PoScopeBackendTests(unittest.TestCase):
             service.submit(session_id=other, text="independent", request_id="scope-independent")
             self.assertEqual(self.settled(other, 1).state, po_store.COMPLETED)
             eventually(lambda: bool(attempts), "new orphan was not automatically revisited")
-            await_fact(child_file.exists, "PO detached child was not created")
-            os.kill(int(child_file.read_text()), 0)
+            await_fact(child_file.exists, "PO detached child did not publish its PID")
+            child = int(child_file.read_text())
+            self.assertGreater(child, 0)
+            os.kill(child, 0)
             released = True
             self.assertEqual(self.settled(session_id, 1).state, po_store.FAILED)
             self.assertEqual(self.settled(session_id, 2).state, po_store.COMPLETED)
