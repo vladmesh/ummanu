@@ -3360,13 +3360,26 @@ Every worker `TASK.md`, for any project, card kind and head family, carries `## 
 run's `TASK.md` carries the same section last. Both read the file from the checkout the process runs
 from, like the other `packaging/` assets. A project's `AGENTS.md` wins on conflict.
 
-A code card's `REVIEW.md` carries the style checklist S1-S7 for the lines the diff adds. It is the one
-exception to the rule that a RED blocker states a concrete reachable scenario: a violation of S1-S4 (a
-test of absence or of doc or source text; an alias or `X as X` re-export that no released public API
-needs; a card, sprint, issue or PR id or a date in code, a comment, a docstring or a test name; a new
-private helper that duplicates an existing one) is a RED blocker `BLOCKER-style-S<n>` with file:line and
-no scenario. S5-S7 are observations unless the card says otherwise. The gate's mechanical checks and
-their warnings are in [Testing](TESTING.md#style-of-added-lines).
+Reviewer, worker and observer share one blocking boundary. A RED blocker other than S1-S4 needs a
+concrete reachable scenario grounded in at least one of: a path named by the card's AC or sprint DoD;
+a value the current producer emits or a state the current reader accepts; a regression of existing
+behaviour; a security or data-loss outcome on a reachable path; missing mandatory evidence. A finding
+that depends only on damaged or hand-edited input from a trusted role, a crash or race window, a
+historical format absent from the live installation, or behaviour the AC do not promise is a
+non-blocking observation with a proposed tail-issue line. If such an edge can lose data or breach
+security, it blocks only for a fail-closed refusal, not a new branch of logic. The observer rejects an
+out-of-boundary blocker in the decision and records one tail issue. A worker owes no repair of a
+non-blocking observation in rework; AC demanding every edge are `wrong_task_definition`.
+
+A code card's `REVIEW.md` carries the style checklist S1-S7 for added lines. S1-S4 block with file:line
+as `BLOCKER-style-S<n>` without a scenario. S1 covers new tests of absence, checked-in docs, prompts,
+skills, Markdown or product source as text. Runtime output the product generates and delivers, such
+as worker `TASK.md`, `REVIEW.md` and rendered reports, is exempt. S2 covers aliases or `X as X`
+re-exports no released public API needs. S3 covers references to real work items and dates in code,
+comments, docstrings and test names; synthetic fixture values fed as data to the system under test
+(refs, sprint ids, timestamps) are exempt. S4 covers new private helpers duplicating existing ones.
+S5-S7 are observations unless the card says otherwise. These scopes mirror the mechanical lint in
+[Testing](TESTING.md#style-of-added-lines).
 
 ### Head heartbeat identity
 

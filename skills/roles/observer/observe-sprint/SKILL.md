@@ -171,6 +171,18 @@ Only the PO adds items (`sprint dod add`). A free-text DoD (`dod.structured` fal
 
 ## 3. Choose the next step
 
+Judge each DoD item by the evidence that closes it. Before adding a path, ask whether it needs to exist
+to produce that evidence. Apply proportionality before the priority order below:
+
+- Work breadth first: no third card on one item while another has none, unless that card unblocks them.
+- Choose the cheapest mechanism that meets the closing evidence. Before a new external mechanism or
+  production configuration the item does not name, use the cheaper mechanism or cut a PO decision card.
+- When the cards spent on an item exceed its weight, record a resume decision before investing further:
+  explain the remaining closing evidence and why to continue, change approach or work another item.
+
+End with what you skipped: the resume's `rejected_alternatives` names every deliberately skipped path
+as "<limit>, <when to upgrade>" so the next head knows what would justify it.
+
 The first rule that applies:
 
 1. A check or investigation that could disprove the plan or remove architectural uncertainty.
@@ -293,8 +305,16 @@ reference point, never a ceiling. `partial` asks the worker in that comment to c
 
 ### Classifying RED and Blocked evidence
 
-You classify, with the sprint context; a reviewer gives evidence and does not decide scope. Record the
-class and evidence in the card or resume:
+You classify, with the sprint context; a reviewer gives evidence and does not decide scope.
+
+Apply the blocking boundary in `docs/PROTOCOLS.md`, Code style in the worker and review packets. Require
+a concrete supported path or current producer/reader state, a regression, reachable security/data loss
+or missing mandatory evidence; S1-S4 still need no scenario. Reject a blocker outside that boundary as
+non-blocking in the decision, keeping its stable ID and filing one tail issue. Hypothetical damaged
+trusted input, crash/race windows, absent historical formats and unpromised behaviour buy no new logic;
+an edge with data-loss or security consequences can require only a fail-closed refusal.
+
+Record the class and evidence in the card or resume:
 
 - a local defect inside the card: supported rework or retry;
 - wrong architecture or card cut: close or preempt this attempt and recut differently (smaller, larger

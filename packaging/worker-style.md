@@ -3,15 +3,14 @@ These rules apply in every project; the project's AGENTS.md wins on conflict.
 Prose
 1. Docstring = the contract or invariant in 1-3 lines. No history, incidents, "previously", "now". Why: git keeps history; every later head pays to read it.
 2. Comment only a why the code cannot show. Never restate the code. Why: the next head copies the density it sees.
-3. No card, sprint, issue or PR ids and no dates in code, comments, docstrings or test names. Why: they rot and cost a cleanup sprint.
+3. No real work-item ids or dates in code, comments, docstrings or test names; synthetic fixture data is exempt. Why: references rot.
 4. No em dashes, bold, or filler openers ("Note that", "This ensures"). Why: noise tokens.
 
 Tests
 5. Test observable behaviour through the public seam. Why: shape tests break on refactor and protect nothing.
 6. Do not add a test that:
    - asserts a removed name, file, field, flag or wording is absent;
-   - reads docs, prompts, skills or Markdown text;
-   - reads product source as text (inspect.getsource, read_text of .py, grep or AST scan of src);
+   - reads checked-in docs, prompts, skills, Markdown or product source as text; runtime product output is exempt;
    - compares a constant with its own literal, or repeats an existing test.
    Why: deleting code and its tests and passing the suite proves a removal; a boundary is a lint rule.
 7. Delete the tests of code you delete. Why: they either fail or keep testing nothing.
