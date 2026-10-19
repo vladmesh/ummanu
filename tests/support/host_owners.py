@@ -116,5 +116,12 @@ def render_packets(root: Path) -> dict[str, str]:
             "worker": host._worker_task_doc(task, "main", record.attempt_id, 3, record.report_decision, record=record),
             "reviewer": host._review_prompt(task, record.attempt_id, 2, record=record),
         }
+        host.sprint_reader.show.return_value["local_run_exceptions"] = []
+        for kind in ("infra", "research"):
+            task["type"] = kind
+            documents[f"{kind}-worker"] = host._worker_task_doc(
+                task, "main", record.attempt_id, 3, record.report_decision, record=record
+            )
+            documents[f"{kind}-reviewer"] = host._review_prompt(task, record.attempt_id, 2, record=record)
     # Only the temporary fixture root varies; command, decision, revision and hash bytes remain.
     return {name: doc.replace(str(root), "<fixture>") for name, doc in documents.items()}

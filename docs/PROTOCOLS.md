@@ -2093,9 +2093,13 @@ python3 -P -m ummanu sprint close-result --ref sprint:ID --event-id evt_ID
 
 ### Control-host local runs
 
-Reviewers read code and worker/CI evidence without test execution. Worker packets permit only the project's adapter-declared broad check and subsets
-locally. Integration shards, Docker/container runs, stands, provisioning and network-heavy checks
-run in CI only, except for exact vectors in the sprint's creation-only `local_run_exceptions` field.
+Reviewers read code and worker/CI evidence without test execution, including every `ummanu check`
+form, receipt readback and reuse. The reviewer role grants no remote orchestration authority.
+Worker tests on the control host use only the project's adapter-declared broad check and subsets.
+Integration shards, Docker/container runs, stands, provisioning and network-heavy checks on that
+host run in CI only, except for exact vectors in the sprint's creation-only `local_run_exceptions`
+field. Code and research packets require acceptance evidence from that local profile or the
+corresponding CI shard and report; their execution authority does not include infra orchestration.
 Development convenience, an acceptance criterion and missing/none/noop gate receipts grant no
 additional authority. An excessive local heavy run is a non-blocking observation, never grounds
 for RED. Exclude its results from validation evidence, even if tests passed; CI or an allowed
@@ -2104,6 +2108,33 @@ reviewers request missing validation from the worker or CI. The observer does no
 charge the budget for such a run alone. Historical verdicts remain in the audit and are not
 reopened. Missing required valid evidence or a code defect can still block release. Receipt reuse
 and mandatory dispatcher-owned exact-SHA CI gates still apply.
+
+Infra workers may use lightweight provider API and SSH commands on the control host to orchestrate
+an explicitly authorized remote target. Before effects they record its provider resource ID and SSH
+target identity and establish that it is distinct from the control host. Resource-intensive
+installation, model downloads, DB, containers, provisioning and recovery execute on that target.
+The infra type grants no paid, production or resource access; the operation requires separate
+resource, spending and production authority. Local tests retain the declared-profile bounds above.
+Heavy suites, model work, containers and local provisioning on the control host still require exact
+creation-only exceptions. Localhost, aliases, SSH back to the control host, local containers,
+sockets, environment redirection and shell wrappers cannot turn local execution into remote
+orchestration. Exception binding and the Docker guard remain in force.
+
+Authorized remote operational evidence satisfies infra acceptance criteria. The no-candidate
+`report:done` records target identity, authority, commands, timeline, outcomes and cleanup in
+`What was done` and `How to verify`. That evidence requires neither CI nor a local full-profile
+receipt and does not replace a code candidate's exact-SHA gate. Tests, if required, use the declared
+local profile, exact exceptions or their CI owner. Validation must not publish unmerged product
+changes into the live control-host installation or agents' homes; use candidate-scoped product
+checks. Separately authorized remote infra effects follow the target and authority bounds above.
+
+Initial worker preparation, replacement and retained continuation render the complete task-kind
+policy into `TASK.md`. A retained handoff already started or confirmed keeps its delivered document;
+a render alone proves no delivery to that head. To replace a contract already read by a blocked
+worker, activate the generator revision, then use the supported Blocked-to-Ready move on the same
+card. The dispatcher claims a fresh attempt, prepares the workspace, replaces `TASK.md` and launches
+a fresh worker with the instruction to read it whole. Verify the emitted packet and launch delivery
+evidence before operational effects. This lifecycle step creates no new card or spending authority.
 
 The shared worker/reviewer [Docker guard](HEAD_RUNTIME.md#worker-and-reviewer-docker-guard)
 refuses `run`, `create`, `build` and `compose up|run|build` unless the current card's project-scoped

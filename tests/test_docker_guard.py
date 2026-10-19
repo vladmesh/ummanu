@@ -490,8 +490,9 @@ class DockerGuardTests(unittest.TestCase):
                 return_value=SimpleNamespace(launch_identity={}),
             ),
         ):
-            for role in ("worker", "reviewer"):
-                with self.subTest(role=role):
+            for kind, role in ((kind, role) for kind in ("code", "research", "infra") for role in ("worker", "reviewer")):
+                task["type"] = kind
+                with self.subTest(kind=kind, role=role):
                     frozen = host._frozen_local_run_policy(
                         task, role, 1, host.local_run_snapshot_for_round(task, role, 1, {})
                     )
@@ -572,7 +573,7 @@ class DockerGuardTests(unittest.TestCase):
                             )
                         self.assert_refused(results[-1])
                         self.assertEqual(self.calls(), [])
-            for value in ("missing", None, [declared, {"argv": ["docker", "run", "image"]}]):
+            for value in ([], "missing", None, [declared, {"argv": ["docker", "run", "image"]}]):
                 if value == "missing":
                     sprint.pop("local_run_exceptions")
                 else:
@@ -589,7 +590,7 @@ class DockerGuardTests(unittest.TestCase):
                             task=task,
                         )
                     self.assert_refused(results[-1])
-                    if value != "missing":
+                    if value not in ([], "missing"):
                         self.assertIn("unreadable or malformed", "\n".join(host._local_run_section(task)))
                     self.assertEqual(self.calls(), [])
             reader.show.side_effect = OSError("unreadable authority")
