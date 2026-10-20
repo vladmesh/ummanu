@@ -30,6 +30,7 @@ from ummanu.dispatch import (
     assessment_decision as dispatcher_assessment_decision,
     attempt_accounting,
     attempt_usage as attempt_usage_module,
+    claim as dispatcher_claim,
     host as dispatcher_host_module,
     runtime as dispatcher_module,
     wait_vitality as dispatcher_wait_vitality,
@@ -713,11 +714,9 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.runtime.head_readiness = lambda _head: HeadReadiness(
             "openai-sub", "unavailable", "resource provider is unavailable", 1.0
         )
-        payload = {"resume_workspaces": {"ummanu-510": {}}}
+        payload: dict[str, Any] = {}
 
-        result = self.runtime._claim(
-            self.reader.show("ummanu-510"), {}, payload, "old-attempt", resume_workspace=True
-        )
+        result = self.runtime._claim(self.reader.show("ummanu-510"), {}, payload, "old-attempt")
 
         self.assertEqual(result["action"], "resource-not-ready")
         self.assertNotIn("attempt_id", payload)
@@ -1607,7 +1606,6 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         blocked = self.runtime.production_tick()
         self.assertEqual(blocked["actions"][0]["reason"], "rework bring-up failed")
         self.assertEqual(self.reader.show("ummanu-510")["state"], "blocked")
-        self.assertIn("ummanu-510", self.runtime.production_state.load()["resume_workspaces"])
 
         self.writer.move(
             role="po",
@@ -1626,7 +1624,6 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(retry["actions"][0]["status"], "blocked")
         self.assertEqual(self.reader.show("ummanu-510")["state"], "blocked")
         self.assertEqual(self.host.prepare_requires_existing, [False, True])
-        self.assertIn("ummanu-510", self.runtime.production_state.load()["resume_workspaces"])
 
     def test_production_requeue_after_failed_gate_rework_preserves_workspace_provenance(self) -> None:
         """A failed gate rework resumes the same committed and dirty worker checkout."""
@@ -1656,7 +1653,6 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.assertEqual(blocked["actions"][0]["reason"], "rework bring-up failed")
         self.assertEqual(self.reader.show("ummanu-510")["state"], "blocked")
-        self.assertIn("ummanu-510", self.runtime.production_state.load()["resume_workspaces"])
 
         self.writer.move(
             role="po",
@@ -1674,7 +1670,6 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.host.prepare_requires_existing, [False, True])
         self.assertEqual(git(workspace, "rev-parse", "HEAD"), commit)
         self.assertEqual(git(workspace, "diff", "--cached", "--name-only"), "wip.py")
-        self.assertIn("ummanu-510", self.runtime.production_state.load()["resume_workspaces"])
 
     def test_a_requeue_after_a_failed_merge_gate_rework_keeps_the_workspace(self) -> None:
         """A retry gives a failed merge-gate rework a new claim and its old checkout."""
@@ -1715,7 +1710,6 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.assertEqual(blocked["reason"], "rework bring-up failed")
         self.assertEqual(self.reader.show("ummanu-510")["state"], "blocked")
-        self.assertIn("ummanu-510", self.runtime.production_state.load()["resume_workspaces"])
 
         self.writer.move(
             role="po",
@@ -4684,7 +4678,6 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIn("Observer decision: reslice", card["comments"][-1]["body"])
         self.assertIn("stop_head:worker", self.host.calls)
         self.assertEqual(self.host.torn_down, [], "the recut starts from the work that is there")
-        self.assertIn("ummanu-510", self.runtime.production_state.load()["resume_workspaces"])
 
     def test_a_parked_card_survives_a_dispatcher_restart_with_its_worker(self) -> None:
         """Criterion 3: the park is on disk, so a dispatcher that comes back finds the card still
@@ -8029,6 +8022,100 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.reader.show("ummanu-510")["state"], "in_progress")
         self.assertEqual(self.host.prepare_requires_existing, [False, True])
 
+    def _return_to_ready(self, request_id: str) -> None:
+        self.writer.move(
+            role="po", actor="operator", reference="ummanu-510", target="ready",
+            reason="the blocker is resolved", sprint_override=True,
+            sprint_override_reason="the PO returns the card from Blocked", request_id=request_id,
+        )
+
+    def _decision_instruction(self) -> str:
+        return self._task_document().split("## Observer rework decision to follow", 1)[1].split("\n## ", 1)[0]
+
+    def test_a_blocked_rework_round_keeps_its_decision_across_returns_to_ready(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        decision = "Keep the reader and narrow it to the states its producer emits."
+        self.assertEqual(self._park_and_decide("rework", reason=decision)["action"], "review-red-reused-worker")
+        self._assert_one_generation(2)
+        workspace = self._pilot_record()["workspace"]
+        first_attempt = self._pilot_record()["attempt_id"]
+        self.writer.report(
+            role="worker", actor="worker", reference="ummanu-510", kind="blocked",
+            body="the fixture service is down", classification="external_fact",
+            request_id=self._worker_report_request_id("blocked", "external_fact"),
+        )
+        self.assertEqual(self.tick()["to"], "blocked")
+        self._return_to_ready("return-blocked-rework-round")
+
+        resumed = self.tick()
+
+        self.assertEqual(resumed["status"], "ok", resumed)
+        self.assertEqual(resumed["workspace"], workspace)
+        self.assertTrue(self.host.prepare_requires_existing[-1])
+        self.assertNotEqual(self._pilot_record()["attempt_id"], first_attempt)
+        self._assert_one_generation(3)
+        self.assertIn(decision, self._decision_instruction())
+        self.assertEqual(self._pilot_record()["report_decision"], decision)
+
+        second_attempt = self._pilot_record()["attempt_id"]
+        self.writer.report(
+            role="worker", actor="worker", reference="ummanu-510", kind="blocked",
+            body="the fixture service is down again", classification="external_fact",
+            request_id=self._worker_report_request_id("blocked", "external_fact"),
+        )
+        self.assertEqual(self.tick()["to"], "blocked")
+        self._return_to_ready("return-blocked-rework-round-again")
+
+        again = self.tick()
+
+        self.assertEqual(again["status"], "ok", again)
+        self.assertEqual(again["workspace"], workspace)
+        self.assertNotEqual(self._pilot_record()["attempt_id"], second_attempt)
+        self._assert_one_generation(4)
+        self.assertIn(decision, self._decision_instruction())
+        self.assertEqual(self._pilot_record()["report_decision"], decision)
+
+    def test_a_repeated_blocker_block_resumes_on_the_production_claim_past_its_old_verdicts(self) -> None:
+        self._unobserved_card_in_progress()
+        body = "Open blockers: BLOCKER-contract"
+        self._red_round(1, body)
+        workspace = self._pilot_record()["workspace"]
+        self.assertEqual(self._red_round(2, body)["reason"], "repeated review blockers")
+        self._return_to_ready("return-repeated-blocker")
+
+        claimed = [
+            action for action in self.runtime.production_tick()["actions"] if action.get("step") == "claim"
+        ]
+
+        self.assertEqual([action["workspace"] for action in claimed], [workspace])
+        self.assertTrue(self.host.prepare_requires_existing[-1])
+        self.host.commit = "resumed-c0ffee5678"
+        self.writer.move(
+            role="po", actor="operator", reference="ummanu-510", target="validate",
+            reason="validate the new commit", sprint_override=True,
+            sprint_override_reason="the PO validates by hand", request_id="validate-resumed-round",
+        )
+        validated = self.tick()
+        self.assertEqual(validated["action"], "review-started", validated)
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "validate")
+
+    def test_an_admission_refused_card_returned_to_ready_opens_a_fresh_workspace(self) -> None:
+        self.observed_sprint()
+        with mock.patch.object(dispatcher_claim, "live_root_project_refusal", return_value="live root"):
+            self.runtime.production_tick()
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "blocked")
+        self._return_to_ready("return-admission-refused")
+
+        self.runtime.production_tick()
+
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "in_progress")
+        self.assertEqual(self.host.prepared, ["ummanu-510"])
+        self.assertEqual(self.host.prepare_requires_existing, [False])
+
     def test_repeated_observed_red_parks_with_repeated_ids(self) -> None:
         self.host.fail_resume_worker_reason = ""
         self.start_dispatcher()
@@ -9459,9 +9546,9 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
 
     def test_an_earlier_attempts_report_never_ends_a_later_attempts_round(self) -> None:
-        """A card returned to Ready is retried as a new attempt, and its first round is generation 1
-        again. The report of the previous attempt's generation 1 is still in the audit, and it names
-        that attempt: attempt identity is in the request id, so it can never be read as this one's.
+        """A card returned to Ready is retried as a new attempt whose round continues the card's
+        generation. The previous attempt's report is still in the audit, and it names that
+        attempt: attempt identity is in the request id, so it can never be read as this one's.
         """
         self.start_dispatcher()
         self.tick()
@@ -9496,7 +9583,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.assertEqual(result["action"], "waiting-worker-report")
         self.assertEqual(self.reader.show("ummanu-510")["state"], "in_progress")
-        self.assertEqual(self._pilot_record()["report_generation"], 1)
+        self.assertEqual(self._pilot_record()["report_generation"], 2)
         self.assertNotIn(
             self._worker_report_request_id(),
             first_round_ids,

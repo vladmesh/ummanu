@@ -3360,6 +3360,32 @@ A lost record recovers the decision from the checkout: every worker `TASK.md` en
 `<!-- observer-decision generation=N body=... -->` carrying it base64-encoded (empty body when none),
 and recovery reads the last such line.
 
+### Return from Blocked
+
+A Blocked card goes back to work through one command, `task move --to ready` with a reason, by the PO,
+observer or steward; there is no resume verb. The next claim continues the round the card's last
+dispatcher Blocked move interrupted. One reader, `resume_point` in `dispatch/claim.py`, decides it from
+the card's audit on every claim path:
+
+- The claim opens a new attempt whose worker round runs in the same workspace and branch. It requires
+  the existing checkout; a missing one is the `workspace_contract` bring-up failure. A card refused
+  before it had a checkout (sprint reservation, live-root project, broad-check contract or Git access
+  preflight, Codex fan-out policy) gets a fresh one.
+- The round continues the card's generation: it takes the one after the highest generation any worker
+  report of the card was filed under.
+- The round carries the observer decision the interrupted round was opened on, and its `TASK.md`
+  renders it as [above](#the-observer-decision-a-rework-round-is-opened-on). The decision persists
+  across every return until a new decision or a fresh round replaces it: a round opened by a claim
+  with no interrupted round before it, a red gate or a bounced done report carries none, nor does a
+  card Blocked out of Assessment, whose round the observer has already decided on.
+- Verdicts already on the card do not count: the new round reads a `review:*` marker only after its
+  claim, so an earlier attempt's `review:red` never parks or blocks it.
+
+The reader also names the stage the attempt stopped at (`admission`, `worker`, `gate` or `review`);
+every stage resumes as a new worker round. Only the dispatcher's own Blocked moves out of In progress,
+Validate or Assessment are read, and a claim made after one ends it: such a card resumes nothing and
+opens a fresh round at generation 1.
+
 ### Revision-bound worker feedback
 
 The description in a worker `TASK.md` is authoritative. A create or description edit has an immutable
