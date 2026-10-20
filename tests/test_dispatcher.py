@@ -5678,17 +5678,11 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.reader.show("ummanu-510")["state"], "blocked")
 
         gate_calls = len(self.host.gate_calls)
-        self.writer.move(
-            role="po",
-            actor="operator",
-            sprint_override=True,
-            sprint_override_reason="the operator moves a card of a reserved project by hand",
-            reference="ummanu-510",
-            target="ready",
-            reason="the CI outage is over",
-            request_id="return-after-infrastructure",
-        )
-        self.assertEqual(self.tick()["action"], "stage-resumed")
+        # The publication rework left the round without an admitted done, so the return opens a
+        # worker round in a new attempt, where the same SHA is reported again.
+        self._requeue_blocked("return-after-infrastructure")
+        self._report_done("the same commit after the CI outage")
+        self.assertEqual(self.tick()["to"], "validate")
         result = self.tick()
 
         self.assertNotEqual(result.get("reason"), "rejected candidate")

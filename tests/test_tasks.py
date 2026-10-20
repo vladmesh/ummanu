@@ -23,7 +23,7 @@ from tests.observer_identity import as_observer, bind_observer, unbound_observer
 from tests.retired_board import LEGACY_ENV, LEGACY_VALUES, RETIRED_STORE, write_stale_leftovers
 from tests.sql_backend_fixtures import CardStoreCase, ensure_sprint_row
 from ummanu import tasks
-from ummanu.board.card_transitions import CARD_TRANSITIONS
+from ummanu.board.card_transitions import CARD_TRANSITIONS, CardTransitionForbidden
 from ummanu.board.completion_evidence import po_completion_record
 from ummanu.board.done_retention import close_old_done
 from ummanu.board.estimate import DEFAULT_ESTIMATE_MINUTES
@@ -939,28 +939,37 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         board.move_report(reference=reference, target="done", reason="sweep complete")
         self.assertEqual(self.writer.reader.show(reference)["state"], "done")
 
-    def test_board_host_executes_every_declared_card_edge_through_the_typed_canon(self) -> None:
+    def test_board_host_executes_every_held_card_edge_through_the_typed_canon(self) -> None:
+        """Every declared edge some role holds runs through the host as its first holder; an edge
+        no role holds is refused before anything is staged."""
         host = self.writer.board_host
+        held = 0
         for index, declaration in enumerate(TRANSITIONS[EntityKind.CARD].values()):
+            edge = (declaration.source, declaration.target)
+            holders = [role for role, edges in CARD_TRANSITIONS.items() if edge in edges]
             self.place_card("ummanu-468", declaration.source.value)
-            result = host.transition(
-                TransitionRequest(
-                    EntityKind.CARD,
-                    "ummanu-468",
-                    declaration.target,
-                    Actor("po", "operator"),
-                    "registry contract",
-                    RelatedRefs(("sprint:1031",)),
-                    f"host-edge-{index}",
-                )
+            request = TransitionRequest(
+                EntityKind.CARD,
+                "ummanu-468",
+                declaration.target,
+                Actor(holders[0] if holders else "po", "operator"),
+                "registry contract",
+                RelatedRefs(("sprint:1031",)),
+                f"host-edge-{index}",
             )
+            if not holders:
+                with self.assertRaises(CardTransitionForbidden):
+                    host.transition(request)
+                continue
+            result = host.transition(request)
+            held += 1
             self.assertEqual(result.entity.state, declaration.target)
             self.assertEqual(result.event.kind, declaration.event_kind)
             self.assertEqual(
                 (result.event.source_state, result.event.target_state),
                 (declaration.source.value, declaration.target.value),
             )
-        self.assertEqual(len(host.canon.events(ref="ummanu-468")), len(TRANSITIONS[EntityKind.CARD]))
+        self.assertEqual(len(host.canon.events(ref="ummanu-468")), held)
 
     def test_the_typed_event_is_staged_exactly_once_before_the_column_effect(self) -> None:
         """Staging is a precondition of the effect, and the committed event is that same record."""
