@@ -3374,9 +3374,10 @@ the card's audit on every claim path:
 - The round continues the card's generation: it takes the one after the highest generation any worker
   report of the card was filed under.
 - The round carries the observer decision the interrupted round was opened on, and its `TASK.md`
-  renders it as [above](#the-observer-decision-a-rework-round-is-opened-on). A round opened by a claim,
-  a red gate or a bounced done report carries none, nor does a card Blocked out of Assessment, whose
-  round the observer has already decided on.
+  renders it as [above](#the-observer-decision-a-rework-round-is-opened-on). The decision persists
+  across every return until a new decision or a fresh round replaces it: a round opened by a claim
+  with no interrupted round before it, a red gate or a bounced done report carries none, nor does a
+  card Blocked out of Assessment, whose round the observer has already decided on.
 - Verdicts already on the card do not count: the new round reads a `review:*` marker only after its
   claim, so an earlier attempt's `review:red` never parks or blocks it.
 

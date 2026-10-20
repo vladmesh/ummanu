@@ -833,8 +833,8 @@ def resume_point(runtime: Any, task: dict[str, Any]) -> ResumePoint:
     """How the claim of `task` resumes, read from the card's audit alone.
 
     The interrupted round is the one the card's last dispatcher Blocked move ended, unless a worker
-    round opened since. Its decision is the rework decision that opened it; a Blocked move out of
-    Assessment carries none, the observer having decided on that round already.
+    round opened since. Its decision is the rework decision that opened it, kept by every claim that
+    resumes it; a Blocked move out of Assessment carries none, the observer having decided already.
     """
     ref = str(task["ref"])
     token = re.escape(request_token(ref))
@@ -857,8 +857,13 @@ def resume_point(runtime: Any, task: dict[str, Any]) -> ResumePoint:
             continue
         source, target = transition
         if target == "in_progress":
-            _visit, decided = assessment_resolution(events[:index]) if source == "assessment" else ("", None)
-            decision = decided if decided and _event_payload(decided).get("decision") == "rework" else None
+            if source == "assessment":
+                _visit, decided = assessment_resolution(events[:index])
+                decision = decided if decided and _event_payload(decided).get("decision") == "rework" else None
+            elif source in {"ready", "blocked"} and stage:
+                decision = stage_decision
+            else:
+                decision = None
             stage, stage_decision = "", None
         elif target == "blocked" and dispatcher and source in {"in_progress", "validate", "assessment"}:
             stage = _interrupted_stage(request_id, token, source)

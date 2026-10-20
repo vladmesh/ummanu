@@ -190,6 +190,21 @@ class ClaimBoundaryTests(unittest.TestCase):
         self.assertEqual(record.report_decision_id, "evt-decision")
         self.assertEqual(record.review_baseline, 3)
 
+    def test_a_decision_survives_every_return_until_a_fresh_round(self):
+        self.runtime.audit.events.return_value = [
+            self.claimed(), self.report("done", 1), *self.rework_round(),
+            self.report("blocked-external_fact", 2), self.block("worker-blocked"),
+            self.claimed("second-attempt"), self.report("blocked-external_fact", 3, "second-attempt"),
+            self.block("worker-blocked", attempt="second-attempt"),
+        ]
+        point = claim.resume_point(self.runtime, self.task)
+        self.assertEqual((point.decision_id, point.generation), ("evt-decision", 3))
+        record = self.prepare().record
+        self.assertNotEqual(record.attempt_id, "old-attempt")
+        self.assertEqual(record.report_generation, 4)
+        self.assertEqual(record.report_decision, "Narrow the reader to the declared states.")
+        self.assertEqual(record.report_decision_id, "evt-decision")
+
     def test_a_round_without_a_decision_resumes_without_one(self):
         bounce = self.event(
             attempt_request_id("old-attempt", "stale-done-rework", "sample-1", "1"), EventKind.CARD_MOVED,

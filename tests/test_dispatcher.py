@@ -8029,7 +8029,10 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             sprint_override_reason="the PO returns the card from Blocked", request_id=request_id,
         )
 
-    def test_a_blocked_rework_round_returned_to_ready_continues_with_its_decision(self) -> None:
+    def _decision_instruction(self) -> str:
+        return self._task_document().split("## Observer rework decision to follow", 1)[1].split("\n## ", 1)[0]
+
+    def test_a_blocked_rework_round_keeps_its_decision_across_returns_to_ready(self) -> None:
         self.host.fail_resume_worker_reason = ""
         self.start_dispatcher()
         self._run_worker_to_validate()
@@ -8055,8 +8058,25 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertTrue(self.host.prepare_requires_existing[-1])
         self.assertNotEqual(self._pilot_record()["attempt_id"], first_attempt)
         self._assert_one_generation(3)
-        instruction = self._task_document().split("## Observer rework decision to follow", 1)[1].split("\n## ", 1)[0]
-        self.assertIn(decision, instruction)
+        self.assertIn(decision, self._decision_instruction())
+        self.assertEqual(self._pilot_record()["report_decision"], decision)
+
+        second_attempt = self._pilot_record()["attempt_id"]
+        self.writer.report(
+            role="worker", actor="worker", reference="ummanu-510", kind="blocked",
+            body="the fixture service is down again", classification="external_fact",
+            request_id=self._worker_report_request_id("blocked", "external_fact"),
+        )
+        self.assertEqual(self.tick()["to"], "blocked")
+        self._return_to_ready("return-blocked-rework-round-again")
+
+        again = self.tick()
+
+        self.assertEqual(again["status"], "ok", again)
+        self.assertEqual(again["workspace"], workspace)
+        self.assertNotEqual(self._pilot_record()["attempt_id"], second_attempt)
+        self._assert_one_generation(4)
+        self.assertIn(decision, self._decision_instruction())
         self.assertEqual(self._pilot_record()["report_decision"], decision)
 
     def test_a_repeated_blocker_block_resumes_on_the_production_claim_past_its_old_verdicts(self) -> None:
