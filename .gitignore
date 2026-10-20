@@ -6,6 +6,7 @@ build/
 dist/
 *.egg-info/
 
+# Keep Python build artifacts out of local worktrees.
 # Live operational state written by the board/task CLI; never a git repo.
 ummanu-data/
 runtime.env
