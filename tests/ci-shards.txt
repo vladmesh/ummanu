@@ -297,6 +297,7 @@ component tests/test_onboarding_snapshot.py
 integration-recovery tests/test_snapshot_recovery_postgres.py
 unit tests/test_instance_maintenance.py
 integration-dispatcher tests/test_owned_cleanup.py
+integration-dispatcher tests/test_card_cancel.py
 integration-dispatcher tests/test_dispatcher_dead_head_release.py
 integration-dispatcher tests/test_bounded_cleanup_replay.py
 integration-board tests/test_status.py

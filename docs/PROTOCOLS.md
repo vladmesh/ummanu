@@ -643,18 +643,13 @@ whose `blocked_by` names a wait card. Both moves, like a wait card's Blocked, ca
 their transition data: the outcome of a wait, not a pipeline restart, so the sprint budget does not
 charge them, and they do not close the sprint or the project to claims for the tick.
 
-**Cancel.**
-
-```text
-task cancel --ref <wait card> --role po|observer --reason <text>|--reason-file <file> [--request-id <id>]
-```
-
-The PO, or the observer of the card's own sprint, cancels a Ready or In progress wait card whose result
-is not frozen yet; the reason must be non-empty. One write: the `wait_cancel` field (when, who, the
-role, the reason) and a `[wait:cancel]` comment, in the transaction of one `wait_cancelled` audit record;
-idempotent under the request id. The card does not move there: the dispatcher's next tick freezes
-`cancelled` and delivers it like any other outcome. A second cancel is `already_cancelled`, a cancel of
-a wait with a frozen result `already_settled` (that result stands).
+**Cancel.** `task cancel` (see `cancel` under the task commands) of a wait card that still waits, in
+Ready or In progress with no frozen result, records the cancel instead of archiving the card: the
+`wait_cancel` field (when, who, the role, the reason) and a `[wait:cancel]` comment, in the transaction
+of one `wait_cancelled` audit record; idempotent under the request id. The card does not move there: the
+dispatcher's next tick freezes `cancelled`, delivers it to every return address like any other outcome
+and closes the card Done. A second cancel is `already_cancelled`, a cancel of a wait with a frozen
+result `already_settled` (that result stands); both name the deliveries still pending.
 
 **`task show`.** A wait card carries one block, `wait`, in `task show` and `task list`: `state`, the
 `target` (with `link` for a run), `waiting_since`, `deadline`, `return_to`, `last_observation` (`at`,
@@ -1518,9 +1513,38 @@ mode.
 
 `archive` closes an execution task and removes it from active listings without deleting board
 history. PO-only, non-empty reason, append-only audit, idempotent through `--request-id`. Cards in
-In progress or Validate, or with an active claim, are rejected. A card archived from Done stays a
-satisfied dependency; from any other column it is not Done and unblocks nothing. It cannot close a
-Product or Issue (use `ummanu issue close`).
+In progress, Validate or Assessment, with an active claim, or with live dispatcher work are rejected
+(`live_work`), and the refusal names `task cancel`. A card archived from Done stays a satisfied
+dependency; from any other column it is not Done and unblocks nothing. It cannot close a Product or
+Issue (use `ummanu issue close`).
+
+```bash
+python3 -P -m ummanu task cancel --role po --ref PROJECT-N --reason-file REASON.md --request-id REQUEST_ID
+```
+
+`cancel` ends a card that is not Done, of any type, in Issues, Ready, In progress, Validate,
+Assessment or Blocked. The PO cancels any card; the observer only a card of its own sprint, under the
+[identity guard](#the-sprint-guard); every other role is `role_forbidden`. A Done or archived card, a
+Product and an Issue are `transition_forbidden`. The reason must be non-empty. One operation,
+`cancel_card` (`dispatch/card_cancel.py`), runs in the command under one 20 s allowance that bounds
+every lock wait, board statement and journal write:
+
+1. it takes the dispatcher tick lock, then the card's effect lock;
+2. it records the heads the card's dispatcher record names in the card's cleanup intent, then stops the
+   worker, the reviewer and any unresolved launch through the stop reconciliation uses, saving each
+   stop receipt on the record as it lands;
+3. it archives the card in one transaction: the claim settled, a `[cancel]` comment with the reason, and
+   one `cancelled` audit event carrying the actor, the role, the reason, the column the card left, the
+   claim and the runs stopped;
+4. it requests workspace disposal through the cleanup journal's `archive` intent, as `archive` does;
+5. it removes the card's dispatcher record.
+
+An archived card is never claimed or adopted again. A refusal archives nothing. An allowance spent on a
+held lock is `card_busy` and names the lock file and the processes `/proc/locks` lists as holding it. A
+head stop the runtime does not confirm is `head_stop_unconfirmed` and names the run and the runtime's
+reason; the record and the cleanup intent keep the heads. A repeat of the request id replays the
+committed cancel and removes a record a crash left behind. A wait card that still waits keeps its
+`cancelled` delivery instead ([Wait cards](#wait-cards)).
 
 `edit` replaces a card's spec in place: `--title`, `--description`/`--body-file` (full new text),
 `--head`, `--review-head`. PO, dispatcher and observer may edit; an ordinary card is editable only in
@@ -1973,6 +1997,7 @@ Who writes what:
 | `issue reopen` | yes | `role_forbidden` |
 | `task move` of a Product or Issue | `transition_forbidden` | `role_forbidden` |
 | `task edit` of a Product or Issue | `edit_forbidden` | `role_forbidden` |
+| `task cancel` of a Product or Issue | `transition_forbidden` | `role_forbidden` |
 
 An observer's `issue create` needs a head bound to a sprint: an unbound head is refused as
 `observer_identity_unbound`, audited as `sprint_guard_denied`, and nothing is written. The issue takes
