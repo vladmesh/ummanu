@@ -19,14 +19,16 @@ read-only. The lifecycle is explicit:
 
 The cached trees are millions of long-lived container objects. Left in the collector's generations,
 each full collection would traverse all of them again, which costs more than the reparsing saved.
-So the shared index moves newly cached trees, walks and parent maps to the permanent generation
-(`gc.freeze`), once per batch, and `clear()` returns everything to normal collection.
+So the shared index moves each tree to the permanent generation (`gc.freeze`) as it is parsed,
+before the collector can run again, and each walk and parent map as it is cached; `clear()` returns
+everything to normal collection.
 """
 
 from __future__ import annotations
 
 import ast
 import gc
+import re
 import unicodedata
 from collections import deque
 from pathlib import Path
@@ -49,10 +51,7 @@ class SourceIndex:
 
         The filename only labels a `SyntaxError`, which is never cached, so it is not part of the key.
         """
-        tree, parsed = self._parse(source, filename, retain=retain)
-        if parsed and retain:
-            self._frozen()
-        return tree
+        return self._parse(source, filename, retain=retain)
 
     def modules(self, root: Path, *, naming: tuple[str, ...] = ()) -> tuple[tuple[Path, ast.Module], ...]:
         """Every `*.py` under `root`, sorted, with its tree. Read on every call, parsed once per text.
@@ -62,23 +61,18 @@ class SourceIndex:
         them is skipped unparsed. See :func:`may_name`.
         """
         found = []
-        parsed = False
         for path in sorted(root.rglob("*.py")):
             text = path.read_text(encoding="utf-8")
             if naming and not may_name(text, naming):
                 continue
-            tree, new = self._parse(text, str(path), retain=True)
-            parsed = parsed or new
-            found.append((path, tree))
-        if parsed:
-            self._frozen()
+            found.append((path, self._parse(text, str(path), retain=True)))
         return tuple(found)
 
     def walk(self, tree: ast.AST) -> tuple[ast.AST, ...]:
         """`tuple(ast.walk(tree))`, in the same order, once per retained tree."""
         nodes = self._walks.get(id(tree))
         if nodes is None:
-            nodes = tuple(ast.walk(tree))
+            nodes = _breadth_first(tree)
             if id(tree) in self._retained_ids:
                 self._walks[id(tree)] = nodes
                 self._frozen()
@@ -103,43 +97,65 @@ class SourceIndex:
         if self._freeze:
             gc.unfreeze()
 
-    def _parse(self, source: str, filename: str, *, retain: bool) -> tuple[ast.Module, bool]:
+    def _parse(self, source: str, filename: str, *, retain: bool) -> ast.Module:
         tree = self._trees.get(source)
         if tree is not None:
-            return tree, False
+            return tree
         # A tree holds no cycle, so the collector has nothing to find while it is being built; left
         # on, it would traverse the half-built tree, and the whole heap behind it, over and over.
         enabled = gc.isenabled()
         gc.disable()
         try:
             tree = ast.parse(source, filename=filename)
+            self.parses += 1
+            if retain:
+                self._trees[source] = tree
+                self._retained_ids.add(id(tree))
+                self._frozen()
         finally:
             if enabled:
                 gc.enable()
-        self.parses += 1
-        if retain:
-            self._trees[source] = tree
-            self._retained_ids.add(id(tree))
-        return tree, True
+        return tree
 
     def _frozen(self) -> None:
         if self._freeze:
             gc.freeze()
 
 
-def may_name(text: str, fragments: tuple[str, ...]) -> bool:
-    """Whether `text` could parse to an identifier that contains one of `fragments`.
+def _breadth_first(tree: ast.AST) -> tuple[ast.AST, ...]:
+    """The nodes of `ast.walk(tree)`, in its order, without a generator per node."""
+    nodes = [tree]
+    for node in nodes:
+        for field in node._fields:
+            value = getattr(node, field)
+            if isinstance(value, ast.AST):
+                nodes.append(value)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, ast.AST):
+                        nodes.append(item)
+    return tuple(nodes)
+
+
+def may_name(text: str, fragments: tuple[str, ...], *, whole: bool = False) -> bool:
+    """Whether `text` could parse to an identifier that contains one of `fragments`, or with `whole`,
+    to a name or dotted part of one that is exactly one of them.
 
     An identifier, and so every dotted module name, is spelled out whole in the source: no
     continuation, string or comment splits one. Python normalizes identifiers with NFKC, so a
     non-ASCII text is also searched in that form, where a lookalike spelling would surface.
     """
-    if any(fragment in text for fragment in fragments):
+
+    def spelled(candidate: str) -> bool:
+        if whole:
+            return any(re.search(rf"(?<!\w){re.escape(fragment)}(?!\w)", candidate) for fragment in fragments)
+        return any(fragment in candidate for fragment in fragments)
+
+    if spelled(text):
         return True
     if text.isascii():
         return False
-    normalized = unicodedata.normalize("NFKC", text)
-    return any(fragment in normalized for fragment in fragments)
+    return spelled(unicodedata.normalize("NFKC", text))
 
 
 def imports(tree: ast.AST) -> tuple[ast.Import | ast.ImportFrom, ...]:
