@@ -5495,6 +5495,19 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.reader.show("ummanu-510")["state"], "in_progress")
         self.assertNotEqual(self.runtime.production_state.load()["attempt_id"], first_attempt)
 
+    def _move_to_validate(self, request_id: str) -> None:
+        """The operator moves the card to Validate by hand, on whatever commit it holds."""
+        self.writer.move(
+            role="po",
+            actor="operator",
+            sprint_override=True,
+            sprint_override_reason="the operator moves a card of a reserved project by hand",
+            reference="ummanu-510",
+            target="validate",
+            reason="validate the current commit",
+            request_id=request_id,
+        )
+
     def _gate_red_move(self) -> dict:
         return next(
             event
@@ -5575,16 +5588,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.tick()["action"], "gate-red-rework")
         gate_red = self._gate_red_move()
         gate_calls = list(self.host.gate_calls)
-        self.writer.move(
-            role="po",
-            actor="operator",
-            sprint_override=True,
-            sprint_override_reason="the operator moves a card of a reserved project by hand",
-            reference="ummanu-510",
-            target="validate",
-            reason="validate the current commit",
-            request_id="manual-validate-on-rejected-sha",
-        )
+        self._move_to_validate("manual-validate-on-rejected-sha")
 
         result = self.tick()
 
@@ -5595,7 +5599,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIn(f"The mechanical gate does not run on HEAD {self.host.commit}", reason)
         self.assertIn(f"the red mechanical gate {gate_red['event_id']}", reason)
 
-    def test_publication_and_infrastructure_gate_failures_leave_the_sha_to_the_next_attempt(self) -> None:
+    def test_publication_and_infrastructure_gate_failures_leave_the_sha_open_to_the_gate(self) -> None:
         publication = GateResult(
             "red",
             "branch `pipeline/ummanu-510` was not published",
@@ -5613,27 +5617,23 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             failed_run_repo="example-org/sample",
         )
         self.start_dispatcher()
-        self.host.gate_results = [publication]
+        self.host.gate_results = [publication, infrastructure, infrastructure, infrastructure]
         self._run_worker_to_validate()
         self.assertEqual(self.tick()["action"], "gate-red-rework")
         self.assertNotIn("rejected_candidate", self._gate_red_move()["data"])
-        self._report_done("the branch is not mine to move")
-        self.assertEqual(self.tick()["action"], "stale-done-rework")
-        self._report_done("still not mine")
-        self.assertEqual(self.tick()["reason"], "worker repeatedly reported rejected SHA")
-        self._requeue_blocked("requeue-after-publication")
 
-        self.host.gate_results = [infrastructure] * 3
-        self._report_done("the same commit in a new attempt")
-        self.assertEqual(self.tick()["to"], "validate")
+        self._move_to_validate("manual-validate-after-publication")
         self.assertEqual(self.tick()["action"], "gate-infrastructure-rerun")
         self.assertEqual(self.tick()["action"], "gate-infrastructure-rerun")
         self.assertEqual(self.tick()["action"], "gate-infrastructure-reruns-exhausted")
-        self._requeue_blocked("requeue-after-infrastructure")
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "blocked")
 
-        self._report_done("the same commit in a third attempt")
-        self.assertEqual(self.tick()["to"], "validate")
-        self.assertEqual(self.tick()["action"], "review-started")
+        gate_calls = len(self.host.gate_calls)
+        self._move_to_validate("manual-validate-after-infrastructure")
+        result = self.tick()
+
+        self.assertNotEqual(result.get("reason"), "rejected candidate")
+        self.assertEqual(len(self.host.gate_calls), gate_calls + 1)
         self.assertFalse(
             [event for event in self.audit_events() if "rejected_candidate" in (event.get("data") or {})]
         )
