@@ -1539,11 +1539,14 @@ every lock wait, board statement and journal write:
 4. it requests workspace disposal through the cleanup journal's `archive` intent, as `archive` does;
 5. it removes the card's dispatcher record.
 
-An archived card is never claimed or adopted again. A refusal archives nothing. An allowance spent on a
-held lock is `card_busy` and names the lock file and the processes `/proc/locks` lists as holding it. A
-head stop the runtime does not confirm is `head_stop_unconfirmed` and names the run and the runtime's
-reason; the record and the cleanup intent keep the heads. A repeat of the request id replays the
-committed cancel and removes a record a crash left behind. A wait card that still waits keeps its
+An archived card is never claimed or adopted again. A refusal before step 3 archives nothing. An
+allowance spent on a held lock, in any step, is `card_busy` and names the lock file and the processes
+`/proc/locks` lists as holding it; before step 3 it also says whether heads were asked to stop. A head
+stop the runtime does not confirm is `head_stop_unconfirmed` and names the run and the runtime's
+reason; the record and the cleanup intent keep the heads. After step 3 has committed, a held lock or a
+failure answers that the card is archived and that steps 4 and 5 are still pending (`card_busy` with
+the holder, `cancel_pending` with the failure). A repeat of the request id replays the committed cancel
+and finishes steps 4 and 5. A wait card that still waits keeps its
 `cancelled` delivery instead ([Wait cards](#wait-cards)).
 
 `edit` replaces a card's spec in place: `--title`, `--description`/`--body-file` (full new text),

@@ -9,10 +9,10 @@ its cancel instead, and the dispatcher delivers `cancelled` to its return addres
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import os
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +34,7 @@ from ummanu.board.task_protocol.rows import (
     project_card_by_reference,
 )
 from ummanu.dispatch.launch import REVIEW_ROLE, WORKER_ROLE, launch_intent
-from ummanu.dispatch.ownership import _ALLOWANCE, Allowance, Deferred, _flocker, _wait, reference_lock
+from ummanu.dispatch.ownership import _ALLOWANCE, Allowance, Deferred, _path_lock, reference_lock
 from ummanu.dispatch.production import ProductionState, _stop_record_heads
 from ummanu.dispatch.state import DispatcherRecord
 from ummanu.dispatch.types import HostError
@@ -46,6 +46,14 @@ CANCELLED = "cancelled"
 #: The whole operation's bound: every lock wait, board statement and journal write it admits.
 CANCEL_ALLOWANCE = 20.0
 _WAITING = {CardState.READY.value, CardState.IN_PROGRESS.value}
+
+
+@dataclass
+class _Progress:
+    """How far one cancel got, for a refusal to say truthfully what it left behind."""
+
+    asked: list[str] = field(default_factory=list)
+    archived: str = ""
 
 
 def cancel_card(
@@ -88,19 +96,19 @@ def cancel_card(
     state = ProductionState(Path(writer.data_dir))
     allowance = Allowance(CANCEL_ALLOWANCE)
     token = _ALLOWANCE.set(allowance)
-    stopped: list[str] = []
+    progress = _Progress()
     try:
         with contextlib.ExitStack() as held:
             if isinstance(writer.client, SqlCardClient):
                 held.enter_context(writer.client.within(allowance.remaining, allowance.defer))
-            held.enter_context(_exclusive(state.tick_lock))
+            held.enter_context(_path_lock(state.tick_lock))
             held.enter_context(reference_lock(writer.data_dir, reference))
             return _cancel_held(
                 writer, state, admitted, actor, reference, reason, request_id, runtime,
-                replay=prior is not None, stopped=stopped,
+                replay=prior is not None, allowance=allowance, progress=progress,
             )
     except Deferred:
-        raise _busy(reference, allowance, stopped) from None
+        raise _busy(reference, allowance, progress) from None
     finally:
         _ALLOWANCE.reset(token)
 
@@ -116,7 +124,8 @@ def _cancel_held(
     runtime: Callable[[], Any] | None,
     *,
     replay: bool,
-    stopped: list[str],
+    allowance: Allowance,
+    progress: _Progress,
 ) -> dict[str, Any]:
     """The cancel with both locks held: heads, then the archive, then the dispatcher record."""
     payload = state.load()
@@ -130,7 +139,7 @@ def _cancel_held(
         _admit(task, reference)
         record = records.get(reference)
         if record is not None:
-            stopped.extend(_stop_heads(runtime, task, record, reference, state, payload, records))
+            _stop_heads(runtime, task, record, reference, state, payload, records, progress)
 
     def event_payload(task: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -140,7 +149,7 @@ def _cancel_held(
             "type": task.get("type"),
             "sprint": task.get("sprint"),
             "claim": task["claim"]["worker"],
-            "stopped": list(stopped),
+            "stopped": list(progress.asked),
             "dispatcher_record": reference in records,
         }
 
@@ -160,12 +169,23 @@ def _cancel_held(
         CANCELLED, role.value, actor, reference, request_id, event_payload, mutation,
         identity=identity, retry_payload={"reason": reason},
     )
-    writer._request_workspace_cleanup(result["task"], "archive")
-    removed = records.pop(reference, None) is not None
-    if removed:
-        state.put_records(payload, records)
-        state.save(payload)
-    return {**result, "stopped": stopped, "record_removed": removed, "workspace_cleanup": "requested"}
+    progress.archived = result["event_id"]
+    try:
+        writer._request_workspace_cleanup(result["task"], "archive")
+        removed = records.pop(reference, None) is not None
+        if removed:
+            state.put_records(payload, records)
+            state.save(payload)
+    except (TaskError, HostError, OSError) as exc:
+        if allowance.deferrals:
+            raise _busy(reference, allowance, progress) from None
+        raise TaskError(
+            "cancel_pending",
+            f"{reference} is archived (event {progress.archived}), but {_PENDING}: "
+            f"{exc.message if isinstance(exc, TaskError) else exc}; {_FINISH}",
+            3,
+        ) from None
+    return {**result, "stopped": progress.asked, "record_removed": removed, "workspace_cleanup": "requested"}
 
 
 def _admit(task: dict[str, Any], reference: str) -> None:
@@ -191,16 +211,19 @@ def _stop_heads(
     state: ProductionState,
     payload: dict[str, Any],
     records: dict[str, DispatcherRecord],
-) -> list[str]:
-    """Stop every head the record names, each stop receipt saved as it lands; the runs stopped."""
+    progress: _Progress,
+) -> None:
+    """Stop every head the record names, each stop receipt saved as it lands; `progress.asked`
+    names the runs once the first is asked to stop."""
     if not launch_intent(record) and not record.needs_settling():
-        return []
+        return
     if runtime is None:
         raise TaskError(
             "live_work", f"{reference} has dispatcher heads and no dispatcher runtime to stop them", 3
         )
     dispatcher = runtime()
     runs = _named_runs(record)
+    allowance = _ALLOWANCE.get()
 
     def flush() -> None:
         state.put_records(payload, records)
@@ -209,13 +232,19 @@ def _stop_heads(
     try:
         # Durable before any head is asked to stop, so an unconfirmed stop leaves its heads named.
         dispatcher.cleanup.remember(task, record)
+        progress.asked = runs
         with dispatcher.host.committing(flush):
             failure = _stop_record_heads(dispatcher, record, reference, task["state"])
         flush()
         if failure is not None:
             dispatcher.cleanup.remember(task, record)
+    except Deferred:
+        raise
     except HostError as exc:
         raise TaskError("live_work", f"{reference}: {exc}; nothing was archived", 3) from None
+    if failure is not None and allowance is not None and allowance.deferrals:
+        # A receipt flush that ran out of allowance surfaces as a refused stop; it is a held lock.
+        raise allowance.defer(allowance.deferred_at)
     if failure is not None:
         raise TaskError(
             "head_stop_unconfirmed",
@@ -224,7 +253,6 @@ def _stop_heads(
             "keep the heads; retry with the same request id",
             3,
         )
-    return runs
 
 
 def _named_runs(record: DispatcherRecord) -> list[str]:
@@ -244,28 +272,29 @@ def _named_runs(record: DispatcherRecord) -> list[str]:
     return names
 
 
-@contextlib.contextmanager
-def _exclusive(path: Path) -> Iterator[None]:
-    """Hold one flock, waiting no longer than the current allowance."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a+") as handle:
-        _wait(str(path), _flocker(handle, fcntl.LOCK_EX))
-        try:
-            yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+_PENDING = "removing its dispatcher record and requesting its workspace disposal are still pending"
+_FINISH = "repeat the same request id to finish them"
 
 
-def _busy(reference: str, allowance: Allowance, stopped: list[str]) -> TaskError:
-    """The refusal of a spent allowance, naming what held the card."""
+def _busy(reference: str, allowance: Allowance, progress: _Progress) -> TaskError:
+    """The refusal of a spent allowance, naming what held the card and what the cancel left."""
+    held = _holder(allowance.deferred_at)
+    if progress.archived:
+        return TaskError(
+            "card_busy",
+            f"{reference} is archived (event {progress.archived}), but {_PENDING}: within "
+            f"{allowance.seconds:g} s {held}; {_FINISH}",
+            3,
+        )
     after = (
-        f"the heads ({', '.join(stopped)}) were stopped and their cleanup intent is kept"
-        if stopped
+        f"its heads ({', '.join(progress.asked)}) were asked to stop and the cleanup intent naming them "
+        "is kept"
+        if progress.asked
         else "nothing was stopped"
     )
     return TaskError(
         "card_busy",
-        f"{reference} was not cancelled within {allowance.seconds:g} s: {_holder(allowance.deferred_at)}; "
+        f"{reference} was not cancelled within {allowance.seconds:g} s: {held}; "
         f"{after}, nothing was archived; retry with the same request id",
         3,
     )

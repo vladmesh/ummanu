@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import threading
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from unittest import mock
 
@@ -12,7 +13,7 @@ from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 from tests.observer_identity import as_observer
 from ummanu.dispatch import card_cancel
 from ummanu.dispatch.cleanup_journal import CleanupJournal
-from ummanu.dispatch.ownership import reference_lock
+from ummanu.dispatch.ownership import ownership_lock, reference_lock
 from ummanu.dispatch.watchdog import pid_file_path
 from ummanu.tasks import TaskError
 
@@ -20,6 +21,27 @@ REASON = "The plan changed."
 
 
 class CardCancelTests(DispatcherRuntimeFixture, unittest.TestCase):
+    def hold(self, lock) -> Callable[[], None]:
+        """Hold `lock` on another thread; the returned call releases it."""
+        held, release = threading.Event(), threading.Event()
+
+        def hold() -> None:
+            with lock:
+                held.set()
+                release.wait(10)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        self.addCleanup(holder.join)
+        self.addCleanup(release.set)
+        self.assertTrue(held.wait(5))
+
+        def released() -> None:
+            release.set()
+            holder.join()
+
+        return released
+
     def cancel(self, request_id: str, *, role: str = "po", actor: str = "operator") -> dict:
         return self.writer.cancel(
             role=role, actor=actor, reference=CARD_REF, reason=REASON, request_id=request_id,
@@ -107,28 +129,39 @@ class CardCancelTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.cancelled_event()["actor"], {"role": "observer", "id": "observer"})
 
     def test_a_held_card_lock_is_named_in_the_refusal_and_nothing_is_cancelled(self) -> None:
-        held, release = threading.Event(), threading.Event()
-
-        def hold() -> None:
-            with reference_lock(self.data_dir, CARD_REF):
-                held.set()
-                release.wait(10)
-
-        holder = threading.Thread(target=hold)
-        holder.start()
-        self.addCleanup(holder.join)
-        self.addCleanup(release.set)
-        self.assertTrue(held.wait(5))
+        release = self.hold(reference_lock(self.data_dir, CARD_REF))
         with mock.patch.object(card_cancel, "CANCEL_ALLOWANCE", 1.0), self.assertRaises(TaskError) as raised:
             self.cancel("cancel-held")
-        release.set()
+        release()
 
         self.assertEqual(raised.exception.code, "card_busy")
         self.assertIn(f"is held by pid {os.getpid()}", raised.exception.message)
         self.assertIn("nothing was archived", raised.exception.message)
         self.assertFalse(self.reader.show(CARD_REF)["closed"])
-        holder.join()
         self.assertTrue(self.cancel("cancel-held")["task"]["closed"])
+
+    def test_a_lock_held_after_the_archive_commits_is_reported_as_pending_and_a_repeat_finishes(self) -> None:
+        self.runtime.production_state.save(
+            {"version": 1, "phase": "production", "owner": self.runtime.owner,
+             "records": {CARD_REF: {"worker": "ummanu-510-pilot", "attempt_id": "attempt-settled"}}}
+        )
+        release = self.hold(ownership_lock(self.data_dir))
+        with mock.patch.object(card_cancel, "CANCEL_ALLOWANCE", 2.0), self.assertRaises(TaskError) as raised:
+            self.cancel("cancel-pending")
+        release()
+
+        self.assertEqual(raised.exception.code, "card_busy")
+        self.assertIn(f"{CARD_REF} is archived (event ", raised.exception.message)
+        self.assertIn(f"is held by pid {os.getpid()}", raised.exception.message)
+        self.assertIn("repeat the same request id", raised.exception.message)
+        self.assertNotIn("nothing was archived", raised.exception.message)
+        self.assertTrue(self.reader.show(CARD_REF)["closed"])
+        self.assertIn(CARD_REF, self.records())
+
+        again = self.cancel("cancel-pending")
+
+        self.assertEqual((again["replayed"], again["record_removed"]), (True, True))
+        self.assertNotIn(CARD_REF, self.records())
 
 
 if __name__ == "__main__":
