@@ -2410,10 +2410,6 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             raise TaskError("validation", "a release merge marker belongs on a dispatcher Done", 2)
         if release_claim and (role != "dispatcher" or target != "blocked"):
             raise TaskError("validation", "a claim release belongs on a dispatcher Blocked", 2)
-        if rejected_candidate is not None and (
-            not isinstance(rejected_candidate, dict) or role != "dispatcher"
-        ):
-            raise TaskError("validation", "a rejected candidate belongs on a dispatcher move", 2)
         task = self.reader.show(reference)
         if role == "observer" and task.get("record_type") in _TYPED_RECORD_TYPES:
             # The observer files issues and never promotes, moves or closes one.
@@ -2466,8 +2462,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                 stored_merge = existing.data.get(RELEASE_MERGE_KEY)
                 release_merge = dict(stored_merge) if isinstance(stored_merge, dict) else None
             if rejected_candidate is not None:
-                stored_rejection = existing.data.get(REJECTED_CANDIDATE_KEY)
-                rejected_candidate = dict(stored_rejection) if isinstance(stored_rejection, dict) else None
+                rejected_candidate = existing.data.get(REJECTED_CANDIDATE_KEY)
             try:
                 target_state = CardState(target)
             except ValueError:
@@ -2811,11 +2806,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                             **({WAIT_OUTCOME_KEY: wait_outcome} if wait_outcome else {}),
                             # The PO session whose turn completed the card (`complete`).
                             **({PO_SESSION_KEY: po_session} if po_session else {}),
-                            **(
-                                {REJECTED_CANDIDATE_KEY: dict(rejected_candidate)}
-                                if rejected_candidate is not None
-                                else {}
-                            ),
+                            **({REJECTED_CANDIDATE_KEY: rejected_candidate} if rejected_candidate else {}),
                         },
                     ),
                     finish=finish_with_decline,
