@@ -91,6 +91,13 @@ def _tile(tile: dict[str, Any], *, blocked: bool) -> str:
     )
     said = escape(str(tile.get("blocked_reason") or NO_REASON))
     reason = f'<p class="tile-reason" title="{said}">{said}</p>' if blocked else ""
+    skip = _mapping(tile.get("ready_skip"))
+    skipped = (
+        f'<p class="tile-skip" title="{escape(str(skip["reason"]))}">not taken since '
+        f'{escape(str(skip["since"]))}: {escape(str(skip["reason"]))}</p>'
+        if skip
+        else ""
+    )
     return "".join(
         [
             f'<li class="tile{" tile-owner" if waiting else ""}">',
@@ -99,6 +106,7 @@ def _tile(tile: dict[str, Any], *, blocked: bool) -> str:
             f'<p class="tile-title" title="{escape(str(title or NO_TITLE))}">{escape(str(title or NO_TITLE))}</p>',
             f'<p class="tile-meta">{meta}</p>',
             reason,
+            skipped,
             "</li>",
         ]
     )

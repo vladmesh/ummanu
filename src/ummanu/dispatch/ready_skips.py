@@ -25,6 +25,15 @@ def skip_until(outcome: dict[str, Any]) -> float:
     return max((float(verdict.get("until") or 0.0) for verdict in verdicts), default=0.0)
 
 
+def ready_skip_reasons(payload: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """The dispatcher's latest skip of each card it keeps a streak for, from a production-state
+    payload: `{ref: {reason, since}}`, `since` the streak's start in UTC. Its readers keep Ready cards."""
+    return {
+        ref: {"reason": streak["reason"], "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(streak["since"]))}
+        for ref, streak in (payload.get(READY_SKIPS_KEY) or {}).items()
+    }
+
+
 def notice_long_ready_skips(
     runtime: Any, payload: dict[str, Any], outcome: dict[str, Any] | None
 ) -> list[dict[str, Any]]:

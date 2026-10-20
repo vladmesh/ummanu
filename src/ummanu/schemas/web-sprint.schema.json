@@ -382,6 +382,7 @@
         "decision",
         "cards",
         "degraded_cards",
+        "ready_skips",
         "checks",
         "waiting",
         "waiting_on",
@@ -547,6 +548,25 @@
         "degraded_cards": {
           "type": "object",
           "description": "Cards of this sprint standing in an active column with no worker the dispatcher can name. Null items is a production state nobody could read, which is not the answer that nothing is degraded.",
+          "required": [
+            "source",
+            "items"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            },
+            "items": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          }
+        },
+        "ready_skips": {
+          "type": "object",
+          "description": "Ready cards of this sprint the dispatcher's claim pass skipped, each with its latest skip reason and since when (`{reason, since}`); a card it took or never skipped is absent. Null items is a production state nobody could read.",
           "required": [
             "source",
             "items"

@@ -2544,6 +2544,7 @@ class SectionSeamTests(SprintProtocolFixture):
             "decision.freshness",
             "cards",
             "degraded_cards",
+            "ready_skips",
             "checks",
             "waiting",
             "head_profiles",

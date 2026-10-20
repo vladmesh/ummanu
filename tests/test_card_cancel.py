@@ -1,4 +1,5 @@
-"""`task cancel` of a non-Done card through the public writer seam, with the dispatcher's runtime."""
+"""`task cancel` and `task supersede` of a non-Done card through the public writer seam, with the
+dispatcher's runtime."""
 
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from ummanu.tasks import TaskError
 REASON = "The plan changed."
 
 
-class CardCancelTests(DispatcherRuntimeFixture, unittest.TestCase):
+class CancelFixture(DispatcherRuntimeFixture):
     def hold(self, lock) -> Callable[[], None]:
         """Hold `lock` on another thread; the returned call releases it."""
         held, release = threading.Event(), threading.Event()
@@ -42,6 +43,11 @@ class CardCancelTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         return released
 
+    def records(self) -> dict:
+        return self.runtime.production_state.load().get("records") or {}
+
+
+class CardCancelTests(CancelFixture, unittest.TestCase):
     def cancel(self, request_id: str, *, role: str = "po", actor: str = "operator") -> dict:
         return self.writer.cancel(
             role=role, actor=actor, reference=CARD_REF, reason=REASON, request_id=request_id,
@@ -51,9 +57,6 @@ class CardCancelTests(DispatcherRuntimeFixture, unittest.TestCase):
     def cancelled_event(self) -> dict:
         [event] = [event for event in self.writer.audit.events(CARD_REF) if event.get("kind") == "cancelled"]
         return event
-
-    def records(self) -> dict:
-        return self.runtime.production_state.load().get("records") or {}
 
     def test_a_ready_card_is_archived_with_its_cancel_audit_and_a_repeat_replays(self) -> None:
         first = self.cancel("cancel-ready")
@@ -162,6 +165,143 @@ class CardCancelTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.assertEqual((again["replayed"], again["record_removed"]), (True, True))
         self.assertNotIn(CARD_REF, self.records())
+
+
+SUCCESSOR = "ummanu-511"
+
+
+class CardSupersedeTests(CancelFixture, unittest.TestCase):
+    """OLD is the pilot card, NEW its Ready neighbour; dependents are added per test."""
+
+    def supersede(
+        self, request_id: str, *, old: str = CARD_REF, new: str = SUCCESSOR, role: str = "po", actor: str = "operator"
+    ) -> dict:
+        return self.writer.supersede(
+            role=role, actor=actor, reference=old, successor=new, reason=REASON, request_id=request_id,
+            runtime=lambda: self.runtime,
+        )
+
+    def card(self, key: int, reference: str, *, state: str = "ready", closed: bool = False, **metadata: str) -> str:
+        self.board.add_card(key, reference, state=state, closed=closed, metadata={"task_type": "code", **metadata})
+        return reference
+
+    def dependents(self) -> tuple[str, str, str]:
+        """Two open dependents of OLD, one beside another blocker, and a Done one."""
+        self.card(19, "ummanu-519")
+        return (
+            self.card(20, "ummanu-520", blocked_by=CARD_REF),
+            self.card(21, "ummanu-521", blocked_by=f"ummanu-519,{CARD_REF}"),
+            self.card(22, "ummanu-522", state="done", blocked_by=CARD_REF),
+        )
+
+    def blocked_by(self, reference: str) -> str:
+        """The card's `blocked_by` as the board reads it back, its refs sorted."""
+        return self.reader.show(reference)["blocked_by"]
+
+    def superseded_events(self) -> list[dict]:
+        return [event for event in self.writer.audit.events(CARD_REF) if event.get("kind") == "superseded"]
+
+    def test_two_dependents_are_repointed_old_archived_and_the_supersession_recorded_and_a_repeat_replays(
+        self,
+    ) -> None:
+        first, second, done = self.dependents()
+
+        result = self.supersede("supersede-two")
+        again = self.supersede("supersede-two")
+
+        self.assertEqual(self.blocked_by(first), SUCCESSOR)
+        self.assertEqual(self.blocked_by(second), f"{SUCCESSOR},ummanu-519")
+        self.assertEqual(self.blocked_by(done), CARD_REF)
+        old = self.reader.show(CARD_REF)
+        self.assertTrue(old["closed"])
+        self.assertIn(f"[superseded by {SUCCESSOR}]\n{REASON}", [comment["body"] for comment in old["comments"]])
+        self.assertEqual(self.reader.show(SUCCESSOR)["workspace"]["supersedes"], CARD_REF)
+        [event] = self.superseded_events()
+        self.assertEqual(event["payload"]["successor"], SUCCESSOR)
+        self.assertEqual(
+            event["payload"]["repointed"], {first: SUCCESSOR, second: f"{SUCCESSOR},ummanu-519"}
+        )
+        self.assertEqual((result["repointed"], result["replayed"]), ([first, second], False))
+        self.assertEqual((again["event_id"], again["replayed"]), (result["event_id"], True))
+        [intent] = CleanupJournal(self.data_dir).summary()
+        self.assertEqual((intent["ref"], intent["disposition"]), (CARD_REF, "archive"))
+
+    def test_an_in_progress_old_card_has_its_heads_stopped_and_record_dropped_as_cancel_does(self) -> None:
+        self.start_dispatcher()
+        self.tick()
+        record = self.records()[CARD_REF]
+        heartbeat = Path(pid_file_path("worker", CARD_REF))
+        self.assertTrue(heartbeat.exists())
+        dependent = self.card(20, "ummanu-520", blocked_by=CARD_REF)
+
+        result = self.supersede("supersede-running")
+
+        self.assertIn("stop_head:worker", self.host.calls)
+        self.assertFalse(heartbeat.exists())
+        self.assertIn(f"worker run {record['worker_head_run']['run_id']}", result["stopped"])
+        self.assertTrue(result["record_removed"])
+        self.assertNotIn(CARD_REF, self.records())
+        [event] = self.superseded_events()
+        self.assertEqual(event["payload"]["from"], "in_progress")
+        self.assertEqual(self.blocked_by(dependent), SUCCESSOR)
+        card = self.reader.show(CARD_REF)
+        self.assertEqual((card["closed"], card["claim"]["worker"]), (True, None))
+
+    def test_each_refusal_comes_before_any_effect(self) -> None:
+        first, _second, _done = self.dependents()
+        cases = (
+            ("missing successor", {"new": "ummanu-599"}, "not_found"),
+            ("successor is the card itself", {"new": CARD_REF}, "validation"),
+            ("archived successor", {"new": self.card(30, "ummanu-530", closed=True)}, "validation"),
+            ("Done successor", {"new": self.card(31, "ummanu-531", state="done")}, "validation"),
+            ("successor blocked_by the card", {"new": self.card(32, "ummanu-532", blocked_by=CARD_REF)},
+             "dependency_cycle"),
+            ("successor waiting for a dependent", {"new": self.card(33, "ummanu-533", blocked_by=first)},
+             "dependency_cycle"),
+            ("Done card", {"old": self.card(34, "ummanu-534", state="done")}, "transition_forbidden"),
+            ("archived card", {"old": self.card(35, "ummanu-535", closed=True)}, "transition_forbidden"),
+        )
+        refused = {}
+        for name, refs, code in cases:
+            with self.subTest(name), self.assertRaises(TaskError) as raised:
+                self.supersede(f"supersede-{len(refused)}", **refs)
+            self.assertEqual(raised.exception.code, code, raised.exception.message)
+            refused[name] = raised.exception.message
+
+        self.assertIn(f"ummanu-533 -> {first} -> ummanu-533", refused["successor waiting for a dependent"])
+        self.assertFalse(self.reader.show(CARD_REF)["closed"])
+        self.assertEqual(self.blocked_by(first), CARD_REF)
+        self.assertIsNone(self.reader.show(SUCCESSOR)["workspace"]["supersedes"])
+        self.assertEqual(self.superseded_events(), [])
+
+    def test_the_observer_supersedes_only_by_a_card_of_its_own_sprint(self) -> None:
+        self.observed_sprint()
+        with self.assertRaises(TaskError) as raised:
+            self.supersede("supersede-observer-other", role="observer", actor="observer")
+        self.assertEqual(raised.exception.code, "role_forbidden")
+        self.assertFalse(self.reader.show(CARD_REF)["closed"])
+
+        self.board.save_metadata(13, sprint_ref="sprint:1031")
+        self.supersede("supersede-observer", role="observer", actor="observer")
+
+        self.assertTrue(self.reader.show(CARD_REF)["closed"])
+        [event] = self.superseded_events()
+        self.assertEqual(event["actor"], {"role": "observer", "id": "observer"})
+
+    def test_a_held_card_lock_refuses_naming_the_holder_and_repoints_nothing(self) -> None:
+        first, second, _done = self.dependents()
+        release = self.hold(reference_lock(self.data_dir, CARD_REF))
+        with mock.patch.object(card_cancel, "CANCEL_ALLOWANCE", 1.0), self.assertRaises(TaskError) as raised:
+            self.supersede("supersede-held")
+        release()
+
+        self.assertEqual(raised.exception.code, "card_busy")
+        self.assertIn(f"is held by pid {os.getpid()}", raised.exception.message)
+        self.assertEqual((self.blocked_by(first), self.blocked_by(second)), (CARD_REF, f"{CARD_REF},ummanu-519"))
+        self.assertFalse(self.reader.show(CARD_REF)["closed"])
+        self.assertIsNone(self.reader.show(SUCCESSOR)["workspace"]["supersedes"])
+
+        self.assertEqual(self.supersede("supersede-held")["repointed"], [first, second])
 
 
 if __name__ == "__main__":

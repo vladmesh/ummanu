@@ -308,6 +308,22 @@ def add_task_subcommands(subparsers) -> None:
     cancel_reason.add_argument("--reason", help="why the card is cancelled")
     cancel_reason.add_argument("--reason-file")
     task_cancel.set_defaults(handler=run_task_cancel)
+    task_supersede = task_subcommands.add_parser(
+        "supersede",
+        help="PO, or the observer when both cards are of its own sprint: cancel a non-Done card as "
+        "`cancel` does and, in its archive transaction, move every open dependent's blocked_by to the "
+        "successor and record that the successor supersedes it",
+    )
+    task_supersede.add_argument("--ref", required=True, help="the card that is superseded")
+    task_supersede.add_argument("--by", required=True, help="the open card that takes its place")
+    task_supersede.add_argument("--role", required=True, choices=(Role.PO.value, Role.OBSERVER.value))
+    task_supersede.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
+    _add_data_dir_args(task_supersede)
+    task_supersede.add_argument("--request-id")
+    supersede_reason = task_supersede.add_mutually_exclusive_group(required=True)
+    supersede_reason.add_argument("--reason", help="why the card is superseded")
+    supersede_reason.add_argument("--reason-file")
+    task_supersede.set_defaults(handler=run_task_supersede)
     task_e2e = task_subcommands.add_parser(
         "e2e-budget",
         help="PO only: raise the e2e cap of a code card outside every sprint by the runs the owner granted, "
@@ -689,7 +705,9 @@ def run_task_report(args: argparse.Namespace) -> int:
     )
 
 
-def run_task_cancel(args: argparse.Namespace) -> int:
+def _dispatcher_runtime(args: argparse.Namespace) -> Callable[[], object]:
+    """The dispatcher runtime a cancel builds when it has heads to stop."""
+
     def runtime() -> object:
         from ummanu.dispatch.bootstrap import runtime_from_args
 
@@ -700,6 +718,10 @@ def run_task_cancel(args: argparse.Namespace) -> int:
             owner=os.environ.get("UMMANU_DISPATCHER_OWNER", "ummanu-dispatcher"),
         )
 
+    return runtime
+
+
+def run_task_cancel(args: argparse.Namespace) -> int:
     return _run_task_write(
         args,
         lambda writer, body, actor: writer.cancel(
@@ -708,7 +730,22 @@ def run_task_cancel(args: argparse.Namespace) -> int:
             reference=args.ref,
             reason=args.reason if args.reason is not None else body,
             request_id=args.request_id,
-            runtime=runtime,
+            runtime=_dispatcher_runtime(args),
+        ),
+    )
+
+
+def run_task_supersede(args: argparse.Namespace) -> int:
+    return _run_task_write(
+        args,
+        lambda writer, body, actor: writer.supersede(
+            role=args.role,
+            actor=actor,
+            reference=args.ref,
+            successor=args.by,
+            reason=args.reason if args.reason is not None else body,
+            request_id=args.request_id,
+            runtime=_dispatcher_runtime(args),
         ),
     )
 

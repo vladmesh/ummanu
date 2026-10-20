@@ -421,9 +421,10 @@ body.fit-viewport .top .row, body.fit-viewport main { max-width: none; }
 .board .tile-head .ref { min-width: 0; overflow-wrap: anywhere; }
 .board .tile-head .age { flex: none; margin-left: auto; }
 .board .tile-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: .88rem; }
-.board .tile-meta, .board .tile-reason { font-size: .75rem; color: var(--muted); }
+.board .tile-meta, .board .tile-reason, .board .tile-skip { font-size: .75rem; color: var(--muted); }
 .board .meta-item { display: inline-block; max-width: 100%; vertical-align: bottom; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .board .tile-reason { color: var(--bad); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.board .tile-skip { overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
 .board .tile-owner { border: 2px dashed var(--warn); }
 .board .tile-owner-label { font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--warn); overflow-wrap: anywhere; }
 @media (min-width: 901px) {

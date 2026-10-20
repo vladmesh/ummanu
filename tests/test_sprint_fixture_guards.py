@@ -23,7 +23,7 @@ SUITES = (
     test_sprint_listing_budget,
 )
 EXPECTED_METHODS = {
-    "tests.test_sprints": 114,
+    "tests.test_sprints": 115,
     "tests.test_sprint_executors": 25,
     "tests.test_sprint_restore": 25,
     "tests.test_sprint_listing_budget": 4,
@@ -50,6 +50,7 @@ EXPECTED_CLASSES = {
     "tests.test_sprints.TwoOpenSprintIsolationTests": 9,
     "tests.test_sprints.SprintTests": 21,
     "tests.test_sprints.SprintStatusHeadlessCommandTests": 3,
+    "tests.test_sprints.SprintStatusReadySkipTests": 1,
     "tests.test_sprints.SprintAuditTraversalTests": 7,
     "tests.test_sprints.SprintSingleWriterGuardTests": 13,
     "tests.test_sprints.SprintReservedProjectGuardTests": 6,
@@ -216,7 +217,7 @@ class SprintFixtureGuards(unittest.TestCase):
         methods = {qualified: value for module in SUITES for qualified, value in _methods(module).items()}
         by_module = {module.__name__: len(_methods(module)) for module in SUITES}
         self.assertEqual(by_module, EXPECTED_METHODS)
-        self.assertEqual(len(methods), 168)
+        self.assertEqual(len(methods), 169)
         by_class: dict[str, int] = {}
         for qualified in methods:
             owner = qualified.rsplit(".", 1)[0]
