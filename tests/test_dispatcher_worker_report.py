@@ -34,6 +34,7 @@ class WorkerReportBoundaryTests(unittest.TestCase):
         self.runtime._stop_worker_confirmed.return_value = None
         self.runtime.host.worker_addressable.return_value = True
         self.runtime.host.head_commit.return_value = "new-candidate"
+        self.runtime.audit.events.return_value = []
         self.accounting = mock.Mock()
         self.accounting_patcher = mock.patch.object(
             dispatcher_worker_report, "attempt_accounting", self.accounting

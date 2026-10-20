@@ -798,10 +798,10 @@ class PromptPacketMixin:
                 "",
             ]
         # The board keeps every gate-red comment of every attempt; this round inherits one only when
-        # a mechanical gate rejected this attempt's checkout. That rejection lives on the record the
-        # same-SHA rule reads (`rejected_sha`), and the record goes with the attempt, so a card
-        # claimed again after Blocked is not told to avoid a commit no rule would refuse. A later
-        # review red replaces the rejection, and its rework reads the review findings above.
+        # a mechanical gate rejected this attempt's checkout, read from the record (`rejected_sha`)
+        # that goes with the attempt. A rejection of an earlier attempt is refused at report
+        # admission from the card's ledger (`dispatch/candidate_ledger.py`). A later review red
+        # replaces the rejection, and its rework reads the review findings above.
         gate_red = (
             _last_gate_red_body(task)
             if record is not None

@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from ummanu.dispatch import attempt_accounting, gate_attestation, release_lifecycle
+from ummanu.dispatch.candidate_ledger import rejected_candidate
 from ummanu.dispatch.gate import (
     GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS,
     GATE_PENDING_STALL_SECONDS,
@@ -58,6 +59,27 @@ def run_gate(
     review this same tick) or a tick outcome (red bounced the card to the worker, pending is
     waiting on CI, or the gate infra failed and the card is Blocked)."""
     ref = task["ref"]
+    sha = runtime.host.head_commit(record)
+    rejection = rejected_candidate(runtime.audit, ref, sha)
+    if rejection is not None:
+        # Whatever brought the card to Validate, a candidate a verdict rejected is never gated
+        # again, so it never reaches review either.
+        return release_lifecycle.block_merge_path(
+            runtime,
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            blocked_reason="gate",
+            action="rejected-candidate-blocked",
+            reason=(
+                f"The mechanical gate does not run on HEAD {sha}: {rejection.named()} already "
+                "rejected this candidate. New work on a new commit is needed before validation."
+            ),
+            step="gate",
+            outcome="rejected candidate",
+        )
     if record.worker_continuation.validation_move_pending:
         # The move committed but the checkpoint did not; close it before a red gate acts.
         record.worker_continuation.confirm_validation_move()

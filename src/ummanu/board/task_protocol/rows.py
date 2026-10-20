@@ -417,6 +417,9 @@ def recorded_card_transition(event: dict[str, Any]) -> tuple[str, str] | None:
 #: The data key a dispatcher release puts on the Done transition when its release merged a commit
 #: onto the integration base. Its presence says "the post-merge CI result will follow".
 RELEASE_MERGE_KEY = "release_merge"
+#: The data key a dispatcher move carries when it acts on a red review or a substantive red gate:
+#: the rejected candidate, which no later attempt of the card may report, gate or review.
+REJECTED_CANDIDATE_KEY = "rejected_candidate"
 #: The payload key of the one card event that records a post-merge CI result.
 POST_MERGE_CI_KEY = "post_merge_ci"
 POST_MERGE_CI_RESULTS = ("green", "red", "absent", "timeout")

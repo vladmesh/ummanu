@@ -146,6 +146,7 @@ from ummanu.board.task_protocol.rows import (
     PO_SESSION_KEY as PO_SESSION_KEY,
     POST_MERGE_CI_KEY as POST_MERGE_CI_KEY,
     POST_MERGE_CI_RESULTS as POST_MERGE_CI_RESULTS,
+    REJECTED_CANDIDATE_KEY,
     RELEASE_MERGE_KEY as RELEASE_MERGE_KEY,
     RUNTIME_TAILS as RUNTIME_TAILS,
     STALE_ROUND_KEY,
@@ -2393,6 +2394,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         release_merge: dict[str, Any] | None = None,
         wait_outcome: str | None = None,
         release_claim: bool = False,
+        rejected_candidate: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         role = self._role(role, BOARD_ROLES, actor=actor)
         reason = self._redact_for_board(reason)
@@ -2408,6 +2410,10 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             raise TaskError("validation", "a release merge marker belongs on a dispatcher Done", 2)
         if release_claim and (role != "dispatcher" or target != "blocked"):
             raise TaskError("validation", "a claim release belongs on a dispatcher Blocked", 2)
+        if rejected_candidate is not None and (
+            not isinstance(rejected_candidate, dict) or role != "dispatcher"
+        ):
+            raise TaskError("validation", "a rejected candidate belongs on a dispatcher move", 2)
         task = self.reader.show(reference)
         if role == "observer" and task.get("record_type") in _TYPED_RECORD_TYPES:
             # The observer files issues and never promotes, moves or closes one.
@@ -2459,6 +2465,9 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                 # Same rule: the committed Done owns whether it said a merge landed.
                 stored_merge = existing.data.get(RELEASE_MERGE_KEY)
                 release_merge = dict(stored_merge) if isinstance(stored_merge, dict) else None
+            if rejected_candidate is not None:
+                stored_rejection = existing.data.get(REJECTED_CANDIDATE_KEY)
+                rejected_candidate = dict(stored_rejection) if isinstance(stored_rejection, dict) else None
             try:
                 target_state = CardState(target)
             except ValueError:
@@ -2482,6 +2491,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                 terminal_taxonomy=terminal_taxonomy,
                 release_merge=release_merge,
                 wait_outcome=wait_outcome,
+                rejected_candidate=rejected_candidate,
                 finish=self._transition_cleanup(
                     task,
                     source=str(existing.source_state or ""),
@@ -2547,6 +2557,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             terminal_taxonomy=terminal_taxonomy,
             release_merge=release_merge,
             wait_outcome=wait_outcome,
+            rejected_candidate=rejected_candidate,
             finish=self._transition_cleanup(
                 task,
                 source=source,
@@ -2752,6 +2763,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         release_merge: dict[str, Any] | None = None,
         wait_outcome: str | None = None,
         po_session: str | None = None,
+        rejected_candidate: dict[str, Any] | None = None,
         finish: Callable[[Any], None] | None = None,
     ) -> MutationResult:
         """Run claim/move through the typed adapter, combining request staging, board
@@ -2799,6 +2811,11 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                             **({WAIT_OUTCOME_KEY: wait_outcome} if wait_outcome else {}),
                             # The PO session whose turn completed the card (`complete`).
                             **({PO_SESSION_KEY: po_session} if po_session else {}),
+                            **(
+                                {REJECTED_CANDIDATE_KEY: dict(rejected_candidate)}
+                                if rejected_candidate is not None
+                                else {}
+                            ),
                         },
                     ),
                     finish=finish_with_decline,

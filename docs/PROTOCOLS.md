@@ -2883,11 +2883,20 @@ the decision as its next input, and `reslice` ends the attempt Blocked, as for a
 
 ### Rejected SHAs and gate infrastructure reruns
 
-The dispatcher remembers the SHA a mechanical gate or red review rejected in the current attempt. A
-`done` report on the same SHA does not move to Validate: the first sends the worker back to rework in
-the same workspace (a new commit is required); the second moves the card to Blocked. If the code
-deliberately does not change for a substantive rejection (e.g. the defect is in a test or the gate),
-the worker reports `--kind blocked` with the analysis.
+A red review or a substantive red gate rejects its candidate SHA for the card in every attempt. The
+dispatcher move that acts on the rejection (the rework, Assessment or Blocked transition) carries
+`rejected_candidate` in its audit data: the SHA, its tree when an admitted `report:done` named it, the
+source (`review` or `gate`) and, for a review, the verdict event id. A gate rejection's event is that
+move. Events without the key reject nothing.
+
+A `done` report on a rejected SHA does not move to Validate, including the first report of a new
+attempt after Blocked: the first sends the worker back to rework in the same workspace (a new commit is
+required) with a comment naming the rejecting verdict or gate event; the second in the same attempt
+moves the card to Blocked. A card that reaches Validate on a rejected SHA by any other path (a manual
+move, an adopted lost record) is Blocked before the gate runs, so it is never gated or reviewed again.
+A gate that never reached CI (`publication`) judged no code: its SHA is refused only within the attempt.
+If the code deliberately does not change for a substantive rejection (e.g. the defect is in a test or
+the gate), the worker reports `--kind blocked` with the analysis.
 
 Exception: a red GitHub gate classified from its failed job and step as an enumerated infrastructure
 failure — action-download HTTP 5xx, unavailable image registry or Buildx registry setup, or an
