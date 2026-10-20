@@ -200,6 +200,8 @@ def _dod_item_lines(dod: dict[str, Any] | None) -> list[str]:
     for item in dod["items"]:
         weight = item["weight"] if item["weight"] is not None else "not weighed"
         evidence = f"; evidence: {item['evidence']}" if item["evidence"] else ""
+        if item["state"] == "descoped":
+            evidence = f"; reason: {item['descoped']['reason']}"
         lines.append(f"- {item['id']} [{item['state']}, weight {weight}{evidence}] {item['text']}")
     return [*lines, "", f"{dod['met']} of {dod['total']} met.", ""]
 

@@ -167,7 +167,8 @@ python3 -P -m ummanu sprint dod meet --ref <sprint-ref> --role observer --actor 
 python3 -P -m ummanu sprint dod reopen --ref <sprint-ref> --role observer --actor observer \
   --item d2 --reason "<why the evidence does not hold>"
 ```
-Only the PO adds items (`sprint dod add`). A free-text DoD (`dod.structured` false) has no items to mark.
+Only the PO adds, rewords or descopes items. A descoped item is out of scope: it takes no weight, meet or
+reopen and blocks no close. A free-text DoD (`dod.structured` false) has no items to mark.
 
 ## 3. Choose the next step
 

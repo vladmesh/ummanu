@@ -481,19 +481,29 @@ def _observer_call(work: dict[str, Any]) -> str:
 CALL_FIELDS = {"selected_step", "selected_why", "rejected_alternatives", "next_safe_step", "recorded_at"}
 
 
+#: The tone of each DoD item state's chip.
+DOD_STATE_TONES = {"met": "ok", "descoped": "warn"}
+
+
 def _dod_items_table(items: list[dict[str, Any]]) -> str:
-    """Each addressable item with its state, weight and the evidence that met it."""
+    """Each addressable item with its state, weight and the evidence that met it or the reason it was descoped."""
     rows = [
         [
             f'<span class="mono">{escape(str(item.get("id") or ""))}</span>',
-            _chip(str(item.get("state") or ""), "ok" if item.get("state") == "met" else ""),
+            _chip(str(item.get("state") or ""), DOD_STATE_TONES.get(str(item.get("state")), "")),
             escape(str(item.get("weight") if item.get("weight") is not None else "not weighed")),
             _long(item.get("text"), chars=200),
-            _long(item.get("evidence")) if item.get("evidence") else "",
+            _dod_item_basis(item),
         ]
         for item in items
     ]
     return _rows(["item", "state", "weight", "", "evidence"], rows)
+
+
+def _dod_item_basis(item: dict[str, Any]) -> str:
+    if item.get("state") == "descoped":
+        return "descoped: " + _long(_mapping(item.get("descoped")).get("reason"))
+    return _long(item.get("evidence")) if item.get("evidence") else ""
 
 
 def _sprint_tabs(ref: str, value: dict[str, Any] | None, work: dict[str, Any]) -> str:

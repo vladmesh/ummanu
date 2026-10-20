@@ -2334,7 +2334,7 @@
     },
     "dod": {
       "type": "object",
-      "description": "The sprint's addressable Definition of Done items and the progress they give, decided by the reader. `structured` false is a free-text DoD: no items and no progress, never items parsed out of prose. Until every item is weighed, every item counts as weight 1 and `estimated` is false.",
+      "description": "The sprint's addressable Definition of Done items and the progress they give, decided by the reader. `structured` false is a free-text DoD: no items and no progress, never items parsed out of prose. Until every item is weighed, every item counts as weight 1 and `estimated` is false. A descoped item has share 0 and is left out of `total` and `progress`.",
       "additionalProperties": false,
       "required": [
         "structured",
@@ -2382,7 +2382,8 @@
               "state": {
                 "enum": [
                   "open",
-                  "met"
+                  "met",
+                  "descoped"
                 ]
               },
               "weight": {
@@ -2413,6 +2414,10 @@
                   "object",
                   "null"
                 ]
+              },
+              "descoped": {
+                "type": "object",
+                "description": "Present on a descoped item only: role, actor, at and reason of the descope."
               },
               "share": {
                 "type": "number",

@@ -129,7 +129,7 @@ class SprintLifecycleMixin:
                 )
                 dod_unmet = self._unmet_dod_at_close(sprint_document, role=role)
                 closeout_plan = self._plan_closeout(
-                    sprint, plan, actor=actor, reason=reason, closeout=closeout
+                    sprint, plan, actor=actor, reason=reason, closeout=closeout, dod=sprint_document["dod"]
                 )
                 event = self._event(
                     SPRINT_CLOSED,
@@ -376,6 +376,7 @@ class SprintLifecycleMixin:
         actor: str,
         reason: str,
         closeout: str,
+        dod: dict[str, Any],
     ) -> SprintCloseoutPlan | None:
         """Freeze the closeout this close will write, before the transaction opens."""
         if not str(closeout or "").strip():
@@ -390,6 +391,7 @@ class SprintLifecycleMixin:
             reason=str(reason or ""),
             body=str(closeout),
             decisions=plan,
+            dod=dod,
         )
         self._check_closeout_is_writable(document, text, actor=actor)
         return SprintCloseoutPlan(

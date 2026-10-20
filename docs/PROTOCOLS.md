@@ -2411,7 +2411,8 @@ the status, so a sprint that reads `closed` has its closeout.
 
 The account of what was achieved, what is unfinished and the owner's decision about the remainder is
 supplied by the caller and carried verbatim. The close adds what only it knows: the sprint, who closed
-it and why, the verdict on every declared issue and the disposition of every card not done.
+it and why, the verdict on every declared issue, the disposition of every card not done and, for a sprint
+with Definition of Done items, each item's state with its evidence or descope reason.
 
 A close is not a completed Definition of Done. The closeout carries that sentence; a close answer
 carries `definition_of_done` with `satisfied: false` only. Closing a sprint states what became of its
@@ -2420,9 +2421,10 @@ work; it is not a statement that the sprint's Definition of Done was reached.
 #### Definition of Done items
 
 A sprint created with `--dod-item` (repeated, in order) carries addressable items `d1`, `d2`, ...: wording,
-state `open` or `met`, a weight and, once met, its evidence and who met it. `sprint show`, `sprint list`
-and the sprint read layer return them as `dod` with `progress`, the met weight over all weight; until every
-item is weighed each counts 1 and `estimated` is false. A sprint without items (every sprint opened before
+state `open`, `met` or `descoped`, a weight and, once met, its evidence and who met it. `sprint show`,
+`sprint list` and the sprint read layer return them as `dod` with `progress`, the met weight over the
+weight of every item not descoped; until every such item is weighed each counts 1 and `estimated` is
+false. A descoped item has share 0, is left out of `total`, and carries `descoped`: who, when and why. A sprint without items (every sprint opened before
 them) reads `structured: false` with no items and no progress; nothing is parsed out of its text.
 
 `sprint dod set-weight` (observer or PO) sets an item's weight, 1, 2, 3, 5, 8 or 13, with a reason; a
@@ -2430,7 +2432,14 @@ repeat re-estimates it, and each call is its own `dod_item_weighed` history even
 `--evidence`; `sprint dod reopen` takes a met item back with a reason. `sprint dod add` (PO only) appends
 items with a reason, which is also how a free-text sprint becomes addressable.
 
-A close of a sprint with items needs every item met. The observer's close is refused with
+The goal and the items are the owner's contract, so two more verbs are PO only and need an open sprint.
+`sprint dod edit --item dN --text <wording> --reason <why>` rewords an open or met item; its id, weight,
+state and evidence stay, and its `dod_item_edited` event records the new `text`, the `previous_text` and
+the reason. `sprint dod descope --item dN --reason <why>` moves an open item to `descoped` with a
+`dod_item_descoped` event. A met item is reopened before it is descoped; a descoped item takes no edit,
+weight, meet or reopen, and is never brought back.
+
+A close of a sprint with items needs every item met or descoped. The observer's close is refused with
 `close_plan_forbidden` while one is open. The PO's close goes through and files each unmet item as a new
 issue of the sprint's product, reason "sprint closed early by owner, item not met", naming the sprint and
 the item's weight; `sprint close-result` lists them as `close.dod_issues`.
@@ -2453,6 +2462,8 @@ What `SprintWriter._write` answers for every sprint write it handles when the sp
 | `budget_recorded` | `accepted` |
 | `commented` | `accepted` |
 | `current_task_set` | `refused` — `closed`, exit status `3` |
+| `dod_item_descoped` | `refused` — `closed`, exit status `3` |
+| `dod_item_edited` | `refused` — `closed`, exit status `3` |
 | `dod_item_met` | `refused` — `closed`, exit status `3` |
 | `dod_item_reopened` | `refused` — `closed`, exit status `3` |
 | `dod_item_weighed` | `refused` — `closed`, exit status `3` |

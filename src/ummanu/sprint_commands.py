@@ -296,6 +296,9 @@ def _add_dod_subcommands(commands) -> None:
          "weigh one item 1, 2, 3, 5, 8 or 13 by its expected difficulty; repeat to re-estimate"),
         ("meet", run_dod_meet, ("po", "observer"), "mark one item met, naming its evidence"),
         ("reopen", run_dod_reopen, ("po", "observer"), "take back a met item whose evidence did not hold"),
+        ("edit", run_dod_edit, ("po",), "PO only: reword an open or met item; its id, weight and evidence stay"),
+        ("descope", run_dod_descope, ("po",),
+         "PO only: take an open item out of scope; it counts in no progress and blocks no close"),
     ):
         command = verbs.add_parser(name, help=help_text)
         command.add_argument("--ref", required=True)
@@ -307,6 +310,8 @@ def _add_dod_subcommands(commands) -> None:
             command.add_argument("--text", action="append", required=True, help="one item's wording; repeat for more")
         else:
             command.add_argument("--item", required=True, help="the item id, d1, d2, ...")
+        if name == "edit":
+            command.add_argument("--text", required=True, help="the item's new wording")
         if name == "set-weight":
             command.add_argument("--weight", type=int, required=True, choices=WEIGHTS)
         if name == "meet":
@@ -825,6 +830,20 @@ def run_dod_meet(args: argparse.Namespace) -> int:
 
 def run_dod_reopen(args: argparse.Namespace) -> int:
     return _write(args, lambda writer: writer.reopen_dod_item(
+        role=args.role, actor=args.actor or args.role, reference=args.ref,
+        item=args.item, reason=args.reason, request_id=args.request_id,
+    ))
+
+
+def run_dod_edit(args: argparse.Namespace) -> int:
+    return _write(args, lambda writer: writer.edit_dod_item(
+        role=args.role, actor=args.actor or args.role, reference=args.ref,
+        item=args.item, text=args.text, reason=args.reason, request_id=args.request_id,
+    ))
+
+
+def run_dod_descope(args: argparse.Namespace) -> int:
+    return _write(args, lambda writer: writer.descope_dod_item(
         role=args.role, actor=args.actor or args.role, reference=args.ref,
         item=args.item, reason=args.reason, request_id=args.request_id,
     ))
