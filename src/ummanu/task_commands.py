@@ -296,8 +296,8 @@ def add_task_subcommands(subparsers) -> None:
     answer.set_defaults(handler=run_task_owner_answer)
     task_cancel = task_subcommands.add_parser(
         "cancel",
-        help="PO, or the observer of its own sprint: cancel a pending wait card; the dispatcher delivers "
-        "`cancelled` to its return addresses and Blocks it",
+        help="PO, or the observer of its own sprint: stop a non-Done card's heads, release its claim, "
+        "dispatcher record and workspace, and archive it; a waiting wait card has `cancelled` delivered",
     )
     task_cancel.add_argument("--ref", required=True)
     task_cancel.add_argument("--role", required=True, choices=(Role.PO.value, Role.OBSERVER.value))
@@ -305,7 +305,7 @@ def add_task_subcommands(subparsers) -> None:
     _add_data_dir_args(task_cancel)
     task_cancel.add_argument("--request-id")
     cancel_reason = task_cancel.add_mutually_exclusive_group(required=True)
-    cancel_reason.add_argument("--reason", help="why the wait is cancelled")
+    cancel_reason.add_argument("--reason", help="why the card is cancelled")
     cancel_reason.add_argument("--reason-file")
     task_cancel.set_defaults(handler=run_task_cancel)
     task_e2e = task_subcommands.add_parser(
@@ -690,6 +690,16 @@ def run_task_report(args: argparse.Namespace) -> int:
 
 
 def run_task_cancel(args: argparse.Namespace) -> int:
+    def runtime() -> object:
+        from ummanu.dispatch.bootstrap import runtime_from_args
+
+        return runtime_from_args(
+            _instance(args),
+            resolve_data_dir(args),
+            host_mode=os.environ.get("UMMANU_DISPATCHER_HOST_MODE", "real"),
+            owner=os.environ.get("UMMANU_DISPATCHER_OWNER", "ummanu-dispatcher"),
+        )
+
     return _run_task_write(
         args,
         lambda writer, body, actor: writer.cancel(
@@ -698,6 +708,7 @@ def run_task_cancel(args: argparse.Namespace) -> int:
             reference=args.ref,
             reason=args.reason if args.reason is not None else body,
             request_id=args.request_id,
+            runtime=runtime,
         ),
     )
 

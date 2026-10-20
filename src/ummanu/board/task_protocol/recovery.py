@@ -49,6 +49,8 @@ from ummanu.board.transitions import BoardProtocolError
 from ummanu.dispatch.ownership import bulk_lane, ownership_recovery, reference_lock
 from ummanu.kernel.errors import TaskError as TaskError
 
+_CANCEL_HINT = "`task cancel --ref <card> --reason <text>` stops its heads, releases it and archives it"
+
 
 class RecoveryMixin:
 
@@ -720,6 +722,11 @@ class RecoveryMixin:
         if event.get("kind") == "archived":
             self._finish_pending_archive(event, retry_payload)
             return
+        if event.get("kind") == "cancelled":
+            from ummanu.dispatch.card_cancel import finish_pending_cancel
+
+            finish_pending_cancel(self, event, retry_payload)
+            return
         if event.get("kind") == "retired":
             self._finish_pending_retired(event)
             return
@@ -1043,11 +1050,11 @@ class RecoveryMixin:
             raise TaskError(
                 "live_work",
                 "archive refuses a card with live worker or reviewer work, or one parked in "
-                "Assessment holding a retained worker",
+                f"Assessment holding a retained worker; {_CANCEL_HINT}",
                 3,
             )
         if task["claim"]["worker"] is not None:
-            raise TaskError("live_work", "archive refuses a card with an active claim", 3)
+            raise TaskError("live_work", f"archive refuses a card with an active claim; {_CANCEL_HINT}", 3)
 
     def _check_dispatcher_archivable(self, reference: str) -> None:
         state_path = self.data_dir / "dispatcher" / "production-state.json"
@@ -1066,7 +1073,7 @@ class RecoveryMixin:
         if not isinstance(record, dict):
             return
         if _dispatcher_record_has_live_work(record):
-            raise TaskError("live_work", "archive refuses a card with live dispatcher work", 3)
+            raise TaskError("live_work", f"archive refuses a card with live dispatcher work; {_CANCEL_HINT}", 3)
 
     def _request_workspace_cleanup(self, task: dict[str, Any], disposition: str) -> None:
         from ummanu.dispatch.cleanup_journal import CleanupJournal

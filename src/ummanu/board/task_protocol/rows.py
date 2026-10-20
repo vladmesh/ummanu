@@ -170,7 +170,7 @@ _DECISION_BOUND_ROLES: frozenset[Role] = frozenset({Role.DISPATCHER})
 # A Product or an Issue is not an execution task: it never takes a claim or a task transition,
 # whatever column it currently sits in.
 _TYPED_RECORD_TYPES = {"issue", "product"}
-#: The audit kind of `task cancel` on a wait card.
+#: The audit kind of `task cancel` on a waiting wait card.
 WAIT_CANCELLED = "wait_cancelled"
 #: The transition data key a wait card's terminal move (and a dependent it Blocks) carries.
 WAIT_OUTCOME_KEY = "wait_outcome"

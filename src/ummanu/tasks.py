@@ -149,7 +149,6 @@ from ummanu.board.task_protocol.rows import (
     RELEASE_MERGE_KEY as RELEASE_MERGE_KEY,
     RUNTIME_TAILS as RUNTIME_TAILS,
     STALE_ROUND_KEY,
-    WAIT_CANCELLED as WAIT_CANCELLED,
     WAIT_OUTCOME_KEY as WAIT_OUTCOME_KEY,
     ArtifactOwnershipTaskError as ArtifactOwnershipTaskError,
     SprintReservationUnverifiable as SprintReservationUnverifiable,
@@ -2003,63 +2002,16 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         reference: str,
         reason: str,
         request_id: str | None = None,
+        runtime: Callable[[], Any] | None = None,
     ) -> dict[str, Any]:
-        """Cancel an unfrozen wait as PO or its sprint-bound observer. Atomically
-        record `wait_cancel`, `[wait:cancel]` and `wait_cancelled`; do not move the
-        card. The dispatcher publishes `cancelled` and Blocks it on the next tick. A
-        frozen result wins; request-id replay is idempotent.
-        """
-        role = self._role(role, {Role.PO, Role.OBSERVER}, actor=actor)
-        reason = self._redact_for_board(reason).strip()
-        if not reason:
-            raise TaskError("validation", "a cancel needs a non-empty reason (--reason-file)", 2)
-        identity = {"reason_sha256": _digest(reason)}
-        current = self.reader.show(reference)
-        if role is Role.OBSERVER:
-            if not str(current.get("sprint") or ""):
-                raise TaskError("role_forbidden", "the observer cancels only a wait card of its own sprint", 3)
-            self._guard_observer_identity(
-                role=role.value,
-                actor=actor,
-                project=str(current.get("project") or ""),
-                card_sprint=str(current.get("sprint") or ""),
-                request_id=request_id or "",
-                reference=reference,
-            )
-        at = _now()
+        """Cancel a non-Done card (`dispatch/card_cancel.py`); `runtime` builds the dispatcher
+        runtime that stops its heads."""
+        from ummanu.dispatch.card_cancel import cancel_card
 
-        def payload(task: dict[str, Any]) -> dict[str, Any]:
-            _check_execution_record(task)
-            if not is_wait(task):
-                raise TaskError(
-                    "validation", f"{reference} is a {task.get('type') or 'typeless'} card; only a wait card is cancelled", 2
-                )
-            if task["state"] not in {CardState.READY.value, CardState.IN_PROGRESS.value}:
-                raise TaskError(
-                    "transition_forbidden", f"a wait card is cancelled while it waits; {reference} is {task['state']}", 3
-                )
-            if (held := wait_card.wait_cancel(task)) is not None:
-                raise TaskError(
-                    "already_cancelled", f"{reference} was cancelled at {held['at']}: {held['reason']}", 3
-                )
-            if (result := wait_card.wait_state(task).result) is not None:
-                raise TaskError(
-                    "already_settled", f"{reference} already has its result ({result.get('outcome')}); it stands", 3
-                )
-            return {"marker": role.value, **identity, "sprint": task.get("sprint"), "wait_cancel": at}
-
-        def mutation(task: dict[str, Any]) -> None:
-            number = _task_number(task)
-            self.client.call(
-                "saveTaskMetadata",
-                task_id=number,
-                values={wait_card.WAIT_CANCEL: wait_card.cancel_text(at, actor, role.value, reason)},
-            )
-            self.client.call(
-                "createComment", task_id=number, user_id=0, content=f"[{role.value}]\n[wait:cancel]\n\n{reason}\n"
-            )
-
-        return self._write(WAIT_CANCELLED, role, actor, reference, request_id, payload, mutation, identity=identity)
+        return cancel_card(
+            self, role=role, actor=actor, reference=reference, reason=reason, request_id=request_id,
+            runtime=runtime,
+        )
 
     def verdict(
         self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None

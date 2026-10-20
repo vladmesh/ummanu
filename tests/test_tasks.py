@@ -2819,7 +2819,6 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertEqual(self.writer.audit.committed_event("cancel-616")["kind"], "wait_cancelled")
         for reference, fields, code in (
             ("ummanu-616", {"reason": "Again."}, "already_cancelled"),
-            ("ummanu-468", {"reason": "Not a wait."}, "validation"),
             ("ummanu-616", {"reason": "  "}, "validation"),
         ):
             with self.subTest(reference=reference, fields=fields), self.assertRaises(TaskError) as raised:
@@ -2840,6 +2839,35 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         with as_observer("sprint:test"):
             self.writer.cancel(role="observer", actor="observer", reference="ummanu-618", reason="Mine.")
         self.assertEqual(self.card("ummanu-618")["wait"]["cancel"]["role"], "observer")
+
+    def test_a_cancelled_waiting_wait_card_still_has_cancelled_delivered_to_its_returns(self) -> None:
+        from types import SimpleNamespace
+
+        from ummanu.dispatch.wait_cards import advance_wait_card
+
+        self.create_wait("ummanu-628")
+        self.create_kind("ummanu-629", "code", blocked_by="ummanu-628")
+        self.place_card("ummanu-628", "in_progress")
+
+        cancelled = self.writer.cancel(
+            role="po", actor="po", reference="ummanu-628", reason="Not needed.", request_id="cancel-628"
+        )
+        with self.assertRaises(TaskError) as raised:
+            self.writer.cancel(role="po", actor="po", reference="ummanu-628", reason="Again.")
+        runtime = SimpleNamespace(
+            owner="ummanu-dispatcher", reader=self.writer.reader, writer=self.writer, audit=self.writer.audit,
+            save_records=lambda payload, records: None,
+        )
+        ended = advance_wait_card(runtime, self.writer.reader.show("ummanu-628"), {}, {}, "attempt-628")
+
+        self.assertEqual((cancelled["action"], cancelled["task"]["closed"]), ("wait_cancelled", False))
+        self.assertEqual(raised.exception.code, "already_cancelled")
+        self.assertIn("delivery to dependents, the terminal move is pending", raised.exception.message)
+        self.assertEqual((ended["action"], ended["state"]), ("wait-ended", "done"))
+        card = self.card("ummanu-628")
+        self.assertEqual((card["state"], card["wait"]["state"], card["wait"]["delivery"]), ("done", "cancelled", "complete"))
+        self.assertEqual(self.card_state("ummanu-629"), "blocked")
+        self.assertTrue(any("[wait:cancelled]" in body for body in self.card_comments("ummanu-629")))
 
     def test_the_dispatcher_takes_its_two_wait_edges_only_for_waits_and_neither_is_charged(self) -> None:
         from ummanu.dispatch.production import _budget_event_type
