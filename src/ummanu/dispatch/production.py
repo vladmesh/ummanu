@@ -1548,18 +1548,8 @@ def _production_claim_ready(
                 skipped.append({"ref": task["ref"], "reason": code_slot_wait(project, code_cap, holders)})
                 continue
         attempt_id = new_attempt_id()
-        resume_workspaces = payload.get("resume_workspaces")
-        resume_workspace = isinstance(resume_workspaces, dict) and task["ref"] in resume_workspaces
         try:
-            outcome = claim_ready_task(
-                runtime,
-                task,
-                records,
-                payload,
-                attempt_id,
-                resume_workspace=resume_workspace,
-                fresh_attempt=True,
-            )
+            outcome = claim_ready_task(runtime, task, records, payload, attempt_id, fresh_attempt=True)
         except TaskError as exc:
             if exc.code in {"capacity_reached", "claim_conflict", "predecessor_open"}:
                 skipped.append({"ref": task["ref"], "reason": exc.message})

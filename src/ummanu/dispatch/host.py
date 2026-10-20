@@ -422,6 +422,7 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
         failover: bool = False,
         heartbeat_run_id: str = "",
         local_run_snapshot: dict[str, Any] | None = None,
+        record: DispatcherRecord | None = None,
     ) -> dict[str, Any]:
         self._require_production_runtime("worker-prepare")
         self._require_cleanup_admission(task["ref"])
@@ -459,7 +460,14 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
         self._write_prompt(
             Path(workspace) / "TASK.md",
             self._worker_task_doc(
-                task, base, attempt_id, generation, local_run_policy=local_run_policy
+                task,
+                base,
+                attempt_id,
+                generation,
+                record.report_decision if record else "",
+                record.report_protocol_prerequisites if record else (),
+                record=record,
+                local_run_policy=local_run_policy,
             ),
         )
         launched = self._launch(

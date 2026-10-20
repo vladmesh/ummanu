@@ -155,7 +155,7 @@ class ClaimAuditContractTests(DispatcherRuntimeFixture, unittest.TestCase):
         print("CLAIM_COUNTS " + json.dumps(counts, sort_keys=True), flush=True)
         self.assertEqual(result["status"], "ok")
         self.assertEqual(counts, {
-            "committed": 22, "pending": 19, "history": 5, "total": 46,
+            "committed": 22, "pending": 19, "history": 6, "total": 47,
             "terminal_preflight": 0, "claim_writer_committed": 8,
             "claim_writer_pending": 7, "claim_writer_total": 15,
             "protocol_events": 1, "all_events": 4,

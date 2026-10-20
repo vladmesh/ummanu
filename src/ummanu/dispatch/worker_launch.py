@@ -230,6 +230,7 @@ def launch_worker_after_claim(
             attempt_id=record.attempt_id,
             require_existing_workspace=require_existing_workspace,
             generation=record.report_generation,
+            record=record,
             failover=bool(record.preferred_head),
             heartbeat_run_id=str(dict(record.launch_intent).get("run_id") or ""),
             **snapshot_kwargs,
@@ -300,9 +301,6 @@ def launch_worker_after_claim(
         )
     record.worker_started_at = record.worker_progress_at = time.time()
     record.state = "claimed"
-    resume_workspaces = payload.get("resume_workspaces")
-    if isinstance(resume_workspaces, dict):
-        resume_workspaces.pop(ref, None)
     records[ref] = record
     runtime.save_records(payload, records)
     # The worker is up: record the head running it from the launcher's own snapshot. An adopted

@@ -158,6 +158,30 @@ def recorded_decision(
         return "", "", ()
     if decision != "rework":
         return decision, body, ()
+    prerequisites = _admitted_prerequisites(task, events, declared)
+    if prerequisites is None:
+        return "", "", ()
+    return decision, body, prerequisites
+
+
+def rework_instruction(
+    task: dict[str, Any], events: list[dict[str, Any]], decision: dict[str, Any]
+) -> tuple[str, tuple[str, ...]]:
+    """The body and admitted prerequisites of one recorded rework decision, empty when unusable."""
+    data = _event_payload(decision)
+    body = data.get("body")
+    declared = data.get("protocol_prerequisites", [])
+    if not isinstance(body, str) or not body.strip() or not isinstance(declared, list):
+        return "", ()
+    prerequisites = _admitted_prerequisites(task, events, declared)
+    if prerequisites is None:
+        return "", ()
+    return body, prerequisites
+
+
+def _admitted_prerequisites(
+    task: dict[str, Any], events: list[dict[str, Any]], declared: list[Any]
+) -> tuple[str, ...] | None:
     try:
         prerequisites = validate_rework_prerequisites(
             declared,
@@ -169,8 +193,8 @@ def recorded_decision(
     except (ValueError, ArtifactOwnershipViolation):
         # An invalid declaration is never a worker instruction. The writer rejects it before
         # commit; this is the recovery fence for a malformed historical audit record.
-        return "", "", ()
-    return decision, body, tuple(artifact.name for artifact in prerequisites)
+        return None
+    return tuple(artifact.name for artifact in prerequisites)
 
 
 def rework_parked(
@@ -260,9 +284,6 @@ def reslice_parked(
         ),
         blocked_reason=None,
     )
-    resume_workspaces = payload.setdefault("resume_workspaces", {})
-    if isinstance(resume_workspaces, dict):
-        resume_workspaces[ref] = record.attempt_id or attempt_id
     records.pop(ref, None)
     runtime.save_records(payload, records)
     return {

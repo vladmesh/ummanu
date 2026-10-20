@@ -66,7 +66,7 @@ class ProductionBlockedFenceTests(TestCase):
                     result = production._production_claim_ready(runtime, records, payload, blocked_scopes=scopes)
                     self.assertEqual(result["skipped_ready"], expected_skips)
                     claim.assert_called_once_with(runtime, ready[3], records, payload, "attempt",
-                                                  resume_workspace=False, fresh_attempt=True)
+                                                  fresh_attempt=True)
                     runtime.sprints.show.assert_called_once_with("sprint:3", include_cards=False)
                     self.assertEqual(payload, {})
                     self.assertEqual(records, {})
@@ -87,7 +87,7 @@ class ProductionBlockedFenceTests(TestCase):
                             )
                         self.assertNotIn("skipped_ready", result)
                         claim.assert_called_once_with(runtime, candidate, records, payload, "attempt",
-                                                      resume_workspace=False, fresh_attempt=True)
+                                                      fresh_attempt=True)
 
     def test_missing_scopes_never_create_empty_tokens_or_global_fence(self):
         for card, expected in (

@@ -396,16 +396,7 @@ class DispatcherRuntime:
         if pending_launch is not None:
             return pending_launch
         if task["state"] == "ready":
-            resume_workspaces = payload.get("resume_workspaces")
-            resume_workspace = isinstance(resume_workspaces, dict) and ref in resume_workspaces
-            return _claim_ready_task(
-                self,
-                task,
-                records,
-                payload,
-                attempt_id,
-                resume_workspace=resume_workspace,
-            )
+            return _claim_ready_task(self, task, records, payload, attempt_id)
         if task["state"] == "in_progress":
             return self._advance_worker(task, records, payload, attempt_id)
         if task["state"] == "validate":
@@ -428,18 +419,9 @@ class DispatcherRuntime:
         records: dict[str, DispatcherRecord],
         payload: dict[str, Any],
         attempt_id: str,
-        *,
-        resume_workspace: bool = False,
     ) -> dict[str, Any]:
         """Compatibility entry point; production claim ownership lives in dispatch.claim."""
-        return _claim_ready_task(
-            self,
-            task,
-            records,
-            payload,
-            attempt_id,
-            resume_workspace=resume_workspace,
-        )
+        return _claim_ready_task(self, task, records, payload, attempt_id)
 
     def _end_review_pane_confirmed(
         self,
@@ -764,9 +746,6 @@ class DispatcherRuntime:
             disposition="blocked",
             blocked_reason=_bring_up_terminal_reason(failure),
         )
-        resume_workspaces = payload.setdefault("resume_workspaces", {})
-        if isinstance(resume_workspaces, dict):
-            resume_workspaces[ref] = record.attempt_id or attempt_id
         records.pop(ref, None)
         self.save_records(payload, records)
         return {

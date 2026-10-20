@@ -873,6 +873,7 @@ class FakeHost:
         failover: bool = False,
         heartbeat_run_id: str = "",
         local_run_snapshot: dict[str, Any] | None = None,
+        record=None,
     ) -> dict[str, str]:
         self.calls.append("prepare_worker")
         self.prepare_requires_existing.append(require_existing_workspace)
@@ -891,7 +892,15 @@ class FakeHost:
             raise HostError(self.fail_prepare_reason)
         workspace = self.root / worker_id
         workspace.mkdir(parents=True, exist_ok=True)
-        self._write_task_doc(task, workspace, attempt_id, generation)
+        self._write_task_doc(
+            task,
+            workspace,
+            attempt_id,
+            generation,
+            record.report_decision if record else "",
+            record.report_protocol_prerequisites if record else (),
+            record=record,
+        )
         self.prepared.append(task["ref"])
         launched = self._launched(
             f"term:{worker_id}",
