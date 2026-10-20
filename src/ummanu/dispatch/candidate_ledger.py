@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ummanu.board.audit_contract import is_protocol_event
 from ummanu.board.task_protocol.rows import REJECTED_CANDIDATE_KEY
 from ummanu.dispatch.state import REVIEW_REJECTION_REASON, DispatcherRecord
 from ummanu.kernel.errors import TaskError
@@ -32,7 +33,7 @@ class RejectedCandidate:
 
 
 def _protocol_data(event: dict[str, Any]) -> dict[str, Any]:
-    data = event.get("data") if event.get("record_type") == "board.protocol_event" else None
+    data = event.get("data") if is_protocol_event(event) else None
     return data if isinstance(data, dict) else {}
 
 

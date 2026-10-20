@@ -1457,6 +1457,12 @@ python3 -P -m ummanu task decide --role observer --ref PROJECT-N \
 `--kind` is `accept`, `rework` or `reslice`; the reason is required. Only the observer decides, and
 only about a card whose project an open sprint reserves; otherwise it is refused.
 
+A Blocked card takes a `rework` decision too, under the same reason, redaction, request-id replay and
+repeated-blocker rules. It is bound to the card's last move into Blocked (`blocked_visit`), and the same
+write moves the card Blocked -> Ready as the observer; the next claim opens a worker round on it (see
+[Return from Blocked](#return-from-blocked)). `accept` and `reslice` on a Blocked card, and any decision
+on a card in neither Assessment nor Blocked, are refused with `transition_forbidden`.
+
 A move out of Assessment carries the decision it performs, with one destination each: `accept` →
 Done, `rework` → In progress, `reslice` → Blocked. A `--decision` the card's audit does not hold since
 it entered the column, or paired with the wrong destination, is refused whoever passes it. The
@@ -3421,12 +3427,14 @@ and recovery reads the last such line.
 
 ### Return from Blocked
 
-A Blocked card goes back to work through one command, `task move --to ready` with a reason, by the PO,
-observer or steward; there is no resume verb. The next claim continues the round the card's last
-dispatcher Blocked move interrupted, at the stage it stopped at (`admission`, `worker`, `gate` or
-`review`). One reader, `resume_point` in `dispatch/claim.py`, decides it from the card's audit on every
-claim path. Only the dispatcher's own Blocked moves out of In progress, Validate or Assessment are read,
-and a claim made after one ends it: such a card resumes nothing and opens a fresh round at generation 1.
+A Blocked card goes back to work through one command: `task move --to ready` with a reason, by the PO,
+observer or steward, or a `rework` decision by the observer, which moves it to Ready with a new
+instruction ([Decisions on a parked card](#decisions-on-a-parked-card)); there is no resume verb. The
+next claim continues the round the card's last dispatcher Blocked move interrupted, at the stage it
+stopped at (`admission`, `worker`, `gate` or `review`). One reader, `resume_point` in
+`dispatch/claim.py`, decides it from the card's audit on every claim path. Only the dispatcher's own
+Blocked moves out of In progress, Validate or Assessment are read, and a claim made after one ends it:
+such a card resumes nothing and opens a fresh round at generation 1.
 
 A Blocked move out of In progress, a refusal before the card had a checkout, and a Blocked move out of
 Validate or Assessment that judged the candidate itself (a red review ceiling or repeated blockers, a
@@ -3434,14 +3442,14 @@ rejected candidate, a reslice decision) resume at the worker stage. Any other Bl
 Validate or Assessment is a gate or review stage; the stage only names which check failed, since both
 continue in Validate.
 
-A gate or review stage continues on an unchanged candidate with no worker round. That holds when the
-interrupted round's last worker report is its admitted `report:done`, the retained checkout's HEAD is
-that report's `worker_check.candidate_sha`, and the checkout's `TASK.md` still names that round. The
-claim opens a new attempt whose record keeps the round's generation, report ids and decision, and the
-dispatcher moves the card In progress -> Validate, so the gate and the reviewer read the round's own
-admission evidence. The Validate path then runs unchanged: a candidate in the card's rejected ledger is
-Blocked naming the verdict before either check, the gate runs under its receipt rules, and the reviewer
-is launched on the same SHA.
+A gate or review stage continues on an unchanged candidate with no worker round, unless a rework
+decision returned the card. That holds when the interrupted round's last worker report is its admitted
+`report:done`, the retained checkout's HEAD is that report's `worker_check.candidate_sha`, and the
+checkout's `TASK.md` still names that round. The claim opens a new attempt whose record keeps the
+round's generation, report ids and decision, and the dispatcher moves the card In progress -> Validate,
+so the gate and the reviewer read the round's own admission evidence. The Validate path then runs
+unchanged: a candidate in the card's rejected ledger is Blocked naming the verdict before either check,
+the gate runs under its receipt rules, and the reviewer is launched on the same SHA.
 
 Every other return opens a worker round:
 
@@ -3456,6 +3464,11 @@ Every other return opens a worker round:
   across every return until a new decision or a fresh round replaces it: a round opened by a claim
   with no interrupted round before it, a red gate or a bounced done report carries none, nor does a
   card Blocked out of Assessment, whose round the observer has already decided on.
+- A rework decided on the Blocked card replaces that decision. It opens the round at the worker stage
+  whatever stage was interrupted, and after a Blocked move by hand it still carries the decision and
+  continues the generation; the claim then reuses the checkout when one exists. The round's report and
+  review packet bind to it as to an Assessment rework, and a done on a candidate in the card's rejected
+  ledger is still refused.
 - Verdicts already on the card do not count: the new round reads a `review:*` marker only after its
   claim, so an earlier attempt's `review:red` never parks or blocks it.
 

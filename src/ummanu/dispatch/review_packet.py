@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ummanu.board.audit_contract import is_protocol_event
+from ummanu.board.blocked_rework import decision_resolution, decision_visit
 from ummanu.board.review_blockers import BLOCKER
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id
 from ummanu.tasks import assessment_resolution, specification_revision
@@ -52,7 +53,7 @@ def resolve_review_evidence(
 ) -> ReviewEvidence:
     """Use the frozen decision and exact report request, not the latest card comment.
 
-    Resolve the canonical Assessment instruction before independent review/report
+    Resolve the canonical Assessment or Blocked rework instruction before independent review/report
     supporting data. Every selected marker must have its spec binding and board comment.
     Missing supporting evidence cannot revoke a valid instruction. Legacy text stays
     visible without supplying authority or invented dispositions.
@@ -116,7 +117,7 @@ def resolve_review_evidence(
         # An exact persisted source fixes the visit even before a report exists, or
         # when a later visit repeats the same instruction. It must still be canonical.
         decision_boundary = decisions[0][0] + 1 if len(decisions) == 1 else boundary
-        visit, canonical = assessment_resolution(events[:decision_boundary])
+        visit, canonical = decision_resolution(events[:decision_boundary])
         if (
             canonical is None
             or (decision_id and (len(decisions) != 1 or canonical.get("event_id") != decision_id))
@@ -127,7 +128,7 @@ def resolve_review_evidence(
             return ReviewEvidence(
                 historical=previous, diagnostic="unknown/unresolved: missing/ambiguous frozen decision"
             )
-        if payload(canonical).get("assessment_visit") != visit:
+        if decision_visit(payload(canonical)) != visit:
             return ReviewEvidence(
                 historical=previous, diagnostic="unknown/unresolved: decision visit mismatch"
             )
@@ -143,7 +144,7 @@ def resolve_review_evidence(
             return ReviewEvidence(
                 decision=payload(canonical)["body"],
                 decision_id=str(canonical.get("event_id") or ""), historical=previous,
-                diagnostic="unknown/unresolved: ambiguous Assessment visit",
+                diagnostic="unknown/unresolved: ambiguous decision visit",
             )
         boundary = parks[0]
     prefixes = {

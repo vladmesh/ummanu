@@ -96,6 +96,13 @@ class ClaimBoundaryTests(unittest.TestCase):
         )
         return [park, decided, moved]
 
+    def blocked_rework(self, blocked, body="Replace the reader with the declared-state table."):
+        """The observer's rework decision recorded on the card while `blocked` holds it Blocked."""
+        return self.event(
+            "observer-blocked-rework", EventKind.CARD_DECIDED, role="observer", event_id="evt-blocked-rework",
+            data={"decision": "rework", "body": body, "blocked_visit": blocked["event_id"]},
+        )
+
     def prepare(self, **kwargs):
         return claim._prepare_claim(
             self.runtime, self.task, self.records, self.payload, "old-attempt", **kwargs
@@ -176,6 +183,8 @@ class ClaimBoundaryTests(unittest.TestCase):
                 self.assertIsInstance(prepared, claim.ClaimHandoff)
                 self.assertTrue(prepared.require_existing_workspace)
                 self.assertNotEqual(prepared.record.attempt_id, "old-attempt")
+                self.assertEqual(self.payload["attempts"][0]["attempt_id"], prepared.record.attempt_id)
+        self.runtime.audit.committed_event.assert_not_called()
 
     def test_released_generic_move_to_blocked_is_a_workspace_retry(self):
         event = {"kind": "moved", "ref": "sample-1", "outcome": "success",
@@ -267,6 +276,45 @@ class ClaimBoundaryTests(unittest.TestCase):
                 self.assertTrue(point.require_existing_workspace)
                 self.assertEqual((point.decision_id, point.decision), ("", ""))
 
+    def test_a_rework_decided_on_the_blocked_card_replaces_the_rounds_decision(self):
+        block = self.block("worker-blocked")
+        self.runtime.audit.events.return_value = [
+            self.claimed(), self.report("done", 1), *self.rework_round(),
+            self.report("blocked-external_fact", 2), block, self.blocked_rework(block),
+        ]
+        point = claim.resume_point(self.runtime, self.task)
+        self.assertEqual(
+            (point.stage, point.decision_id, point.decision, point.generation),
+            (claim.STAGE_WORKER, "evt-blocked-rework", "Replace the reader with the declared-state table.", 2),
+        )
+        prepared = self.prepare(fresh_attempt=True)
+        self.assertTrue(prepared.require_existing_workspace)
+        self.assertEqual(prepared.record.report_generation, 3)
+        self.assertEqual(prepared.record.report_decision, "Replace the reader with the declared-state table.")
+        self.assertEqual(prepared.record.report_decision_id, "evt-blocked-rework")
+
+    def test_a_blocked_rework_survives_the_next_return_until_a_fresh_round(self):
+        block = self.block("worker-blocked")
+        self.runtime.audit.events.return_value = [
+            self.claimed(), block, self.blocked_rework(block),
+            self.claimed("second-attempt"), self.report("blocked-external_fact", 1, "second-attempt"),
+            self.block("worker-blocked", attempt="second-attempt"),
+        ]
+        point = claim.resume_point(self.runtime, self.task)
+        self.assertEqual((point.stage, point.decision_id, point.generation), (claim.STAGE_WORKER, "evt-blocked-rework", 1))
+
+    def test_a_blocked_rework_after_a_block_by_hand_carries_the_decision_and_the_generation(self):
+        block = self.block("worker-blocked", role="po")
+        self.runtime.audit.events.return_value = [
+            self.claimed(), self.report("blocked-external_fact", 1), block, self.blocked_rework(block),
+        ]
+        point = claim.resume_point(self.runtime, self.task)
+        self.assertEqual((point.stage, point.decision_id, point.generation), ("", "evt-blocked-rework", 1))
+        prepared = self.prepare()
+        self.assertFalse(prepared.require_existing_workspace)
+        self.assertEqual(prepared.record.report_generation, 2)
+        self.assertEqual(prepared.record.report_decision_id, "evt-blocked-rework")
+
     def held_round(self, *, report="done", generation=1, document_generation=1, admitted=True):
         """A round whose report was accepted, then a review stall out of Validate, on a retained checkout."""
         scratch = tempfile.TemporaryDirectory()
@@ -317,6 +365,23 @@ class ClaimBoundaryTests(unittest.TestCase):
         moved = self.runtime.writer.move.call_args.kwargs
         self.assertEqual(moved["target"], "validate")
         self.assertEqual(moved["request_id"], attempt_request_id(record.attempt_id, "stage-resume", "sample-1", "3"))
+
+    def test_a_rework_decided_on_a_held_candidate_opens_a_worker_round(self):
+        self.held_round(generation=3, document_generation=3)
+        stall = self.runtime.audit.events.return_value[-1]
+        self.runtime.audit.events.return_value.append(self.blocked_rework(stall))
+        point = claim.resume_point(self.runtime, self.task)
+        self.assertEqual((point.stage, point.decision_id), (claim.STAGE_WORKER, "evt-blocked-rework"))
+
+        with mock.patch.object(claim, "launch_worker_after_claim") as launch:
+            claim.claim_ready_task(self.runtime, self.task, self.records, self.payload, "old-attempt")
+
+        launch.assert_called_once()
+        self.assertTrue(launch.call_args.kwargs["require_existing_workspace"])
+        self.runtime.writer.move.assert_not_called()
+        record = self.records["sample-1"]
+        self.assertEqual((record.state, record.workspace, record.report_generation), ("claim_verified", "", 4))
+        self.assertEqual(record.report_decision, "Replace the reader with the declared-state table.")
 
     def test_a_round_the_checkout_cannot_continue_opens_a_worker_round(self):
         cases = {

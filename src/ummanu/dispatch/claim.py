@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ummanu.board.audit_contract import card_transition_of
+from ummanu.board.blocked_rework import blocked_rework
 from ummanu.board.completion_evidence import has_candidate, is_po_executed, is_wait
 from ummanu.broad_check import admitted_check
 from ummanu.dispatch import attempt_accounting
@@ -923,6 +924,7 @@ def resume_point(runtime: Any, task: dict[str, Any]) -> ResumePoint:
     The interrupted round is the one the card's last dispatcher Blocked move ended, unless a worker
     round opened since. Its decision is the rework decision that opened it, kept by every claim that
     resumes it; a Blocked move out of Assessment carries none, the observer having decided already.
+    A rework decided on the Blocked card replaces that decision and resumes at the worker stage.
     """
     ref = str(task["ref"])
     token = re.escape(request_token(ref))
@@ -952,6 +954,8 @@ def resume_point(runtime: Any, task: dict[str, Any]) -> ResumePoint:
             if source == "assessment":
                 _visit, decided = assessment_resolution(events[:index])
                 decision = decided if decided and _event_payload(decided).get("decision") == "rework" else None
+            elif (reworked := blocked_rework(events[:index])[1]) is not None:
+                decision = reworked
             elif source in {"ready", "blocked"} and stage:
                 decision = stage_decision
             else:
@@ -963,7 +967,12 @@ def resume_point(runtime: Any, task: dict[str, Any]) -> ResumePoint:
             stage = _interrupted_stage(request_id, token, source)
             stage_decision = None if source == "assessment" else decision
             stage_report = last_report
-    if not stage:
+    _visit, reworked = blocked_rework(events)
+    if reworked is not None:
+        # The observer's rework replaces the round's decision, and only new work answers it.
+        stage_decision = reworked
+        stage = STAGE_WORKER if stage in {STAGE_GATE, STAGE_REVIEW} else stage
+    elif not stage:
         return ResumePoint()
     body, prerequisites = (
         rework_instruction(task, events, stage_decision) if stage_decision is not None else ("", ())
@@ -973,7 +982,7 @@ def resume_point(runtime: Any, task: dict[str, Any]) -> ResumePoint:
         admitted_check(_event_payload(report).get("worker_check")) if action == "worker-report-done" else None
     )
     return ResumePoint(
-        require_existing_workspace=stage != STAGE_ADMISSION,
+        require_existing_workspace=stage not in {"", STAGE_ADMISSION},
         stage=stage,
         decision_id=str(stage_decision.get("event_id") or "") if body and stage_decision else "",
         decision=body,

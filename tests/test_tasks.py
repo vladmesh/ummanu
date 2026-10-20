@@ -4459,6 +4459,68 @@ class AssessmentStateTests(CardStoreCase):
             )
         self.assertEqual(unbound.exception.code, "observer_identity_unbound")
 
+    def _block(self) -> str:
+        """Block the card through an audited dispatcher move, and hand back that move's event id."""
+        self.reserve_project()
+        self.client.move(12, "in_progress")
+        return self.writer.move(
+            role="dispatcher", actor="d", reference="ummanu-468", target="blocked",
+            reason="the worker is stuck", request_id="worker-blocked",
+        )["event_id"]
+
+    def test_a_rework_on_a_blocked_card_records_it_and_returns_the_card_to_ready(self) -> None:
+        visit = self._block()
+
+        decided = self._decide("rework", request_id="blocked-rework")
+
+        self.assertEqual((decided["task"]["state"], self.client.state(12)), ("ready", "ready"))
+        events = self.writer.audit.events("ummanu-468")
+        decision = next(event for event in events if event["request_id"] == "blocked-rework")
+        self.assertEqual(
+            (decision["data"]["decision"], decision["data"]["blocked_visit"]), ("rework", visit)
+        )
+        returned = next(event for event in events if event["request_id"] == "blocked-rework-return-ready")
+        self.assertEqual(recorded_card_transition(returned), ("blocked", "ready"))
+        self.assertEqual(returned["actor"]["role"], "observer")
+
+        # A replay after the dispatcher claimed the card neither records nor moves anything again.
+        self.client.move(12, "in_progress")
+        replayed = self._decide("rework", request_id="blocked-rework")
+        self.assertTrue(replayed["replayed"])
+        self.assertEqual(self.client.state(12), "in_progress")
+        self.assertEqual(len(self.writer.audit.events("ummanu-468")), len(events))
+
+    def test_accept_and_reslice_on_a_blocked_card_are_refused(self) -> None:
+        self._block()
+        for kind in ("accept", "reslice"):
+            with self.subTest(kind=kind), self.assertRaisesRegex(TaskError, "takes only a rework decision") as raised:
+                self._decide(kind)
+            self.assertEqual(raised.exception.code, "transition_forbidden")
+        self.assertEqual(self.client.state(12), "blocked")
+        self.assertEqual(
+            [
+                event for event in self.writer.audit.events("ummanu-468")
+                if str(event.get("request_id") or "").startswith("decision-")
+            ],
+            [],
+        )
+
+    def test_a_blocked_rework_by_an_observer_of_another_sprint_is_refused(self) -> None:
+        self._block()
+        with as_observer("sprint:2000"), self.assertRaises(TaskError) as stranger:
+            self._decide("rework")
+        self.assertEqual(stranger.exception.code, "observer_sprint_mismatch")
+        self.assertEqual(self.client.state(12), "blocked")
+
+    def test_a_decision_on_a_ready_card_names_what_is_admitted(self) -> None:
+        self.reserve_project()
+        self.client.move(12, "ready")
+        with self.assertRaisesRegex(
+            TaskError, "only recorded on a card in Assessment, or a rework on a Blocked card"
+        ) as raised:
+            self._decide("rework")
+        self.assertEqual(raised.exception.code, "transition_forbidden")
+
     def test_a_po_override_still_takes_a_parked_card_back_to_ready(self) -> None:
         """The escape hatch stays open, and it is recorded as the override it is."""
         self._park()

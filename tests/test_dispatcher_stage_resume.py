@@ -174,6 +174,84 @@ class StageResumeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(len(self.host.reviews), reviews)
         self.assertEqual(self._worker_launches(), workers)
 
+    def _observer_rework(self, decision: str) -> None:
+        self.writer.decide(
+            role="observer", actor="observer", reference=CARD_REF, kind="rework", body=decision,
+            request_id="observer-blocked-rework",
+        )
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "ready")
+
+    def _decision_instruction(self) -> str:
+        return self._task_document().split("## Observer rework decision to follow", 1)[1].split("\n## ", 1)[0]
+
+    def test_a_rework_decided_on_a_worker_stage_block_opens_a_round_carrying_it(self) -> None:
+        self.tick()
+        workspace = self._record()["workspace"]
+        first_attempt = self._record()["attempt_id"]
+        self.writer.report(
+            role="worker", actor="worker", reference=CARD_REF, kind="blocked",
+            body="the fixture service is down", classification="external_fact",
+            request_id=self._worker_report_request_id("blocked", "external_fact"),
+        )
+        self.assertEqual(self.tick()["to"], "blocked")
+        decision = "Stub the fixture service and keep the reader unchanged."
+        self._observer_rework(decision)
+
+        resumed = self.tick()
+
+        self.assertEqual(resumed["status"], "ok", resumed)
+        self.assertEqual(resumed["workspace"], workspace)
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
+        self.assertTrue(self.host.prepare_requires_existing[-1])
+        self.assertNotEqual(self._record()["attempt_id"], first_attempt)
+        self._assert_one_generation(2)
+        self.assertIn(decision, self._decision_instruction())
+        self.assertEqual(self._record()["report_decision"], decision)
+
+    def test_a_rework_decided_on_a_review_stage_block_opens_a_worker_round_not_validate(self) -> None:
+        self._review_stall_blocked()
+        workers, reviews = self._worker_launches(), len(self.host.reviews)
+        decision = "Split the reader before it goes back to review."
+        self._observer_rework(decision)
+
+        restarted = self.tick()
+
+        self.assertEqual(restarted["status"], "ok", restarted)
+        self.assertNotEqual(restarted.get("action"), "stage-resumed")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
+        self.assertEqual(self._worker_launches(), workers + 1)
+        self.assertTrue(self.host.prepare_requires_existing[-1])
+        self._assert_one_generation(2)
+        self.assertIn(decision, self._decision_instruction())
+        self.assertEqual(len(self.host.reviews), reviews)
+
+    def test_a_done_on_a_ledgered_candidate_after_a_blocked_rework_is_refused(self) -> None:
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        verdict_request = self._review_verdict_request_id("red")
+        self._review_red(verdict_request)
+        self.assertEqual(self.tick()["to"], "assessment")
+        verdict = next(
+            event for event in task_audit_for(self.board).events() if event["request_id"] == verdict_request
+        )
+        self._decide("accept")
+        self.host.gate_results = [HostError("gate backend failed")]
+        self.assertEqual(self.tick()["reason"], "release failed")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+        self._observer_rework("Address the red review findings in a new commit.")
+        self.assertNotEqual(self.tick().get("action"), "stage-resumed")
+        gates, reviews = len(self.host.gate_calls), len(self.host.reviews)
+
+        self._report_done()
+        self.tick()
+
+        comments = [comment["body"] for comment in self.reader.show(CARD_REF)["comments"]]
+        self.assertTrue(
+            any(f"was already rejected by the red review verdict {verdict['event_id']}" in body for body in comments)
+        )
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
+        self.assertEqual((len(self.host.gate_calls), len(self.host.reviews)), (gates, reviews))
+
 
 if __name__ == "__main__":
     unittest.main()

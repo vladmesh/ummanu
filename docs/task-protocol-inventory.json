@@ -13,7 +13,7 @@
     "src/ummanu/board/task_protocol/sprint_guard.py"
   ],
   "ast_deltas": {
-    "TaskWriter.decide": "f19db76f906da6894ca748f7f8ec8a3cc8a61a48349bd53e967ed4f2add917da",
+    "TaskWriter.decide": "8fc8ce7f9f5a721ff9567f1516943ba344ec74668181ec344511a2b9befe7496",
     "TaskWriter.edit": "0884b37e01f84af601f487977be4c5f4e788f30de409692a1c4a7ae8b314391c",
     "TaskWriter.cancel": "58efc23eb9f6aa756d49ef46e807e4b58012076be71442bd399815e0f53e813b",
     "TaskWriter._finish_pending_cleanup": "816340855b32e1771b7925893de20d0018284139c0e1392cd592e5dfff358633",
