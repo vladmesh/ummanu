@@ -247,6 +247,51 @@ class ReviewEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.findings, "BLOCKER-repair: latest")
         self.assertEqual(evidence.diagnostic, "applicable round/spec evidence")
 
+    def blocked_rework_round(self, *, decided_visit="blocked-1"):
+        """The round after a rework decided on a Blocked card: a new attempt reports done on it."""
+        fixture = PacketFixture()
+        del fixture.events[2:]
+        del fixture.task["comments"][1:]
+        for event_id, source, target in (
+            ("blocked-0", "validate", "blocked"), ("ready-0", "blocked", "ready"),
+            ("claim-1", "ready", "in_progress"), ("blocked-1", "in_progress", "blocked"),
+        ):
+            fixture.events.append({
+                "event_id": event_id, "kind": "card.moved", "record_type": "board.protocol_event",
+                "transition": {"source": source, "target": target}, "data": {},
+            })
+        fixture.marker("decision:rework", fixture.decision, "observer-decision-b", blocked_visit=decided_visit)
+        fixture.marker(
+            "report:done",
+            "BLOCKER-rejected: observer-rejected; observer quote: Reject BLOCKER-rejected: invariant already holds.",
+            attempt_request_id("attempt-2", "worker-report-done", "ummanu-1", "3"),
+        )
+        return fixture
+
+    def test_a_rework_decided_on_a_blocked_card_binds_the_next_attempt_round(self):
+        fixture = self.blocked_rework_round()
+        evidence = resolve_review_evidence(
+            fixture.task, fixture.events, attempt="attempt-2", generation=3,
+            decision=fixture.decision, decision_id="observer-decision-b",
+        )
+        self.assertEqual((evidence.decision, evidence.decision_id), (fixture.decision, "observer-decision-b"))
+        self.assertEqual(evidence.report_id, fixture.events[-1]["event_id"])
+        statuses = dict(dispositions(evidence))
+        self.assertEqual(
+            statuses["BLOCKER-rejected"],
+            "observer-rejected; observer quote: Reject BLOCKER-rejected: invariant already holds.",
+        )
+        self.assertEqual(statuses["BLOCKER-later"], "unknown/unresolved: missing disposition evidence")
+
+    def test_a_blocked_rework_naming_an_earlier_blocked_visit_is_unresolved(self):
+        fixture = self.blocked_rework_round(decided_visit="blocked-0")
+        evidence = resolve_review_evidence(
+            fixture.task, fixture.events, attempt="attempt-2", generation=3,
+            decision=fixture.decision, decision_id="observer-decision-b",
+        )
+        self.assertEqual(evidence.decision, "")
+        self.assertIn("missing/ambiguous frozen decision", evidence.diagnostic)
+
     def test_released_generic_decision_and_review_shapes_remain_readable(self):
         fixture = PacketFixture()
         for event in fixture.events:

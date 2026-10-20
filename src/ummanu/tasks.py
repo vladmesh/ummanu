@@ -21,6 +21,12 @@ from ummanu.board import (
     wait_card,
 )
 from ummanu.board.backend import BOARD_STORE_KIND, entity_id
+from ummanu.board.blocked_rework import (
+    BLOCKED_VISIT_KEY,
+    blocked_decision_refusal,
+    blocked_rework,
+    return_blocked_rework,
+)
 from ummanu.board.card_transitions import CardTransitionForbidden, card_transition
 from ummanu.board.completion_evidence import (
     PO_COMPLETION_MARKERS,
@@ -2079,9 +2085,10 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         request_id: str | None = None,
     ) -> dict[str, Any]:
         """Record the observer's decision for a parked card separately from its move;
-        leaving Assessment requires the recorded decision. Only the sprint-bound
-        observer may decide. PO intervention uses an explicit sprint override, and
-        normal reservation/identity guards still apply.
+        leaving Assessment requires the recorded decision, and a rework on a Blocked card
+        returns it to Ready in the same write. Only the sprint-bound observer may decide.
+        PO intervention uses an explicit sprint override, and normal reservation/identity
+        guards still apply.
         """
         role = self._role(role, {Role.OBSERVER}, actor=actor)
         body = self._redact_for_board(body)
@@ -2114,18 +2121,29 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                     "body": body,
                     "body_sha256": _digest(body),
                 }
-                for field_name in ("description_sha256", "specification_revision", "protocol_prerequisites"):
+                for field_name in (
+                    "description_sha256", "specification_revision", "protocol_prerequisites", BLOCKED_VISIT_KEY,
+                ):
                     if field_name in owned_data:
                         replay_data[field_name] = owned_data[field_name]
-                return self._marker_write(
-                    action="decided",
-                    event_kind=EventKind.CARD_DECIDED,
+                return return_blocked_rework(
+                    self,
+                    blocked=BLOCKED_VISIT_KEY in owned_data,
                     role=role,
                     actor=actor,
                     reference=reference,
-                    reason=body,
+                    body=body,
                     request_id=request_id,
-                    data=replay_data,
+                    write=lambda: self._marker_write(
+                        action="decided",
+                        event_kind=EventKind.CARD_DECIDED,
+                        role=role,
+                        actor=actor,
+                        reference=reference,
+                        reason=body,
+                        request_id=request_id,
+                        data=replay_data,
+                    ),
                 )
             current = self.reader.show(reference)
             # Authorization before anything about the card: which sprint holds the project is the
@@ -2149,22 +2167,24 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                 for event in self.audit.pending_events()
                 if str(event.get("ref") or "") == reference and _event_action(event) == "decided"
             ]
-            visit, existing = assessment_resolution([*committed_events, *pending_decisions])
+            blocked = current["state"] == "blocked"
+            visit, existing = (
+                (blocked_rework(committed_events)[0], None) if blocked
+                else assessment_resolution([*committed_events, *pending_decisions])
+            )
             marker_data = {
                 "marker": f"decision:{kind}",
                 "decision": kind,
                 "body": body,
                 "body_sha256": _digest(body),
-                "assessment_visit": visit or None,
+                **({BLOCKED_VISIT_KEY: visit} if blocked else {"assessment_visit": visit or None}),
                 "description_sha256": _digest(current["description"]),
                 "specification_revision": specification_revision(committed_events, current["description"])
                 or None,
                 "protocol_prerequisites": list(declared_prerequisites),
             }
-            if current["state"] != "assessment":
-                raise TaskError(
-                    "transition_forbidden", "a decision is only recorded on a card in Assessment", 3
-                )
+            if refusal := blocked_decision_refusal(current["state"], kind, visit):
+                raise TaskError("transition_forbidden", refusal, 3)
             if decision_kind is TaskDecision.ACCEPT and partial_report_park(committed_events):
                 raise TaskError(
                     "validation", "a partial report needs rework or reslice; accept is refused", 2
@@ -2220,16 +2240,25 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                     )
             elif declared_prerequisites:
                 raise TaskError("validation", "protocol prerequisites are only supported for rework", 2)
-            return self._marker_write(
-                action="decided",
-                event_kind=EventKind.CARD_DECIDED,
+            return return_blocked_rework(
+                self,
+                blocked=blocked,
                 role=role,
                 actor=actor,
                 reference=reference,
-                reason=body,
+                body=body,
                 request_id=request_id,
-                data=marker_data,
-                require_assessment=True,
+                write=lambda: self._marker_write(
+                    action="decided",
+                    event_kind=EventKind.CARD_DECIDED,
+                    role=role,
+                    actor=actor,
+                    reference=reference,
+                    reason=body,
+                    request_id=request_id,
+                    data=marker_data,
+                    require_assessment=not blocked,
+                ),
             )
 
     @capacity_serialized

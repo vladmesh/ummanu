@@ -59,7 +59,8 @@ class RedVerdictIntakeTests(unittest.TestCase):
 class RejectedCandidateMoveTests(unittest.TestCase):
     def test_only_the_dispatcher_moves_a_card_with_a_rejected_candidate(self):
         board = mock.MagicMock(name="board")
-        writer = TaskWriter(board, data_dir=tempfile.mkdtemp())
+        data_dir = self.enterContext(tempfile.TemporaryDirectory())
+        writer = TaskWriter(board, data_dir=data_dir)
         writer.reader = mock.MagicMock()
         before = list(board.mock_calls)
         for role, actor in (("po", "operator"), ("steward", "steward")):
