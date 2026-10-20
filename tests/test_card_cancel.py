@@ -219,7 +219,7 @@ class CardSupersedeTests(CancelFixture, unittest.TestCase):
         [event] = self.superseded_events()
         self.assertEqual(event["payload"]["successor"], SUCCESSOR)
         self.assertEqual(
-            event["payload"]["repointed"], {first: SUCCESSOR, second: f"ummanu-519,{SUCCESSOR}"}
+            event["payload"]["repointed"], {first: SUCCESSOR, second: f"{SUCCESSOR},ummanu-519"}
         )
         self.assertEqual((result["repointed"], result["replayed"]), ([first, second], False))
         self.assertEqual((again["event_id"], again["replayed"]), (result["event_id"], True))
