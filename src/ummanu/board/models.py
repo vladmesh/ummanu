@@ -45,6 +45,7 @@ class EventKind(StrEnum):
     ENTITY_UPDATED = "entity.updated"
     PRODUCT_ARCHIVED = "product.archived"
     ISSUE_CLOSED = "issue.closed"
+    ISSUE_REOPENED = "issue.reopened"
     SPRINT_CLOSED = "sprint.closed"
     SPRINT_STOPPED = "sprint.stopped"
     SPRINT_REOPENED = "sprint.reopened"

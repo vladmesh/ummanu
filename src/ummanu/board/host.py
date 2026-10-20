@@ -86,6 +86,30 @@ class DescriptionEdit:
         return cls(data["description_sha256_was"], data["description_sha256"])
 
 
+#: The Issue fields a field edit may replace, in their recorded order.
+ISSUE_EDIT_FIELDS = ("issue_kind", "title")
+
+
+@dataclass(frozen=True, slots=True)
+class FieldEdit:
+    """The Issue fields one edit replaces: its title, its kind or both, each to a new value."""
+
+    fields: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.fields or self.fields != tuple(name for name in ISSUE_EDIT_FIELDS if name in self.fields):
+            raise ValueError("field edit names title, issue_kind or both, once each")
+
+    def event_data(self) -> list[str]:
+        return list(self.fields)
+
+    @classmethod
+    def from_event_data(cls, data: object) -> FieldEdit:
+        if not isinstance(data, list):
+            raise ValueError("field edit evidence must be a list of field names")  # noqa: TRY004 - preserve the validation error contract
+        return cls(tuple(data))
+
+
 @dataclass(frozen=True, slots=True)
 class Replace:
     entity: BoardEntity
@@ -93,10 +117,11 @@ class Replace:
     reason: str
     related_refs: RelatedRefs = field(default_factory=RelatedRefs)
     request_id: str | None = None
-    # Explicit description operations carry their own evidence; without either, an Issue
-    # replace is the released priority change.
+    # Explicit description and field operations carry their own evidence; without any, an Issue
+    # replace is the priority change.
     description_append: DescriptionAppend | None = None
     description_edit: DescriptionEdit | None = None
+    field_edit: FieldEdit | None = None
 
 
 @dataclass(frozen=True, slots=True)

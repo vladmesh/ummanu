@@ -963,5 +963,172 @@ class ProductProjectEditTests(ProductIssueFixture, unittest.TestCase):
         self.assertEqual(self.product_project_binding("codegen"), ["service-template", "ummanu"])
         self.assertEqual(self._updates(), [])
 
+    def test_a_closed_product_is_refused_as_closed_before_any_write(self) -> None:
+        row = self.client.call("getTaskByReference", project_id=1, reference="product:codegen")
+        self.client.call("closeTask", task_id=row["id"])
+
+        with self.assertRaisesRegex(TaskError, "product is closed") as raised:
+            self._edit("closed-edit", remove=["service-template"])
+
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertTrue(self.product("codegen")["closed"])
+        self.assertEqual(self.product_project_binding("codegen"), ["service-template", "ummanu"])
+        self.assertEqual(self._updates(), [])
+        self.assertIsNone(self.store._host().canon.event("closed-edit"))
+
+
+class IssueEditFixture(ProductIssueFixture):
+    """One product with one open bug, and the Issue CLI run over the fixture's store."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.create_product(product_id="ummanu", projects=["ummanu"], title="Ummanu", description="", actor="po")
+        self.ref = self.create_issue(
+            product="ummanu",
+            issue_kind="bug",
+            priority="P2",
+            title="Crash",
+            description="evidence",
+            actor="po",
+            request_id="issue",
+        )["ref"]
+
+    def invoke(self, verb: str, *flags: str, role: str = "po", request_id: str = "cli") -> tuple[int, str]:
+        output = io.StringIO()
+        with (
+            mock.patch("ummanu.product_issue_commands.board_client", return_value=self.client),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            code = main(
+                ["issue", verb, "--ref", self.ref, "--role", role, "--actor", role, "--request-id", request_id,
+                 "--instance", str(self.root), "--data-dir", str(self.root / "data"), *flags]
+            )
+        return code, output.getvalue()
+
+    def events(self, kind: str) -> list[dict]:
+        return [event for event in self.audit_events() if event.get("ref") == self.ref and event.get("kind") == kind]
+
+
+class IssueTitleKindEditTests(IssueEditFixture, unittest.TestCase):
+    """`issue edit --title/--kind`: the PO renames or reclassifies an open issue, audited."""
+
+    def test_the_cli_changes_title_and_kind_once_with_one_audit_event(self) -> None:
+        before = self.issue(self.ref)
+
+        code, output = self.invoke("edit", "--title", "Crash on start", "--kind", "improvement", "--reason", "triage")
+
+        self.assertEqual(code, 0, output)
+        shown = self.issue(self.ref)
+        self.assertEqual((shown["title"], shown["kind"]), ("Crash on start", "improvement"))
+        for field in ("product", "priority", "description", "closed", "close_reason"):
+            self.assertEqual(shown[field], before[field])
+        [event] = self.events("entity.updated")
+        self.assertEqual((event["request_id"], event["actor"]["role"], event["reason"]), ("cli", "po", "triage"))
+        self.assertEqual(event["data"]["fields"], ["issue_kind", "title"])
+        self.assertEqual(self.invoke("edit", "--title", "Crash on start", "--kind", "improvement", "--reason", "triage")[0], 0)
+        self.assertEqual(self.invoke("edit", "--kind", "improvement", "--reason", "triage", request_id="same")[0], 0)
+        self.assertEqual(len(self.events("entity.updated")), 1)
+        self.assertEqual(self.invoke("edit", "--title", "Startup crash", "--reason", "triage", request_id="title")[0], 0)
+        self.assertEqual(self.events("entity.updated")[-1]["data"]["fields"], ["title"])
+        self.assertEqual((self.issue(self.ref)["title"], self.issue(self.ref)["kind"]), ("Startup crash", "improvement"))
+
+    def test_refusals_write_nothing(self) -> None:
+        before = self.issue(self.ref)
+        for request_id, values, code in (
+            ("empty-title", {"title": "  "}, "validation"),
+            ("unknown-kind", {"issue_kind": "chore"}, "validation"),
+            ("nothing", {}, "validation"),
+            ("reason", {"title": "New", "reason": " "}, "validation"),
+            ("role", {"title": "New", "role": "observer", "actor": "observer"}, "role_forbidden"),
+            ("issue", {"title": "New"}, "validation"),
+        ):
+            with self.subTest(request_id=request_id), self.assertRaises(TaskError) as raised:
+                self.store.edit_fields(reference=self.ref, request_id=request_id, **{"reason": "triage", "actor": "po", **values})
+            self.assertEqual(raised.exception.code, code)
+        self.assertEqual(self.invoke("edit", "--kind", "chore", "--reason", "triage", request_id="cli-kind")[0], 2)
+        self.assertEqual(
+            self.invoke("edit", "--title", "New", "--description", "x", "--reason", "triage", request_id="both")[0], 2
+        )
+        self.store.close_issue(reference=self.ref, reason="resolved", actor="po", request_id="close")
+        with self.assertRaises(TaskError) as raised:
+            self.store.edit_fields(reference=self.ref, title="New", reason="triage", actor="po", request_id="closed")
+        self.assertEqual(raised.exception.code, "closed")
+        shown = self.issue(self.ref)
+        self.assertEqual((shown["title"], shown["kind"]), (before["title"], before["kind"]))
+        self.assertEqual(self.events("entity.updated"), [])
+
+    def test_task_edit_refuses_an_issue_record(self) -> None:
+        writer = TaskWriter(self.client, data_dir=self.root / "data")
+
+        with self.assertRaises(TaskError) as raised:
+            writer.edit(role="po", actor="po", reference=self.ref, title="Bypass")
+
+        self.assertEqual(raised.exception.code, "edit_forbidden")
+        self.assertEqual(self.issue(self.ref)["title"], "Crash")
+
+
+class IssueReopenTests(IssueEditFixture, unittest.TestCase):
+    """`issue reopen`: a closed issue returns to open along the declared edge, with its reason."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.store.close_issue(reference=self.ref, reason="resolved", actor="po", request_id="close")
+
+    def test_the_cli_reopens_a_closed_issue_with_its_reason_and_one_audit_event(self) -> None:
+        code, output = self.invoke("reopen", "--reason", "closed by mistake")
+
+        self.assertEqual(code, 0, output)
+        shown = self.issue(self.ref)
+        self.assertFalse(shown["closed"])
+        self.assertIsNone(shown["close_reason"])
+        self.assertEqual([issue["ref"] for issue in self.store.list_issues()], [self.ref])
+        self.assertEqual(
+            [event["kind"] for event in shown["history"]["audit"]], ["entity.created", "issue.closed", "issue.reopened"]
+        )
+        [reopened] = self.events("issue.reopened")
+        self.assertEqual(reopened["transition"], {"source": "closed", "target": "open"})
+        self.assertEqual((reopened["request_id"], reopened["reason"]), ("cli", "closed by mistake"))
+        self.assertIn("[issue:reopened]\nclosed by mistake\n[request-id:cli]", self.issue_comments(self.ref))
+        self.assertEqual(self.invoke("reopen", "--reason", "closed by mistake")[0], 0)
+        self.assertEqual(len(self.events("issue.reopened")), 1)
+        self.store.close_issue(reference=self.ref, reason="duplicate", actor="po", request_id="close-again")
+        self.assertEqual(self.issue(self.ref)["close_reason"], "duplicate")
+
+    def test_refusals_write_nothing(self) -> None:
+        for request_id, values, code in (
+            ("reason", {"reason": "  "}, "validation"),
+            ("role", {"role": "observer", "actor": "observer"}, "role_forbidden"),
+            ("close", {}, "validation"),
+        ):
+            with self.subTest(request_id=request_id), self.assertRaises(TaskError) as raised:
+                self.store.reopen_issue(reference=self.ref, request_id=request_id, **{"reason": "again", "actor": "po", **values})
+            self.assertEqual(raised.exception.code, code)
+        self.assertTrue(self.issue(self.ref)["closed"])
+        self.store.reopen_issue(reference=self.ref, reason="again", actor="po", request_id="reopen")
+        with self.assertRaises(TaskError) as raised:
+            self.store.reopen_issue(reference=self.ref, reason="again", actor="po", request_id="reopen-open")
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertEqual([event["request_id"] for event in self.events("issue.reopened")], ["reopen"])
+
+    def test_a_restore_carries_the_reopen_into_another_store(self) -> None:
+        from ummanu.restore import _restore_board_history
+
+        self.store.reopen_issue(reference=self.ref, reason="again", actor="po", request_id="reopen")
+        exported = self.root / "export"
+        (exported / "board").mkdir(parents=True)
+        (exported / "board" / "audit.ndjson").write_text(
+            "".join(json.dumps(event) + "\n" for event in self.audit_events()), encoding="utf-8"
+        )
+        (self.root / "target").mkdir()
+        target = self.make_store(root=self.root / "target")
+
+        _restore_board_history(exported, target.audit)
+
+        self.assertEqual(
+            sorted(event["kind"] for event in target.audit.events(self.ref)),
+            ["entity.created", "issue.closed", "issue.reopened"],
+        )
+
 if __name__ == "__main__":
     unittest.main()

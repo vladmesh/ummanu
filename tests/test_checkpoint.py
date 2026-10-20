@@ -1941,6 +1941,24 @@ class BoardEventCheckpointCompatibilityTests(unittest.TestCase):
             path.write_text(json.dumps(record) + "\n", encoding="utf-8")
             _validate_board_events(path)
 
+    def test_issue_reopened_event_is_accepted_by_checkpoint_validation(self) -> None:
+        event = Event(
+            "issue-reopened",
+            EventKind.ISSUE_REOPENED,
+            EntityKind.ISSUE,
+            "issue:fixture",
+            Actor("po", "po"),
+            "closed by mistake",
+            datetime(2026, 9, 3, 22, 0, tzinfo=UTC),
+            source_state="closed",
+            target_state="open",
+            data={"ref": "issue:fixture", "state": "open", "close_reason": None},
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "events.ndjson"
+            path.write_text(json.dumps(event.to_record("reopen-request")) + "\n", encoding="utf-8")
+            _validate_board_events(path)
+
 
 if __name__ == "__main__":
     unittest.main()

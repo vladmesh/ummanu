@@ -12,6 +12,7 @@ from ummanu.product_issues import ISSUE_WRITE_ROLES, ProductIssueStore
 from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.runtime.paths import add_instance_argument
 from ummanu.task_commands import _read_body, resolve_data_dir, run_task_command
+from ummanu.tasks import admit_role
 
 
 def _common(
@@ -119,19 +120,28 @@ def add_product_issue_subcommands(subparsers) -> None:
     append.add_argument("--reason", required=True)
     append.add_argument("--body-file", required=True, help="the block to append, read as UTF-8")
     append.set_defaults(handler=run_issue_append)
-    edit = issue_sub.add_parser("edit", help="PO only: replace exactly an open issue's description, with native audit")
+    edit = issue_sub.add_parser(
+        "edit", help="PO only: replace an open issue's description, or its title and kind, with native audit"
+    )
     _common(edit, write=True)
     edit.add_argument("--ref", required=True)
     edit.add_argument("--reason", required=True, help="non-empty literal reason")
-    content = edit.add_mutually_exclusive_group(required=True)
+    content = edit.add_mutually_exclusive_group()
     content.add_argument("--description", help="full replacement description, verbatim")
     content.add_argument("--body-file", help="full replacement description, read as UTF-8")
+    edit.add_argument("--title", help="new title")
+    edit.add_argument("--kind", choices=("bug", "feature", "question", "improvement"), help="new kind")
     edit.set_defaults(handler=run_issue_edit)
     close = issue_sub.add_parser("close")
     _common(close, write=True)
     close.add_argument("--ref", required=True)
     close.add_argument("--reason", required=True, choices=("resolved", "invalid", "duplicate", "wont_do"))
     close.set_defaults(handler=run_issue_close)
+    reopen = issue_sub.add_parser("reopen", help="PO only: return a closed issue to open, with native audit")
+    _common(reopen, write=True)
+    reopen.add_argument("--ref", required=True)
+    reopen.add_argument("--reason", required=True, help="non-empty literal reason")
+    reopen.set_defaults(handler=run_issue_reopen)
     issue.set_defaults(handler=usage_handler("issue subcommand required"))
 
 
@@ -270,9 +280,37 @@ def run_issue_close(args):
     )
 
 
+def run_issue_reopen(args):
+    return _write(
+        args,
+        lambda store, actor: store.reopen_issue(
+            reference=args.ref, reason=args.reason, actor=actor, request_id=args.request_id, role=args.role
+        ),
+    )
+
+
 def run_issue_edit(args):
     def command():
         actor = _actor(args)
+        admit_role(args.role, actor, {"po"})
+        replaces_text = args.description is not None or args.body_file is not None
+        replaces_fields = args.title is not None or args.kind is not None
+        if replaces_text == replaces_fields:
+            raise TaskError(
+                "validation",
+                "issue edit takes --description or --body-file, or --title and/or --kind, not both",
+                2,
+            )
+        if replaces_fields:
+            return _store(args).edit_fields(
+                reference=args.ref,
+                title=args.title,
+                issue_kind=args.kind,
+                reason=args.reason,
+                actor=actor,
+                request_id=args.request_id,
+                role=args.role,
+            )
         description = _read_body(args.body_file) if args.body_file is not None else args.description
         return _store(args).edit_description(
             reference=args.ref,

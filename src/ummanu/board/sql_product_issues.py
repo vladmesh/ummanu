@@ -28,7 +28,7 @@ Three things are decided here and each is a fact about the *schema*, not a prefe
   board writes the reason first and the closure second.  Writing `issue_closed_reason` therefore
   closes the Issue, and the `closeTask` that follows finds it closed and is a no-op — the same
   end state, reached in one statement instead of two, because the schema does not admit the
-  intermediate one.
+  intermediate one.  Clearing the reason, by writing it empty, reopens the Issue the same way.
 
 What this module deliberately does not have is a lane.  §8.6 keeps the swimlane derived from the
 product; `SqlCardClient._lane_names` builds the virtual lane table out of the products the store
@@ -547,6 +547,11 @@ class ProductIssueRecords:
             reason = _text(values["issue_closed_reason"])
             if reason:
                 self._close_issue_with_reason(issue_id, reason)
+            else:
+                self.client._execute(
+                    "UPDATE issues SET close_reason = NULL, state = 'open', updated_at = %s WHERE issue_id = %s",
+                    (_now(), issue_id),
+                )
         return True
 
     def _close_issue_with_reason(self, issue_id: str, reason: str) -> None:

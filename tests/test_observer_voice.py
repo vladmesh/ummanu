@@ -552,7 +552,7 @@ class ObserverIssueTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "validation")
         self.assertEqual(self.created, [])
 
-    def test_the_observer_may_not_close_edit_or_reprioritize_an_issue(self) -> None:
+    def test_the_observer_may_not_close_reopen_edit_or_reprioritize_an_issue(self) -> None:
         calls = {
             "close": lambda: self.store.close_issue(
                 reference="issue:1", reason="resolved", actor="observer", role="observer"
@@ -562,6 +562,12 @@ class ObserverIssueTests(unittest.TestCase):
             ),
             "append": lambda: self.store.append_description(
                 reference="issue:1", body="b", reason="r", actor="observer", role="observer"
+            ),
+            "edit title": lambda: self.store.edit_fields(
+                reference="issue:1", title="t", reason="r", actor="observer", role="observer"
+            ),
+            "reopen": lambda: self.store.reopen_issue(
+                reference="issue:1", reason="r", actor="observer", role="observer"
             ),
             "product create": lambda: self.store.create_product(
                 product_id="p", projects=["ummanu"], title="t", description="", actor="observer", role="observer"

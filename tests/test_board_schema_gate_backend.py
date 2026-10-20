@@ -52,6 +52,7 @@ OWED = (
     "0032_accept_decision",
     "0033_po_session_moved",
     "0034_po_restore_sequence",
+    "0035_issue_reopened",
 )
 
 

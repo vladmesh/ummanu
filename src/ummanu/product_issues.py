@@ -1227,7 +1227,7 @@ class ProductIssueStore:
             self._reject_other_pending_reference_operation(reference, request_id)
             self._reject_other_pending_typed_operation(reference, request_id)
             from ummanu.board.host import Replace
-            from ummanu.board.models import Actor, EntityKind, Product
+            from ummanu.board.models import Actor, EntityKind, Product, ProductState
 
             host = self._host()
             try:
@@ -1237,6 +1237,8 @@ class ProductIssueStore:
             current = host.read(EntityKind.PRODUCT, reference)
             if not isinstance(current, Product):
                 raise TaskError("validation", f"{reference} is not a Product", 2)
+            if known is None and current.state is not ProductState.ACTIVE:
+                raise TaskError("validation", f"{reference}: product is closed", 2)
             if known is None:
                 unknown = sorted(set(add) - registered_projects(self.instance))
                 if unknown:
@@ -1364,6 +1366,7 @@ class ProductIssueStore:
                     or known.data.get("priority") != priority
                     or "append" in known.data
                     or "edit" in known.data
+                    or "fields" in known.data
                 ):
                     raise TaskError("validation", "request id belongs to another operation or payload", 2)
                 try:
@@ -1538,6 +1541,128 @@ class ProductIssueStore:
                     description_edit=DescriptionEdit(_digest(current.description), description_sha256),
                 )
                 self._host_mutation(lambda: host.replace(operation))
+            except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
+                raise self._host_error(exc) from None
+            return self.show_issue(reference)
+
+    def edit_fields(
+        self,
+        *,
+        reference: str,
+        reason: str,
+        actor: str,
+        title: str | None = None,
+        issue_kind: str | None = None,
+        request_id: str | None = None,
+        role: str = "po",
+    ) -> dict[str, Any]:
+        """Replace an open Issue's title, kind or both through the native audited mutation; PO only.
+
+        Only the fields whose value changes are written and recorded; a change to nothing writes nothing.
+        """
+        admit_role(role, actor, {"po"})
+        requested = {
+            name: value
+            for name, value in (("issue_kind", issue_kind), ("title", None if title is None else title.strip()))
+            if value is not None
+        }
+        if not requested:
+            raise TaskError("validation", "issue edit needs a new title, kind or description", 2)
+        if requested.get("title") == "":
+            raise TaskError("validation", "issue title must be non-empty", 2)
+        if issue_kind is not None and issue_kind not in ISSUE_KINDS:
+            raise TaskError("validation", "issue kind must be one of: bug, feature, question, improvement", 2)
+        if not reason.strip():
+            raise TaskError("validation", "issue edit requires a non-empty reason", 2)
+        request_id = request_id or str(uuid.uuid4())
+        with self.transactions.reference_lock(reference) as lock, held_lock(lock):
+            self._reject_other_pending_reference_operation(reference, request_id)
+            self._reject_other_pending_typed_operation(reference, request_id)
+            from dataclasses import replace
+
+            from ummanu.board.host import ISSUE_EDIT_FIELDS, FieldEdit, Replace
+            from ummanu.board.models import Actor, EntityKind, Issue
+
+            host = self._host()
+            try:
+                known = host.canon.event(request_id) if host.canon is not None else None
+            except ValueError as exc:
+                raise TaskError("validation", str(exc), 2) from None
+            if known is not None:
+                evidence = known.data.get("fields")
+                if (
+                    known.kind.value != "entity.updated"
+                    or known.entity_kind is not EntityKind.ISSUE
+                    or known.ref != reference
+                    or known.actor != Actor(role, actor)
+                    or known.reason != reason
+                    or not isinstance(evidence, list)
+                    or not evidence
+                    or not set(evidence) <= set(requested)
+                    or any(known.data.get(name) != value for name, value in requested.items())
+                ):
+                    raise TaskError("validation", "request id belongs to another operation or payload", 2)
+                try:
+                    self._host_mutation(lambda: host.recover_product_issue(request_id))
+                except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
+                    raise self._host_error(exc) from None
+                return self.show_issue(reference)
+            current = host.read(EntityKind.ISSUE, reference)
+            if not isinstance(current, Issue):
+                raise TaskError("validation", "reference is not an Issue", 2)
+            if current.state.value == "closed":
+                raise TaskError("closed", "cannot edit a closed issue", 3)
+            fields = tuple(
+                name for name in ISSUE_EDIT_FIELDS if name in requested and requested[name] != getattr(current, name)
+            )
+            if not fields:
+                return self.show_issue(reference)
+            desired = replace(current, **{name: requested[name] for name in fields})
+            try:
+                operation = Replace(
+                    desired, Actor(role, actor), reason, request_id=request_id, field_edit=FieldEdit(fields)
+                )
+                self._host_mutation(lambda: host.replace(operation))
+            except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
+                raise self._host_error(exc) from None
+            return self.show_issue(reference)
+
+    def reopen_issue(
+        self,
+        *,
+        reference: str,
+        reason: str,
+        actor: str,
+        request_id: str | None = None,
+        role: str = "po",
+    ) -> dict[str, Any]:
+        """Reopen one closed Issue along the declared closed -> open edge, with a reason; PO only."""
+        admit_role(role, actor, {"po"})
+        if not reason.strip():
+            raise TaskError("validation", "issue reopen requires a non-empty reason", 2)
+        request_id = request_id or str(uuid.uuid4())
+        with self.transactions.reference_lock(reference) as lock, held_lock(lock):
+            self._reject_other_pending_reference_operation(reference, request_id)
+            self._reject_other_pending_typed_operation(reference, request_id)
+            from ummanu.board.host import TransitionRequest
+            from ummanu.board.models import Actor, EntityKind, Issue, IssueState
+
+            host = self._host()
+            current = host.read(EntityKind.ISSUE, reference)
+            if not isinstance(current, Issue):
+                raise TaskError("validation", "reference is not an Issue", 2)
+            if current.state is IssueState.OPEN:
+                try:
+                    existing = host.canon.event(request_id) if host.canon is not None else None
+                except ValueError:
+                    existing = None
+                if existing is None:
+                    raise TaskError("validation", "issue is not closed", 2)
+            try:
+                operation = TransitionRequest(
+                    EntityKind.ISSUE, reference, IssueState.OPEN, Actor(role, actor), reason, request_id=request_id
+                )
+                self._host_mutation(lambda: host.transition(operation))
             except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
                 raise self._host_error(exc) from None
             return self.show_issue(reference)

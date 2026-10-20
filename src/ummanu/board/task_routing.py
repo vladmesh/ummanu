@@ -127,7 +127,7 @@ ROUTING_PHASE_VALUES: frozenset[str] = frozenset(member.value for member in Rout
 BLOCK_CLASSIFICATION_VALUES: tuple[str, ...] = tuple(member.value for member in BlockClassification)
 DECISION_VALUES: frozenset[str] = frozenset(member.value for member in TaskDecision)
 
-EDITABLE_STATES: frozenset[CardState] = frozenset({CardState.READY, CardState.BLOCKED})
+EDITABLE_STATES: frozenset[CardState] = frozenset({CardState.ISSUES, CardState.READY, CardState.BLOCKED})
 ACTIVE_STATES: frozenset[CardState] = frozenset(
     {CardState.IN_PROGRESS, CardState.VALIDATE, CardState.ASSESSMENT}
 )
