@@ -5596,8 +5596,30 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.host.gate_calls, gate_calls)
         self.assertEqual(self.reader.show("ummanu-510")["state"], "blocked")
         reason = self.reader.show("ummanu-510")["comments"][-1]["body"]
-        self.assertIn(f"The mechanical gate does not run on HEAD {self.host.commit}", reason)
+        self.assertIn(f"Neither the mechanical gate nor review runs on HEAD {self.host.commit}", reason)
         self.assertIn(f"the red mechanical gate {gate_red['event_id']}", reason)
+
+    def test_a_parked_red_review_moved_back_to_validate_is_blocked_before_gate_and_review(self) -> None:
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        verdict_request = self._review_verdict_request_id("red")
+        self._review_red(verdict_request)
+        self.assertEqual(self.tick()["to"], "assessment")
+        verdict = next(event for event in self.audit_events() if event["request_id"] == verdict_request)
+        self.assertEqual(self._pilot_record()["gate_state"], "green")
+        gate_calls = list(self.host.gate_calls)
+        reviews = list(self.host.reviews)
+        self._move_to_validate("manual-validate-after-parked-red-review")
+
+        result = self.tick()
+
+        self.assertEqual(result["reason"], "rejected candidate")
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "blocked")
+        self.assertEqual(self.host.gate_calls, gate_calls)
+        self.assertEqual(self.host.reviews, reviews)
+        reason = self.reader.show("ummanu-510")["comments"][-1]["body"]
+        self.assertIn(f"the red review verdict {verdict['event_id']}", reason)
 
     def test_publication_and_infrastructure_gate_failures_leave_the_sha_open_to_the_gate(self) -> None:
         publication = GateResult(

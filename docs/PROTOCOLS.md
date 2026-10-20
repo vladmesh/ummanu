@@ -2893,7 +2893,8 @@ A `done` report on a rejected SHA does not move to Validate, including the first
 attempt after Blocked: the first sends the worker back to rework in the same workspace (a new commit is
 required) with a comment naming the rejecting verdict or gate event; the second in the same attempt
 moves the card to Blocked. A card that reaches Validate on a rejected SHA by any other path (a manual
-move, an adopted lost record) is Blocked before the gate runs, so it is never gated or reviewed again.
+move, a kept record whose gate was green, an adopted lost record) is Blocked before the gate runs or a
+review launches, so it is never gated or reviewed again.
 A gate that never reached CI (`publication`) judged no code: its SHA is refused only within the attempt.
 If the code deliberately does not change for a substantive rejection (e.g. the defect is in a test or
 the gate), the worker reports `--kind blocked` with the analysis.

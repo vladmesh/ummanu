@@ -13,8 +13,9 @@ from ummanu.checkpoint import CheckpointPusher, CheckpointWriter
 from ummanu.codex_provider_events import (
     CodexProviderSourceError,
 )
-from ummanu.dispatch import attempt_accounting, release_activation
+from ummanu.dispatch import attempt_accounting, release_activation, release_lifecycle
 from ummanu.dispatch.assessment_decision import advance_assessment as _advance_assessment
+from ummanu.dispatch.candidate_ledger import rejected_candidate
 from ummanu.dispatch.claim import (
     claim_ready_task as _claim_ready_task,
     resolve_head as _resolve_claim_head,
@@ -578,6 +579,29 @@ class DispatcherRuntime:
             except HostError as exc:
                 return self._block_unresumable(task, records, payload, attempt_id, "review", exc)
             records[ref] = record
+        if has_candidate(task) and record.state != "reviewing":
+            # Before the verdict, the gate and the review launch, whatever brought the card to
+            # Validate. A review in flight was launched past this check.
+            sha = self.host.head_commit(record)
+            rejection = rejected_candidate(self.audit, ref, sha)
+            if rejection is not None:
+                return release_lifecycle.block_merge_path(
+                    self,
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
+                    blocked_reason="gate",
+                    action="rejected-candidate-blocked",
+                    reason=(
+                        f"Neither the mechanical gate nor review runs on HEAD {sha}: "
+                        f"{rejection.named()} already rejected this candidate. New work on a new "
+                        "commit is needed before validation."
+                    ),
+                    step="review",
+                    outcome="rejected candidate",
+                )
         with tick_stage("report"):
             verdict = _advance_review_verdict(self, task, record, records, payload, attempt_id)
         if verdict is not None:
