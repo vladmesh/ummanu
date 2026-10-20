@@ -52,6 +52,9 @@ TRANSITIONS: dict[EntityKind, dict[TransitionKey, Transition]] = {
         (IssueState.OPEN, IssueState.CLOSED): Transition(
             IssueState.OPEN, IssueState.CLOSED, EventKind.ISSUE_CLOSED
         ),
+        (IssueState.CLOSED, IssueState.OPEN): Transition(
+            IssueState.CLOSED, IssueState.OPEN, EventKind.ISSUE_REOPENED
+        ),
     },
     EntityKind.SPRINT: {
         (SprintState.OPEN, SprintState.CLOSED): Transition(

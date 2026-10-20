@@ -13,7 +13,8 @@
     "src/ummanu/board/task_protocol/sprint_guard.py"
   ],
   "ast_deltas": {
-    "TaskWriter.decide": "f19db76f906da6894ca748f7f8ec8a3cc8a61a48349bd53e967ed4f2add917da"
+    "TaskWriter.decide": "f19db76f906da6894ca748f7f8ec8a3cc8a61a48349bd53e967ed4f2add917da",
+    "TaskWriter.edit": "0884b37e01f84af601f487977be4c5f4e788f30de409692a1c4a7ae8b314391c"
   },
   "definitions": {
     "MASQUERADE": {"old_owner": "src/ummanu/tasks.py", "old_line": 148, "owner": "src/ummanu/board/task_protocol/rows.py", "line": 39, "baseline_ast_sha256": "b63627f81c5ab1f58911aac0beb27e14dbd386a6aa28a19c44305cb5e33f8f60", "signature": null, "returns": null, "decorators": [], "old_globals": {"Role": "ummanu.board.roles.Role"}, "owning_globals": {"Role": "ummanu.board.roles.Role"}, "lexical_imports": [], "consumers": ["src/ummanu/board/task_protocol/rows.py:46:global"]},

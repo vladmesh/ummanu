@@ -53,7 +53,7 @@ class TaskRoutingVocabularyTests(unittest.TestCase):
                 TaskDecision.RESLICE: CardState.BLOCKED,
             },
         )
-        self.assertEqual(EDITABLE_STATES, {CardState.READY, CardState.BLOCKED})
+        self.assertEqual(EDITABLE_STATES, {CardState.ISSUES, CardState.READY, CardState.BLOCKED})
         self.assertEqual(ACTIVE_STATES, {CardState.IN_PROGRESS, CardState.VALIDATE, CardState.ASSESSMENT})
         self.assertEqual(DECIDED_TARGETS, {CardState.DONE, CardState.IN_PROGRESS})
         self.assertEqual(UNDECIDED_EXITS, {CardState.READY, CardState.VALIDATE, CardState.ISSUES})

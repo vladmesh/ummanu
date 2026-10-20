@@ -214,12 +214,27 @@ class CliLiveDefaultsTests(unittest.TestCase):
                 "--reason",
                 "correct",
             ]
-            for flags in [[], ["--description", "a", "--body-file", "b"], ["--body-file", "/absent/fixture"]]:
+            for flags in [
+                [],
+                ["--description", "a", "--body-file", "b"],
+                ["--body-file", "/absent/fixture"],
+                ["--description", "a", "--title", "t"],
+                ["--body-file", "b", "--kind", "bug"],
+                ["--kind", "chore"],
+            ]:
                 self.assertEqual(self.invoke([*base, *flags])[0], 2)
                 factory.assert_not_called()
             store.edit_description.return_value = {"description": "  exact\n"}
             self.assertEqual(self.invoke([*base, "--description", "  exact\n"])[0], 0)
             self.assertEqual(store.edit_description.call_args.kwargs["description"], "  exact\n")
+            store.edit_fields.return_value = {"title": "t", "kind": "bug"}
+            self.assertEqual(self.invoke([*base, "--title", "t", "--kind", "bug"])[0], 0)
+            self.assertEqual(
+                {key: store.edit_fields.call_args.kwargs[key] for key in ("title", "issue_kind", "reason")},
+                {"title": "t", "issue_kind": "bug", "reason": "correct"},
+            )
+            self.assertEqual(self.invoke([*base, "--kind", "feature"])[0], 0)
+            self.assertIsNone(store.edit_fields.call_args.kwargs["title"])
 
     def test_repair_requires_one_reason_source_and_pause_refuses_conflicting_sources(self):
         base = [

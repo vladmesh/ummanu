@@ -49,4 +49,6 @@ issue. Report the issue reference the command prints back to the owner.
 ## Later changes
 
 - Priority: `issue update-priority --role po --ref <ref> --priority <P0-P3> --reason "<why>"`.
+- Title or kind: `issue edit --role po --ref <ref> --title "<title>" --kind <kind> --reason "<why>"` (either or both).
 - Close: `issue close --role po --ref <ref> --reason resolved|invalid|duplicate|wont_do`.
+- Reopen a closed one: `issue reopen --role po --ref <ref> --reason "<why>"`.

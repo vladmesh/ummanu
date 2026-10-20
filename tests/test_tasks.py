@@ -1214,14 +1214,30 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertBoardUnchanged(before)
         self.assertEqual(self.rpc, [])
 
-    def test_edit_refuses_active_states(self) -> None:
-        self.place_card("ummanu-468", "in_progress")
-        before = self.board_snapshot()
-        with self.assertRaisesRegex(TaskError, "Ready or Blocked") as raised:
-            self.writer.edit(role="po", actor="operator", reference="ummanu-468", description="new spec")
-        self.assertEqual(raised.exception.code, "edit_forbidden")
-        self.assertBoardUnchanged(before)
+    def test_edit_refuses_every_state_outside_issues_ready_and_blocked(self) -> None:
+        for state in ("in_progress", "validate", "assessment", "done"):
+            with self.subTest(state=state):
+                self.place_card("ummanu-468", state)
+                before = self.board_snapshot()
+                with self.assertRaisesRegex(TaskError, "Issues, Ready or Blocked") as raised:
+                    self.writer.edit(role="po", actor="operator", reference="ummanu-468", description="new spec")
+                self.assertEqual(raised.exception.code, "edit_forbidden")
+                self.assertBoardUnchanged(before)
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual(self.writer.audit.events("ummanu-468", kind="edited"), [])
+
+    def test_edit_revises_a_card_in_issues_in_place(self) -> None:
+        self.place_card("ummanu-468", "issues")
+
+        result = self.writer.edit(
+            role="po", actor="operator", reference="ummanu-468", title="Revised", description="revised spec"
+        )
+
+        self.assertEqual(result["action"], "edited")
+        card = self.card("ummanu-468")
+        self.assertEqual((card["state"], card["title"], card["description"]), ("issues", "Revised", "revised spec"))
+        [event] = self.writer.audit.events("ummanu-468", kind="edited")
+        self.assertEqual(event["payload"]["description_sha256"], hashlib.sha256(b"revised spec").hexdigest())
 
     def test_edit_updates_spec_and_routing_and_writes_audit(self) -> None:
         before = self.card("ummanu-468")

@@ -560,7 +560,7 @@ CREATE TABLE board_events (
     event_id     text PRIMARY KEY,                    -- globally unique
     request_id   text NOT NULL UNIQUE REFERENCES requests(request_id),
     kind         text NOT NULL CHECK (kind IN (       -- EventKind, §3.12
-        'entity.created','entity.updated','product.archived','issue.closed',
+        'entity.created','entity.updated','product.archived','issue.closed','issue.reopened',
         'sprint.closed','sprint.stopped','sprint.reopened',
         'card.readied','card.started','card.submitted','card.assessed','card.reworked',
         'card.released','card.blocked','card.unblocked','card.returned','card.moved',
@@ -758,7 +758,7 @@ an Alembic revision shipped with the code that emits the new value.
 | `sprint_budget_events.event_type` | six charged types + `infrastructure_blocked` | `sprints.BUDGET_RECORDED_EVENT_TYPES` |
 | `sprint_decisions.verdict` | per subject kind | `sprint_close.ISSUE_VERDICTS`, `CARD_DISPOSITIONS` |
 | `requests.status` | `staged`, `committed`, `discarded` | this schema |
-| `board_events.kind` | the 23 `EventKind` values (§3.9) | `board/models.py:EventKind` |
+| `board_events.kind` | the 24 `EventKind` values (§3.9) | `board/models.py:EventKind` |
 | `board_events.entity_kind`, `requests.entity_kind` | `product`, `issue`, `sprint`, `card` | `EntityKind` |
 | `repositories.role` | `primary`, `curator_root` | this schema (§3.1) |
 | `owner_events.kind` | the 16 owner event kinds | `board.owner_events.KINDS` |
@@ -820,6 +820,7 @@ Revisions (`src/ummanu/board/migrations/versions/`):
 | `0032_accept_decision` | data only, `release_safety = "destructive"`: the observer's Assessment decision value `release` becomes `accept` in `task_comments.marker` (`decision:accept`) and, at any depth of `board_events.data` and `requests.intent`, under the keys `decision` and `disposition` and in a `decision:` `marker`; no column; the downgrade writes `release` back the same way |
 | `0033_po_session_moved` | additive: `po_session_moved` (notice) and `po_session_moved_account` (`needs_owner`) in `owner_event_kind_in_vocabulary` and `owner_event_class_follows_kind`, both restated; no column; the downgrade restores `0028`'s two constraints and fails while either kind exists |
 | `0034_po_restore_sequence` | app-role SELECT and UPDATE on `po_feed_entry_id_seq` so inert PO import can advance preserved feed identities; no other grants change; downgrade revokes those two privileges, retaining USAGE, rows and sequence position |
+| `0035_issue_reopened` | additive: `issue.reopened` in the `board_events.kind` CHECK, restated under the name `board_event_kind_in_vocabulary`; no column; the downgrade restores `0001`'s constraint and fails while an `issue.reopened` event exists |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column

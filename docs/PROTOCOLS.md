@@ -1524,7 +1524,9 @@ Product or Issue (use `ummanu issue close`).
 
 `edit` replaces a card's spec in place: `--title`, `--description`/`--body-file` (full new text),
 `--head`, `--review-head`. PO, dispatcher and observer may edit; an ordinary card is editable only in
-Ready or Blocked (an active card goes through preempt and requeue). The `edited` audit event records
+Issues, Ready or Blocked (an active card goes through preempt and requeue), and every other column is
+`edit_forbidden`. A Product or Issue is edited with `product edit` or `issue edit`, never with `task
+edit` (`edit_forbidden`, `role_forbidden` for the observer). The `edited` audit event records
 old and new digests; past text is recoverable from the checkpoint's board export history. Comments
 are the dialogue of an attempt; the spec lives only in the description.
 
@@ -1955,7 +1957,9 @@ python3 -P -m ummanu issue show --ref issue:123
 python3 -P -m ummanu issue update-priority --role po --ref issue:123 --priority P1 --reason REASON
 python3 -P -m ummanu issue append --role po --ref issue:123 --reason REASON --body-file BLOCK.md
 python3 -P -m ummanu issue edit --role po --actor ACTOR --ref issue:123 --reason REASON --body-file DESCRIPTION.md
+python3 -P -m ummanu issue edit --role po --ref issue:123 --reason REASON --title TITLE --kind bug
 python3 -P -m ummanu issue close --role po --ref issue:123 --reason resolved
+python3 -P -m ummanu issue reopen --role po --ref issue:123 --reason REASON
 ```
 
 Who writes what:
@@ -1966,7 +1970,9 @@ Who writes what:
 | `issue create` | yes, any product (`--product` required) | yes, under the [identity guard](#the-sprint-guard), for its sprint's product |
 | `issue update-priority`, `issue append`, `issue edit` | yes | `role_forbidden` |
 | `issue close` | yes | `role_forbidden` (an observer's `sprint close` closes its sprint's declared issues on its verdicts, in its name) |
-| `task move`/`task edit` of a Product or Issue | `transition_forbidden` | `role_forbidden` |
+| `issue reopen` | yes | `role_forbidden` |
+| `task move` of a Product or Issue | `transition_forbidden` | `role_forbidden` |
+| `task edit` of a Product or Issue | `edit_forbidden` | `role_forbidden` |
 
 An observer's `issue create` needs a head bound to a sprint: an unbound head is refused as
 `observer_identity_unbound`, audited as `sprint_guard_denied`, and nothing is written. The issue takes
@@ -1984,12 +1990,16 @@ A Product id is stable and unique; its non-empty project set may contain only id
 the instance `projects/` directory. `product edit` adds and removes projects of that set (each option
 repeatable, an added one must be registered, the set never becomes empty) with a non-empty reason, as
 one `entity.updated` audit event; a repeat of the request id replays, the same request id with another
-change is `validation`, and a change that leaves the set as it is writes nothing. Every new issue requires its Product, one kind (`bug`, `feature`,
+change is `validation`, and a change that leaves the set as it is writes nothing. An archived Product
+refuses it as `validation` naming "product is closed", before any write. Every new issue requires its Product, one kind (`bug`, `feature`,
 `question`, `improvement`) and one priority (`P0`–`P3`). A priority change requires a non-empty
 reason, adds an `[issue:priority]` board comment and a durable audit event. Only the PO closes an
 issue with `issue close`, with exactly one of `resolved`, `invalid`, `duplicate` or `wont_do`; closure
 archives the backend record and keeps comments and audit available through `issue show --ref` and
-checkpoint recovery. `sprint close` closes an issue through this same lifecycle when its decisions file gives
+checkpoint recovery. `issue reopen` returns a closed issue to open along the declared closed -> open
+edge: PO-only, a non-empty literal reason, an `[issue:reopened]` board comment and one `issue.reopened`
+audit event; the close reason is cleared, and the issue is listed by `issue list` again. Reopening an
+open issue is `validation` and writes nothing; a repeat of the request id replays. `sprint close` closes an issue through this same lifecycle when its decisions file gives
 one of those verdicts; it never closes an issue merely because a sprint that declared it ended, and
 never records somebody else's close as its own verdict. `issue list` lists open issues,
 `issue list --closed` lists only closed issues, and `issue list --all` lists both. `--closed` and
@@ -2005,16 +2015,20 @@ the same ref, reason and block (matched by `body_sha256`) is answered without a 
 the same id with anything else is `validation`.
 
 `issue edit --ref issue:123 --role po --actor ACTOR --reason "correct the description"
-(--description "full text" | --body-file DESCRIPTION.md)` replaces exactly the description of an
-open issue, including an explicitly empty description. It accepts the ordinary instance, data-dir
-and request-id options. One content source and a non-empty literal reason are required. Only the
-PO may edit; title, product, kind, priority, closure, comments and prior audit stay intact. The native
-Replace mutation writes one `entity.updated` event with `data.edit` containing the exact before/after
-SHA-256 description digests. Same request/payload replays once and returns current readback, without
-overwriting later edits; changed payload or an append/priority request id is refused. Missing files,
-invalid input, closed issues and role refusals write no effect/event. The description and canonical
-event commit or roll back in the existing native SQL transaction. Append's `data.append` evidence
-and replay/recovery contract remain supported.
+(--description "full text" | --body-file DESCRIPTION.md | [--title TITLE] [--kind KIND])` edits an
+open issue in one of two forms, never both in one request: it replaces exactly the description,
+including an explicitly empty one, or it replaces the title, the kind (`bug`, `feature`, `question`,
+`improvement`) or both. It accepts the ordinary instance, data-dir and request-id options, and a
+non-empty literal reason is required. Only the PO may edit; every field the request does not name,
+closure, comments and prior audit stay intact. The native Replace mutation writes one
+`entity.updated` event: a description edit carries `data.edit` with the exact before/after SHA-256
+description digests, a title or kind edit carries `data.fields` naming the fields it changed, and a
+title or kind equal to the current one writes nothing. Same request/payload replays once and
+returns current readback, without overwriting later edits; changed payload or a request id of
+another operation is refused. Missing files, an empty title, an unknown kind, invalid input, closed
+issues and role refusals write no effect/event. The edit and canonical event commit or roll back in
+the existing native SQL transaction. Append's `data.append` evidence and replay/recovery contract
+remain supported.
 
 Products and Issues never enter the execution columns: `move` and `claim` reject one before any write.
 Work on an issue is a separate card the PO creates in Ready.

@@ -804,12 +804,13 @@ class BoardEvent(Base):
         sa.UniqueConstraint("request_id"),
         sa.CheckConstraint(  # EventKind, §3.12
             "kind IN ("
-            "'entity.created','entity.updated','product.archived','issue.closed',"
+            "'entity.created','entity.updated','product.archived','issue.closed','issue.reopened',"
             "'sprint.closed','sprint.stopped','sprint.reopened',"
             "'card.readied','card.started','card.submitted','card.assessed','card.reworked',"
             "'card.released','card.blocked','card.unblocked','card.returned','card.moved',"
             "'card.reported','card.verdict','card.decided','card.decision_refused',"
-            "'attempt.usage','attempt.outcome')"
+            "'attempt.usage','attempt.outcome')",
+            name="board_event_kind_in_vocabulary",
         ),
         sa.CheckConstraint("entity_kind IN ('product','issue','sprint','card')"),
         sa.Index("board_events_by_ref", "ref", "occurred_at"),

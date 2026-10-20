@@ -43,7 +43,7 @@ from ummanu.board.store import BoardStoreError
 SCRIPT_LOCATION = Path(__file__).resolve().parent / "migrations"
 
 #: Schema gates compare the packaged head without importing Alembic.
-EXPECTED_SCHEMA_REVISION = "0034_po_restore_sequence"
+EXPECTED_SCHEMA_REVISION = "0035_issue_reopened"
 
 #: A fixed 64-bit key, so every runner of every checkout contends on the same lock.  Any constant
 #: would do; this one is the first 63 bits of sha256("ummanu.board.migrations"), recorded here

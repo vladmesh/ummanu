@@ -2849,6 +2849,8 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         current = self.reader.show(reference)
         if role == "observer" and current.get("record_type") in _TYPED_RECORD_TYPES:
             raise TaskError("role_forbidden", "the observer may file an issue but not edit one", 3)
+        if current.get("record_type") in _TYPED_RECORD_TYPES:
+            raise TaskError("edit_forbidden", "edit a product or an issue with product edit or issue edit", 3)
         # The bounds are what makes a live-impact card admissible; an edit cannot remove them.
         if (
             description is not None
@@ -2908,7 +2910,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
 
         def mutation(task: dict[str, Any]) -> Any:
             if task["state"] not in EDITABLE_STATES:
-                raise TaskError("edit_forbidden", "edit requires a Ready or Blocked card", 3)
+                raise TaskError("edit_forbidden", "edit requires a card in Issues, Ready or Blocked", 3)
             number = _task_number(task)
             update: dict[str, Any] = {}
             if title is not None:

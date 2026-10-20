@@ -22,6 +22,7 @@ from ummanu.board.host import (
     Create,
     DescriptionAppend,
     DescriptionEdit,
+    FieldEdit,
     MarkerComment,
     MutationResult,
     Replace,
@@ -202,13 +203,18 @@ class SqlBoardHost:
         entity = operation.entity
         append = operation.description_append
         edit = operation.description_edit
-        if append is not None and edit is not None:
-            raise BoardProtocolError("Issue replace requires one description operation")
-        if edit is not None and (operation.actor.role != "po" or not operation.reason.strip()):
-            raise BoardProtocolError("Issue description edit requires the PO and a non-empty reason")
+        fields = operation.field_edit
+        if sum(evidence is not None for evidence in (append, edit, fields)) > 1:
+            raise BoardProtocolError("Issue replace requires one description or field operation")
+        if (edit is not None or fields is not None) and (
+            operation.actor.role != "po" or not operation.reason.strip()
+        ):
+            raise BoardProtocolError("Issue edit requires the PO and a non-empty reason")
         request_id = self._request_id(operation.request_id, "issue-replace")
         related = self._related(entity, operation.related_refs)
-        existing = self._existing(request_id, entity, operation.actor, operation.reason, append=append, edit=edit)
+        existing = self._existing(
+            request_id, entity, operation.actor, operation.reason, append=append, edit=edit, fields=fields
+        )
         if existing is not None and self.canon.committed(request_id) is not None:
             return MutationResult(self.read(EntityKind.ISSUE, entity.ref), existing)
         if existing is None:
@@ -217,6 +223,8 @@ class SqlBoardHost:
                 raise BoardProtocolError("cannot replace a closed Issue")
             if edit is not None:
                 _require_description_edit(current, entity, edit)
+            elif fields is not None:
+                _require_field_edit(current, entity, fields)
             elif append is not None:
                 _require_description_append(current, entity, append)
             elif (entity.title, entity.product_ref, entity.state, entity.issue_kind, entity.description) != (
@@ -236,9 +244,12 @@ class SqlBoardHost:
             request_id,
             append=append,
             edit=edit,
+            fields=fields,
         )
         if edit is not None:
             return self._edit_description(entity, edit, event, request_id)
+        if fields is not None:
+            return self._edit_fields(entity, fields, event, request_id)
         if append is not None:
             return self._append_description(entity, append, event, request_id)
         content = f"[issue:priority]\n{operation.reason}\n[request-id:{request_id}]"
@@ -381,6 +392,33 @@ class SqlBoardHost:
             if row is None or str(row.get("description") or "") != entity.description:
                 raise BoardProtocolError("Issue description edit is not proven")
             return self._normalized_row(row)
+
+        MutationEventTransaction(self.canon, request_id=request_id, event=event).execute(
+            effect, confirm=confirm
+        )
+        return MutationResult(self.read(EntityKind.ISSUE, entity.ref), event)
+
+    def _edit_fields(self, entity: Issue, fields: FieldEdit, event: Event, request_id: str) -> MutationResult:
+        """Write the named title and kind; both writes share the store's one transaction."""
+
+        def effect() -> None:
+            row = self._raw_by_ref(entity.ref)
+            if row is None:
+                raise BoardProtocolError("Issue was not found")
+            task_id = self._row_id(row)
+            if "title" in fields.fields and not self.client.call("updateTask", id=task_id, title=entity.title):
+                raise BoardProtocolError("board store rejected the issue title")
+            if "issue_kind" in fields.fields and self.client.call(
+                "saveTaskMetadata", task_id=task_id, values={"issue_kind": entity.issue_kind}
+            ) is not True:
+                raise BoardProtocolError("board store rejected the issue kind")
+
+        def confirm() -> BoardEntity:
+            row = self._raw_by_ref(entity.ref)
+            confirmed = self._normalized_row(row) if row is not None else None
+            if confirmed != entity:
+                raise BoardProtocolError("Issue field edit is not proven")
+            return confirmed
 
         MutationEventTransaction(self.canon, request_id=request_id, event=event).execute(
             effect, confirm=confirm
@@ -742,19 +780,20 @@ class SqlBoardHost:
                     else None
                 )
                 edit = DescriptionEdit.from_event_data(event.data["edit"]) if "edit" in event.data else None
+                fields = FieldEdit.from_event_data(event.data["fields"]) if "fields" in event.data else None
             except ValueError as exc:
                 raise BoardProtocolError(
-                    "pending Issue event has invalid description evidence"
+                    "pending Issue event has invalid description or field evidence"
                 ) from exc
             return self.replace(
-                Replace(entity, event.actor, event.reason, event.related_refs, request_id, append, edit)
+                Replace(entity, event.actor, event.reason, event.related_refs, request_id, append, edit, fields)
             )
-        if event.kind is EventKind.ISSUE_CLOSED and isinstance(entity, Issue):
+        if event.kind in {EventKind.ISSUE_CLOSED, EventKind.ISSUE_REOPENED} and isinstance(entity, Issue):
             return self.transition(
                 TransitionRequest(
                     EntityKind.ISSUE,
                     entity.ref,
-                    IssueState.CLOSED,
+                    entity.state,
                     event.actor,
                     event.reason,
                     event.related_refs,
@@ -764,11 +803,22 @@ class SqlBoardHost:
         raise BoardProtocolError("pending event is not a recoverable Product/Issue occurrence")
 
     def _transition_issue(self, operation: TransitionRequest) -> MutationResult:
+        """Close an open Issue with its reason, or reopen a closed one, along a declared edge.
+
+        The audit comment is the effect; the closed state and its reason, one fact on the row, follow
+        in ``finish``: written on close, cleared on reopen.
+        """
         self._require_product_issue_configuration()
         if not isinstance(operation.target, IssueState):
             raise BoardProtocolError("Issue transitions require an IssueState target")
+        from dataclasses import replace
+
         request_id = self._request_id(operation.request_id, "issue-transition")
+        closing = operation.target is IssueState.CLOSED
         known = self.canon.event(request_id) if self.canon is not None else None
+        current = self.read(EntityKind.ISSUE, operation.ref)
+        if not isinstance(current, Issue):
+            raise BoardProtocolError("Issue transition resolved a non-Issue entity")
         if known is not None:
             if (
                 known.entity_kind is not EntityKind.ISSUE
@@ -779,26 +829,13 @@ class SqlBoardHost:
             ):
                 raise ValueError("request id belongs to another operation or payload")
             successor = _issue_from_payload(known.data)
-            current = self.read(EntityKind.ISSUE, operation.ref)
-            if not isinstance(current, Issue):
-                raise BoardProtocolError("Issue transition resolved a non-Issue entity")
+            kind = known.kind
         else:
-            current = self.read(EntityKind.ISSUE, operation.ref)
-            if not isinstance(current, Issue):
-                raise BoardProtocolError("Issue transition resolved a non-Issue entity")
-            successor, _declaration = transition(current, operation.target)
-            if not isinstance(successor, Issue):
+            moved, declaration = transition(current, operation.target)
+            if not isinstance(moved, Issue):
                 raise BoardProtocolError("Issue transition resolved an invalid successor")
-            successor = Issue(
-                successor.ref,
-                successor.title,
-                successor.product_ref,
-                successor.state,
-                successor.priority,
-                successor.issue_kind,
-                successor.description,
-                operation.reason,
-            )
+            successor = replace(moved, close_reason=operation.reason if closing else None)
+            kind = declaration.event_kind
         related = self._related(current, operation.related_refs)
         existing = self._existing(
             request_id, successor, operation.actor, operation.reason, target=operation.target.value
@@ -806,7 +843,7 @@ class SqlBoardHost:
         if existing is not None and self.canon.committed(request_id) is not None:
             return MutationResult(self.read(EntityKind.ISSUE, operation.ref), existing)
         event = existing or self._entity_event(
-            EventKind.ISSUE_CLOSED,
+            kind,
             successor,
             operation.actor,
             operation.reason,
@@ -815,7 +852,8 @@ class SqlBoardHost:
             source=current.state.value,
             target=operation.target.value,
         )
-        content = f"[issue:closed]\n{operation.reason}\n[request-id:{request_id}]"
+        verb = "close" if closing else "reopen"
+        content = f"[issue:{'closed' if closing else 'reopened'}]\n{operation.reason}\n[request-id:{request_id}]"
 
         def effect() -> None:
             row = self._raw_by_ref(current.ref)
@@ -828,17 +866,17 @@ class SqlBoardHost:
             ):
                 saved = self.client.call("createComment", task_id=task_id, user_id=0, content=content)
                 if not _comment_saved(saved):
-                    raise BoardProtocolError("board store rejected issue close comment")
+                    raise BoardProtocolError(f"board store rejected issue {verb} comment")
 
         def confirm() -> BoardEntity:
             row = self._raw_by_ref(current.ref)
             if row is None:
-                raise BoardProtocolError("Issue close is not proven")
+                raise BoardProtocolError(f"Issue {verb} is not proven")
             comments = self.client.call("getAllComments", task_id=self._row_id(row)) or []
             if not any(
                 isinstance(comment, dict) and comment.get("comment") == content for comment in comments
             ):
-                raise BoardProtocolError("Issue close comment is not proven")
+                raise BoardProtocolError(f"Issue {verb} comment is not proven")
             return self._normalized_row(row)
 
         def finish(_confirmed: BoardEntity) -> None:
@@ -846,21 +884,20 @@ class SqlBoardHost:
             if row is None:
                 raise BoardProtocolError("Issue was not found")
             task_id = self._row_id(row)
+            reason = operation.reason if closing else ""
             if (
-                self.client.call(
-                    "saveTaskMetadata", task_id=task_id, values={"issue_closed_reason": operation.reason}
-                )
+                self.client.call("saveTaskMetadata", task_id=task_id, values={"issue_closed_reason": reason})
                 is not True
             ):
-                raise BoardProtocolError("board store rejected issue close reason")
+                raise BoardProtocolError(f"board store rejected issue {verb} reason")
             row = self._raw_by_ref(current.ref)
             if row is None:
                 raise BoardProtocolError("Issue was not found")
-            if int(row.get("is_active", 1) or 0) != 0 and not self.client.call("closeTask", task_id=task_id):
+            if closing and int(row.get("is_active", 1) or 0) != 0 and not self.client.call("closeTask", task_id=task_id):
                 raise BoardProtocolError("board store rejected issue closure")
             row = self._raw_by_ref(current.ref)
             if row is None or self._normalized_row(row) != successor:
-                raise BoardProtocolError("Issue closure remains incomplete")
+                raise BoardProtocolError(f"Issue {verb} remains incomplete")
 
         MutationEventTransaction(self.canon, request_id=request_id, event=event).execute(
             effect, confirm=confirm, finish=finish
@@ -991,6 +1028,7 @@ class SqlBoardHost:
         target: str | None = None,
         append: DescriptionAppend | None = None,
         edit: DescriptionEdit | None = None,
+        fields: FieldEdit | None = None,
     ) -> Event | None:
         assert self.canon is not None
         event = self.canon.event(request_id)
@@ -1002,7 +1040,7 @@ class SqlBoardHost:
             or event.actor != actor
             or event.reason != reason
             or event.target_state != target
-            or event.data != _event_data(entity, append, edit)
+            or event.data != _event_data(entity, append, edit, fields)
         ):
             raise ValueError("request id belongs to another operation or payload")
         return event
@@ -1052,6 +1090,7 @@ class SqlBoardHost:
         target: str | None = None,
         append: DescriptionAppend | None = None,
         edit: DescriptionEdit | None = None,
+        fields: FieldEdit | None = None,
     ) -> Event:
         identity: dict[str, Any] = {
             "request_id": request_id,
@@ -1067,6 +1106,8 @@ class SqlBoardHost:
             identity["append"] = append.event_data()
         if edit is not None:
             identity["edit"] = edit.event_data()
+        if fields is not None:
+            identity["fields"] = fields.event_data()
         return Event(
             event_id(identity),
             kind,
@@ -1078,7 +1119,7 @@ class SqlBoardHost:
             related,
             source,
             target,
-            _event_data(entity, append, edit),
+            _event_data(entity, append, edit, fields),
         )
 
     def _issues_board(self) -> tuple[int, int]:
@@ -1478,13 +1519,20 @@ def _entity_payload(entity: Product | Issue) -> dict[str, Any]:
     }
 
 
-def _event_data(entity: Product | Issue, append: DescriptionAppend | None, edit: DescriptionEdit | None = None) -> dict[str, Any]:
-    """The normalized entity plus explicit description-operation evidence, when present."""
+def _event_data(
+    entity: Product | Issue,
+    append: DescriptionAppend | None,
+    edit: DescriptionEdit | None = None,
+    fields: FieldEdit | None = None,
+) -> dict[str, Any]:
+    """The normalized entity plus explicit description- or field-operation evidence, when present."""
     data = _entity_payload(entity)
     if append is not None:
         data["append"] = append.event_data()
     if edit is not None:
         data["edit"] = edit.event_data()
+    if fields is not None:
+        data["fields"] = fields.event_data()
     return data
 
 
@@ -1522,6 +1570,20 @@ def _require_description_edit(current: Issue, successor: Issue, edit: Descriptio
             or _digest(current.description) != edit.description_sha256_was
             or _digest(successor.description) != edit.description_sha256):
         raise BoardProtocolError("Issue description edit changes only the exact current description")
+
+
+def _require_field_edit(current: Issue, successor: Issue, fields: FieldEdit) -> None:
+    """Admit a new title, kind or both, exactly the named fields, and nothing else."""
+    from dataclasses import replace
+
+    changed = tuple(name for name in fields.fields if getattr(successor, name) != getattr(current, name))
+    if (
+        changed != fields.fields
+        or replace(successor, title=current.title, issue_kind=current.issue_kind) != current
+        or not successor.title.strip()
+        or successor.issue_kind is None
+    ):
+        raise BoardProtocolError("Issue field edit changes only the named title or kind to a new value")
 
 
 def _issue_from_payload(data: dict[str, Any]) -> Issue:
