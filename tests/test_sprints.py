@@ -2217,7 +2217,33 @@ class SprintTests(SprintFixture):
         self.assertEqual(freshness["last_event_at"], baseline["last_event_at"])
 
 
-class SprintStatusHeadlessCommandTests(SprintFixture):
+class SprintStatusCommandFixture(SprintFixture):
+    """`ummanu sprint status` through the CLI, its JSON answer parsed."""
+
+    def _status_json(self, ref: str) -> dict:
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            self.board_injected(),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main(
+                [
+                    "sprint",
+                    "status",
+                    "--ref",
+                    ref,
+                    "--data-dir",
+                    self.tmp.name,
+                    "--instance",
+                    str(self.instance),
+                ]
+            )
+        self.assertEqual(code, 0, errors.getvalue())
+        return json.loads(output.getvalue())
+
+
+class SprintStatusHeadlessCommandTests(SprintStatusCommandFixture):
     """`ummanu sprint status` must not answer healthy for a card nobody is working on.
 
     This is the command the observer skill opens with and the one the runbooks name, read by the
@@ -2284,28 +2310,6 @@ class SprintStatusHeadlessCommandTests(SprintFixture):
         )
         return card
 
-    def _status_json(self, ref: str) -> dict:
-        output, errors = io.StringIO(), io.StringIO()
-        with (
-            self.board_injected(),
-            contextlib.redirect_stdout(output),
-            contextlib.redirect_stderr(errors),
-        ):
-            code = main(
-                [
-                    "sprint",
-                    "status",
-                    "--ref",
-                    ref,
-                    "--data-dir",
-                    self.tmp.name,
-                    "--instance",
-                    str(self.instance),
-                ]
-            )
-        self.assertEqual(code, 0, errors.getvalue())
-        return json.loads(output.getvalue())
-
     def test_the_command_names_the_sprints_headless_cards(self) -> None:
         ref = self._create(goal="a sprint with a headless card")["sprint"]["ref"]
         card = self._headless_card(ref)
@@ -2343,6 +2347,42 @@ class SprintStatusHeadlessCommandTests(SprintFixture):
 
         self.assertEqual(section["source"]["state"], "unavailable")
         self.assertIsNone(section["items"])
+
+
+class SprintStatusReadySkipTests(SprintStatusCommandFixture):
+    """`ummanu sprint status` says why the dispatcher leaves a Ready card of the sprint untaken."""
+
+    def test_a_skipped_ready_card_shows_its_latest_reason_and_since_when_and_others_nothing(self) -> None:
+        ref = self._create(goal="a sprint with a card left in Ready")["sprint"]["ref"]
+        skipped, untouched = (
+            TaskWriter(self.client, data_dir=self.tmp.name).create(  # type: ignore[arg-type]
+                role="observer", actor="observer", project="ummanu", task_type="code", title=title, sprint=ref
+            )["task"]["ref"]
+            for title in ("a card the claim pass skips", "a card it never skipped")
+        )
+        streak = {"until": 0.0, "noticed": False, "since": 1_790_000_000.0}
+        dispatcher = Path(self.tmp.name) / "dispatcher"
+        dispatcher.mkdir(parents=True, exist_ok=True)
+        (dispatcher / "production-state.json").write_text(
+            json.dumps(
+                {
+                    "records": {},
+                    "ready_skips": {
+                        skipped: {**streak, "reason": "blocked_by task is not Done"},
+                        "other-7": {**streak, "reason": "code slot taken by other-6"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        section = self._status_json(ref)["work"]["ready_skips"]
+
+        self.assertEqual(section["source"]["state"], "available")
+        self.assertEqual(
+            section["items"], {skipped: {"reason": "blocked_by task is not Done", "since": "2026-09-21T14:13:20Z"}}
+        )
+        self.assertNotIn(untouched, section["items"])
 
 
 class SprintAuditTraversalTests(SprintFixture):

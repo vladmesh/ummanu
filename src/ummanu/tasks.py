@@ -2013,6 +2013,26 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             runtime=runtime,
         )
 
+    def supersede(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        successor: str,
+        reason: str,
+        request_id: str | None = None,
+        runtime: Callable[[], Any] | None = None,
+    ) -> dict[str, Any]:
+        """Cancel `reference` in favour of `successor`, repointing its open dependents to it
+        (`dispatch/card_cancel.py`)."""
+        from ummanu.dispatch.card_cancel import supersede_card
+
+        return supersede_card(
+            self, role=role, actor=actor, reference=reference, successor=successor, reason=reason,
+            request_id=request_id, runtime=runtime,
+        )
+
     def verdict(
         self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None
     ) -> dict[str, Any]:

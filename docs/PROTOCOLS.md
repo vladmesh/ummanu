@@ -1549,6 +1549,25 @@ the holder, `cancel_pending` with the failure). A repeat of the request id repla
 and finishes steps 4 and 5. A wait card that still waits keeps its
 `cancelled` delivery instead ([Wait cards](#wait-cards)).
 
+```bash
+python3 -P -m ummanu task supersede --role po --ref OLD --by NEW --reason-file REASON.md --request-id REQUEST_ID
+```
+
+`supersede` replaces OLD with its successor NEW. The PO supersedes any card; the observer only when
+OLD and NEW are both cards of its own sprint (OLD under the identity guard, a NEW of another sprint or
+of none `role_forbidden`). It is `cancel` of OLD through the same `cancel_card` steps, with three more
+effects in step 3's transaction: every open dependent of OLD (a card not Done whose `blocked_by` names
+it) has OLD replaced by NEW in its `blocked_by`, NEW records that it supersedes OLD, and the audit event
+on OLD is `superseded`, naming NEW and each dependent's new `blocked_by`; the comment's marker line is
+`[superseded by NEW]`. Before anything is stopped or written, and again inside that transaction, it
+refuses a NEW that is missing (`not_found`), equal to OLD, a Product or Issue, archived, Done or
+already the successor of another card (`validation`), a repoint that would make NEW wait for itself
+directly or through a `blocked_by` chain (`dependency_cycle`, naming the chain), an OLD that is Done,
+archived, a Product or an Issue (`transition_forbidden`), and an OLD wait card that still waits, which
+`cancel` ends instead (`transition_forbidden`). Every refusal and lock refusal of `cancel` applies;
+the repoint is in the archive transaction, so "nothing was archived" means nothing was repointed. A
+repeat of the request id replays.
+
 `edit` replaces a card's spec in place: `--title`, `--description`/`--body-file` (full new text),
 `--head`, `--review-head`. PO, dispatcher and observer may edit; an ordinary card is editable only in
 Issues, Ready or Blocked (an active card goes through preempt and requeue), and every other column is
@@ -2001,6 +2020,7 @@ Who writes what:
 | `task move` of a Product or Issue | `transition_forbidden` | `role_forbidden` |
 | `task edit` of a Product or Issue | `edit_forbidden` | `role_forbidden` |
 | `task cancel` of a Product or Issue | `transition_forbidden` | `role_forbidden` |
+| `task supersede` of a Product or Issue | `transition_forbidden`, as the successor `validation` | `role_forbidden` |
 
 An observer's `issue create` needs a head bound to a sprint: an unbound head is refused as
 `observer_identity_unbound`, audited as `sprint_guard_denied`, and nothing is written. The issue takes
@@ -4125,12 +4145,12 @@ column (`issues`, `ready`, `in_progress`, `validate`, `assessment`, `blocked`, `
 order), each column with its `count` and its `cards`, the oldest `date_moved` first and an unknown
 one counted as oldest. One board store statement (`SqlCardClient.board_cards`) over `tasks`, their
 `task_comments` and `sprints`, whatever the filter and the card count; Product and Issue rows are
-never read, and nothing comes from the audit journal or the dispatcher. A column holds the live
+never read, and nothing comes from the audit journal. A column holds the live
 cards in its state; `done` holds the Done cards moved in the last 48 hours and every Done card,
 archived ones included, of an open sprint. `project` keeps that project's cards of this window,
 `sprint` that sprint's, and `sprint="none"` the cards of no sprint; both together intersect, and a
 value no card matches is empty columns. The document echoes them as `filter: {project, sprint}`.
-A tile is `{ref, title, type, project, sprint, head, moved, blocked_reason, waiting_owner}`: `sprint`
+A tile is `{ref, title, type, project, sprint, head, moved, blocked_reason, waiting_owner, ready_skip}`: `sprint`
 is `{state: linked|none|unreadable, ref}`; `head` is the chosen head else the resolved one, the worker's in `in_progress` and the reviewer's in `validate`,
 null elsewhere; `moved` is `{at, age_seconds}`, null for a missing, future or out-of-range
 `date_moved`; `blocked_reason` comes from the comment the move into Blocked wrote: the earliest
@@ -4141,7 +4161,11 @@ it. When that comment is the dispatcher's relay of a worker's block (`BLOCKED_RE
 or before it. The shown line is the first line that says something: the marker, empty lines, a bare
 `classification: <value>` line and a heading that is only a label (`## Blocker`) are skipped, and
 heading marks, a leading `classification: <value>` clause and a leading `Blocker:` label are
-stripped. It is null when no such line is left; `waiting_owner` is the PO's handover mark.
+stripped. It is null when no such line is left; `waiting_owner` is the PO's handover mark;
+`ready_skip` is `{reason, since}` from the dispatcher's `production-state.json` for a Ready card its
+claim pass skipped (as in a sprint's [`ready_skips`](#what-a-sprint-is-doing)), and null for any other
+card. That file is the document's `ready_skips.source`, read apart: when it cannot be read every
+`ready_skip` is null and the board stands.
 A text value that is missing or not a string is null. Any failure of the read is the document's
 unavailable `source` with its reason and `columns` null, never a refusal.
 
@@ -4669,6 +4693,7 @@ A listing item and the watched sprint's `work` are built by the same call over t
 | `decision.freshness` | `sprints` for a closed or stopped sprint (its record is frozen); `journal` for an open one, which also needs `cards` | `value: null`, sourced by whichever of `sprints`, `cards`, `journal` was missing first |
 | `cards` | `cards` | `states: null`, never `{}` |
 | `degraded_cards` | `liveness` | `items: null`, never `{}` |
+| `ready_skips` | `liveness`, which also needs `sprints` and `cards` | `items: null`, never `{}` |
 | `checks` | `sprints` for `not_applicable`; `liveness` otherwise | `unknown`, sourced `sprints` or `liveness`; `card` still names the current card wherever the row answered |
 | `waiting` | `sprints`, then `cards`, then `liveness`, then `cards`, then `liveness` (below) | `unknown`, sourced by the first missing input, and its reason names the column the board *did* establish where it did |
 | `head_profiles` | `heads` (the installed head registry), which also needs `sprints`, and `liveness` when it answered | every role `null`, sourced by the first of `sprints`, `liveness`, `heads` that was missing; a `liveness` alone missing costs only `via: launched` |
@@ -4732,6 +4757,14 @@ card, and `current_task.live` qualifies it as the record of an ended sprint rath
 progress. The watched sprint document carries the sprint's `status` as its first key, so
 `ummanu sprint status` names it first. `cards.states` and `degraded_cards.items` are `null`, never `{}`, when their
 source is unreadable.
+
+**`ready_skips`** is why the dispatcher does not take a Ready card: `items` maps each Ready card of the
+sprint that the claim pass skipped to `{reason, since}`, the latest skip reason (for example `blocked_by
+task is not Done`, a code slot wait, a head whose resource is not ready) and the UTC moment that reason
+started. The dispatcher keeps one streak per skipped card under `ready_skips` in
+`production-state.json`, restarted when the reason changes and dropped when a full pass does not skip
+the card. One reader, `ready_skip_reasons` (`dispatch/ready_skips.py`), serves this section and the
+board's Ready tiles; a card with no streak is absent.
 
 **`current_card_state`** is where the current card stands and since when, and it is a section of its own
 because `current_task` is the sprint row's alone: a journal or a Pipeline listing that could not be read
@@ -4924,7 +4957,7 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | method | route | operation | answers |
 | --- | --- | --- | --- |
 | GET | `/` | `reads.system_snapshot` (+ `po.po_running_count`) | the compact dashboard: pipeline controls and running PO turns, the current health problem, open sprints with their card, heads and budget, and links to the board and all sprints |
-| GET | `/board` | `reads.board_view` (+ `reads.board_filters`) | every work card in one column per state with its count, narrowed by `?project=<id>` and `?sprint=<ref>` or `?sprint=none` (вне спринта), each a tile: ref, title on one line, type, project, sprint or "вне спринта", current head, age in the column, a Blocked card's reason (two lines at most, the whole in its tooltip) and a mark for a card waiting for the owner; the page takes the full width and an empty column collapses to its header and count; on a desktop screen the board fits the viewport, each column scrolls its tiles and the board keeps its scroll across a reload in the same tab; a narrow screen stacks the columns; above them the active filter and a GET form (the registered projects, вне спринта, the open sprints) with a reset to the whole board; a filter no card matches is an empty board; an unreadable board is a "board not readable" notice with its reason |
+| GET | `/board` | `reads.board_view` (+ `reads.board_filters`) | every work card in one column per state with its count, narrowed by `?project=<id>` and `?sprint=<ref>` or `?sprint=none` (вне спринта), each a tile: ref, title on one line, type, project, sprint or "вне спринта", current head, age in the column, a Blocked card's reason (two lines at most, the whole in its tooltip), a skipped Ready card's "not taken since <since>: <reason>" (two lines at most) and a mark for a card waiting for the owner; the page takes the full width and an empty column collapses to its header and count; on a desktop screen the board fits the viewport, each column scrolls its tiles and the board keeps its scroll across a reload in the same tab; a narrow screen stacks the columns; above them the active filter and a GET form (the registered projects, вне спринта, the open sprints) with a reset to the whole board; a filter no card matches is an empty board; an unreadable board is a "board not readable" notice with its reason |
 | GET | `/tasks/{ref}` | `reads.task_snapshot` (+ `ops.run_list`, `po.po_session_titles`) | one card: its full description, state, attempt, heads with model and effort, product runs, worker and reviewer output, result, event tail; and, when the card carries them, the **Delegation** block ("Delegated by" the PO session's title linked to `/po/sessions/<id>`, its short id when untitled or gone, the successor the result goes to now, and each return: state, delivery, when, which session received it), the **Wait** block (the target as a run link, a card link with the awaited states, or a time; waiting since, deadline, state, the frozen result with its evidence link, and each return address with its delivery) and the **E2E** block (each run's SHA, link, state or result and wait card; the budget or cap, the budget mark with its decision card, and the after-merge state and runs). A PO store that does not answer marks the titles unavailable and leaves the rest of the page |
 | GET | `/tasks/{ref}/heads/{run_id}` | `reads.head_view` | one of the card's local-pty heads, read-only: its terminal's tail as redacted plain text and its journal's tail; a run id the card did not record is 404 |
 | GET | `/sprints` | `sprint_reads.sprint_list` | active sprints or the searchable `?view=archive`, optionally filtered by `q` and `project` |

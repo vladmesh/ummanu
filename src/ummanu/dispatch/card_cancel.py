@@ -1,9 +1,11 @@
-"""`task cancel`: end any non-Done card in one bounded operation, `cancel_card`.
+"""`task cancel` and `task supersede`: end any non-Done card in one bounded operation.
 
 Under one allowance the operation takes the dispatcher tick lock and the card's effect lock, stops
 the card's heads through the reconcile stop, archives the card with a `cancelled` audit event,
 requests workspace disposal and drops the dispatcher record. A wait card that still waits records
-its cancel instead, and the dispatcher delivers `cancelled` to its return addresses.
+its cancel instead, and the dispatcher delivers `cancelled` to its return addresses. A supersede is
+that cancel with a successor: the archive transaction also moves every open dependent's
+`blocked_by` to the successor and records the supersession, under a `superseded` audit event.
 """
 
 from __future__ import annotations
@@ -23,7 +25,9 @@ from ummanu.board.models import CardState
 from ummanu.board.roles import Role
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.board.task_protocol.rows import (
+    _TYPED_RECORD_TYPES,
     WAIT_CANCELLED,
+    _blocker_refs,
     _check_execution_record,
     _CommittedWriteError,
     _digest,
@@ -43,6 +47,8 @@ from ummanu.runtime.local_pty_inspection import _flock_holders
 
 #: The audit kind of a card cancel.
 CANCELLED = "cancelled"
+#: The audit kind of a supersede: a cancel naming the successor.
+SUPERSEDED = "superseded"
 #: The whole operation's bound: every lock wait, board statement and journal write it admits.
 CANCEL_ALLOWANCE = 20.0
 _WAITING = {CardState.READY.value, CardState.IN_PROGRESS.value}
@@ -71,6 +77,57 @@ def cancel_card(
     `runtime` builds the dispatcher runtime whose host stops the card's heads; it is called only
     when the card's dispatcher record still names a head, a launch or an unsettled workspace.
     """
+    admitted, reason, request_id, current = _request(writer, role, actor, reference, reason, request_id)
+    prior = writer.audit.committed_event(request_id) or writer.audit.pending_event(request_id)
+    if (prior or {}).get("kind") == WAIT_CANCELLED or (prior is None and _waiting(current)):
+        return _cancel_wait(writer, admitted, actor, reference, reason, request_id)
+    return _bounded(
+        writer, admitted, actor, reference, reason, request_id, runtime, replay=prior is not None, successor=""
+    )
+
+
+def supersede_card(
+    writer: Any,
+    *,
+    role: str,
+    actor: str,
+    reference: str,
+    successor: str,
+    reason: str,
+    request_id: str | None = None,
+    runtime: Callable[[], Any] | None = None,
+) -> dict[str, Any]:
+    """Cancel `reference` in favour of `successor`, which takes its place in every open dependent's
+    `blocked_by` and records that it supersedes it, all in the cancel's archive transaction.
+
+    The PO supersedes any card; the observer only when both cards are of its own sprint.
+    """
+    admitted, reason, request_id, current = _request(writer, role, actor, reference, reason, request_id)
+    successor = successor.strip()
+    prior = writer.audit.committed_event(request_id) or writer.audit.pending_event(request_id)
+    if prior is None:
+        new = _successor(writer, reference, successor)
+        if admitted is Role.OBSERVER and new.get("sprint") != current["sprint"]:
+            raise TaskError("role_forbidden", "the observer supersedes only by a card of its own sprint", 3)
+        if _waiting(current):
+            raise TaskError(
+                "transition_forbidden",
+                f"{reference} is a wait card that still waits; `task cancel` ends it and delivers "
+                "`cancelled` to its return addresses",
+                3,
+            )
+    result = _bounded(
+        writer, admitted, actor, reference, reason, request_id, runtime,
+        replay=prior is not None, successor=successor,
+    )
+    event = writer.audit.committed_event(request_id)
+    return {**result, "successor": successor, "repointed": sorted(event["payload"]["repointed"])}
+
+
+def _request(
+    writer: Any, role: str, actor: str, reference: str, reason: str, request_id: str | None
+) -> tuple[Role, str, str, dict[str, Any]]:
+    """The admitted role, the board-safe reason, the request id and the card, for either verb."""
     admitted: Role = writer._role(role, {Role.PO, Role.OBSERVER}, actor=actor)
     reason = writer._redact_for_board(reason).strip()
     if not reason:
@@ -88,11 +145,26 @@ def cancel_card(
             request_id=request_id,
             reference=reference,
         )
-    prior = writer.audit.committed_event(request_id) or writer.audit.pending_event(request_id)
-    if (prior or {}).get("kind") == WAIT_CANCELLED or (
-        prior is None and is_wait(current) and current["state"] in _WAITING and not current.get("closed")
-    ):
-        return _cancel_wait(writer, admitted, actor, reference, reason, request_id)
+    return admitted, reason, request_id, current
+
+
+def _waiting(card: dict[str, Any]) -> bool:
+    return is_wait(card) and card["state"] in _WAITING and not card.get("closed")
+
+
+def _bounded(
+    writer: Any,
+    role: Role,
+    actor: str,
+    reference: str,
+    reason: str,
+    request_id: str,
+    runtime: Callable[[], Any] | None,
+    *,
+    replay: bool,
+    successor: str,
+) -> dict[str, Any]:
+    """The archive path of both verbs under one allowance, with the tick lock and the card's lock held."""
     state = ProductionState(Path(writer.data_dir))
     allowance = Allowance(CANCEL_ALLOWANCE)
     token = _ALLOWANCE.set(allowance)
@@ -104,8 +176,8 @@ def cancel_card(
             held.enter_context(_path_lock(state.tick_lock))
             held.enter_context(reference_lock(writer.data_dir, reference))
             return _cancel_held(
-                writer, state, admitted, actor, reference, reason, request_id, runtime,
-                replay=prior is not None, allowance=allowance, progress=progress,
+                writer, state, role, actor, reference, reason, request_id, runtime,
+                replay=replay, allowance=allowance, progress=progress, successor=successor,
             )
     except Deferred:
         raise _busy(reference, allowance, progress) from None
@@ -126,8 +198,13 @@ def _cancel_held(
     replay: bool,
     allowance: Allowance,
     progress: _Progress,
+    successor: str,
 ) -> dict[str, Any]:
-    """The cancel with both locks held: heads, then the archive, then the dispatcher record."""
+    """The cancel with both locks held: heads, then the archive, then the dispatcher record.
+
+    A supersede's successor is checked before any head is stopped and again inside the archive
+    transaction, whose repoint is the one that transaction computes.
+    """
     payload = state.load()
     if payload.get("phase") == "unavailable":
         raise TaskError(
@@ -137,12 +214,23 @@ def _cancel_held(
     if not replay:
         task = writer.reader.show(reference)
         _admit(task, reference)
+        if successor:
+            _succession(writer, task, successor)
         record = records.get(reference)
         if record is not None:
             _stop_heads(runtime, task, record, reference, state, payload, records, progress)
 
+    moves: list[tuple[dict[str, Any], str]] = []
+    successors: list[dict[str, Any]] = []
+
     def event_payload(task: dict[str, Any]) -> dict[str, Any]:
+        named: dict[str, Any] = {}
+        if successor:
+            new, moves[:] = _succession(writer, task, successor)
+            successors[:] = [new]
+            named = {"successor": successor, "repointed": {card["ref"]: blocked for card, blocked in moves}}
         return {
+            **named,
             "reason_sha256": _digest(reason),
             "reason": reason,
             "from": task["state"],
@@ -156,18 +244,24 @@ def _cancel_held(
     def mutation(task: dict[str, Any]) -> None:
         number = _task_number(task)
         try:
+            for card, blocked in moves:
+                writer.client.call("saveTaskMetadata", task_id=_task_number(card), values={"blocked_by": blocked})
+            for new in successors:
+                writer.client.call("saveTaskMetadata", task_id=_task_number(new), values={"supersedes": reference})
             if task["claim"]["worker"] is not None:
                 writer.client.call("saveTaskMetadata", task_id=number, values={"claim": ""})
-            writer.client.call("createComment", task_id=number, user_id=0, content=f"[cancel]\n{reason}")
+            writer.client.call(
+                "createComment", task_id=number, user_id=0, content=f"{_marker(successor)}\n{reason}"
+            )
             if not writer.client.call("closeTask", task_id=number):
                 raise TaskError("backend_error", "board store rejected the cancel", 1)
         except Exception as exc:
             raise _CommittedWriteError() from exc
 
-    identity = {"reason_sha256": _digest(reason)}
+    identity = {"reason_sha256": _digest(reason), **({"successor": successor} if successor else {})}
     result = writer._write(
-        CANCELLED, role.value, actor, reference, request_id, event_payload, mutation,
-        identity=identity, retry_payload={"reason": reason},
+        SUPERSEDED if successor else CANCELLED, role.value, actor, reference, request_id, event_payload,
+        mutation, identity=identity, retry_payload={"reason": reason},
     )
     progress.archived = result["event_id"]
     try:
@@ -201,6 +295,78 @@ def _admit(task: dict[str, Any], reference: str) -> None:
         raise TaskError(
             "transition_forbidden", f"{reference} is Done; a Done card is archived with `task archive`", 3
         )
+
+
+def _successor(writer: Any, reference: str, successor: str) -> dict[str, Any]:
+    """The open card that may take `reference`'s place, or the refusal naming why it may not."""
+    if not successor:
+        raise TaskError("validation", "a supersede needs the successor card (--by)", 2)
+    if successor == reference:
+        raise TaskError("validation", f"{reference} cannot supersede itself", 2)
+    try:
+        new = writer.reader.show(successor)
+    except TaskError as exc:
+        if exc.code != "not_found":
+            raise
+        raise TaskError("not_found", f"the successor {successor} was not found", 2) from None
+    if new.get("record_type") in _TYPED_RECORD_TYPES:
+        raise TaskError("validation", f"the successor {successor} is a {new['record_type']}, not a card", 2)
+    if new.get("closed"):
+        raise TaskError("validation", f"the successor {successor} is archived", 2)
+    if new["state"] == CardState.DONE.value:
+        raise TaskError("validation", f"the successor {successor} is Done; it can no longer hold a dependent", 2)
+    held = new["workspace"]["supersedes"]
+    if held and held != reference:
+        raise TaskError(
+            "validation", f"the successor {successor} already supersedes {held}; a card supersedes one card", 2
+        )
+    return new
+
+
+def _succession(
+    writer: Any, old: dict[str, Any], successor: str
+) -> tuple[dict[str, Any], list[tuple[dict[str, Any], str]]]:
+    """The successor, and each open dependent of `old` with the `blocked_by` it gets with the successor
+    in `old`'s place; refused when that would make the successor wait for itself."""
+    reference = old["ref"]
+    new = _successor(writer, reference, successor)
+    cards = [card for card in writer.reader.list() if card.get("record_type") not in _TYPED_RECORD_TYPES]
+    graph = {card["ref"]: _blocker_refs(card) for card in cards}
+    moves = []
+    for card in cards:
+        blockers = graph[card["ref"]]
+        if reference in blockers and card["state"] != CardState.DONE.value:
+            graph[card["ref"]] = list(dict.fromkeys(successor if ref == reference else ref for ref in blockers))
+            moves.append((card, ",".join(graph[card["ref"]])))
+    cycle = _cycle(graph, successor)
+    if cycle:
+        raise TaskError(
+            "dependency_cycle",
+            f"the repoint would make {successor} wait for itself: {' -> '.join(cycle)}, each blocked_by "
+            "the next; nothing was repointed",
+            2,
+        )
+    return new, moves
+
+
+def _cycle(graph: dict[str, list[str]], start: str) -> list[str]:
+    """A `blocked_by` path from `start` back to itself, or `[]` when there is none."""
+    seen: set[str] = set()
+    paths = [[start]]
+    while paths:
+        path = paths.pop()
+        for blocker in graph.get(path[-1], ()):
+            if blocker == start:
+                return [*path, start]
+            if blocker not in seen:
+                seen.add(blocker)
+                paths.append([*path, blocker])
+    return []
+
+
+def _marker(successor: str) -> str:
+    """The first line of the archive comment: `[cancel]`, or the successor a supersede names."""
+    return f"[superseded by {successor}]" if successor else "[cancel]"
 
 
 def _stop_heads(
@@ -382,9 +548,11 @@ def _returns(task: dict[str, Any]) -> str:
 
 
 def finish_pending_cancel(writer: Any, event: dict[str, Any], retry_payload: dict[str, Any] | None) -> None:
-    """Finish a staged cancel's board effect: claim settled, reason comment, card closed."""
+    """Finish a staged cancel's or supersede's board effect: the recorded repoint and supersession,
+    the claim settled, the reason comment, the card closed."""
     payload = event["payload"] if isinstance(event.get("payload"), dict) else {}
     expected = text(payload.get("reason_sha256"))
+    successor = text(payload.get("successor"))
     reason = text((retry_payload or {}).get("reason"))
     if reason and _digest(reason) != expected:
         raise TaskError("validation", "cancel retry reason does not match the pending request", 2)
@@ -396,22 +564,30 @@ def finish_pending_cancel(writer: Any, event: dict[str, Any], retry_payload: dic
         return
     task = writer.reader.show(str(event["ref"]))
     number = _task_number(task)
+    if successor:
+        for dependent, blocked in payload["repointed"].items():
+            writer.client.call(
+                "saveTaskMetadata", task_id=_task_number(writer.reader.show(dependent)), values={"blocked_by": blocked}
+            )
+        writer.client.call(
+            "saveTaskMetadata", task_id=_task_number(writer.reader.show(successor)), values={"supersedes": task["ref"]}
+        )
     if task["claim"]["worker"] is not None:
         writer.client.call("saveTaskMetadata", task_id=number, values={"claim": ""})
-    if not _has_cancel_reason(writer, raw, expected):
+    if not _has_cancel_reason(writer, raw, _marker(successor), expected):
         if not reason:
             raise TaskError("backend_error", "pending cancel reason comment is missing", 1)
-        writer.client.call("createComment", task_id=number, user_id=0, content=f"[cancel]\n{reason}")
+        writer.client.call("createComment", task_id=number, user_id=0, content=f"{_marker(successor)}\n{reason}")
     if not writer.client.call("closeTask", task_id=number):
         raise TaskError("backend_error", "pending cancel remains incomplete", 1)
 
 
-def _has_cancel_reason(writer: Any, raw: dict[str, Any], reason_sha256: str) -> bool:
+def _has_cancel_reason(writer: Any, raw: dict[str, Any], marker: str, reason_sha256: str) -> bool:
     task_id = positive_int(raw.get("id"))
     if task_id is None:
         raise TaskError("backend_error", "board store returned an invalid task", 1)
     for comment in writer.client.call("getAllComments", task_id=task_id) or []:
         body = _normalize_comment(comment)["body"] if isinstance(comment, dict) else ""
-        if body.startswith("[cancel]\n") and _digest(body.split("\n", 1)[1]) == reason_sha256:
+        if body.startswith(f"{marker}\n") and _digest(body.split("\n", 1)[1]) == reason_sha256:
             return True
     return False

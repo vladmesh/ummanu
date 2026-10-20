@@ -23,6 +23,7 @@ from ummanu.board.production_rights import touches_production
 from ummanu.checkpoint import rpo_problem
 from ummanu.config import InstanceReport, validate_instance
 from ummanu.dispatch.observer_state import load_observers
+from ummanu.dispatch.ready_skips import ready_skip_reasons
 from ummanu.dispatch.state import DispatcherRecord
 
 # Public row disposition for transports, shared with the native doctor evaluator.
@@ -286,18 +287,29 @@ class ReadLayer(ProtocolBoundary):
         }
 
     def board_view(self, *, project: str | None = None, sprint: str | None = None) -> dict[str, Any]:
-        """Every work card in its board column as one tile, from the board store alone.
+        """Every work card in its board column as one tile, from the board store, and the dispatcher's
+        skip reason on each Ready tile it skipped.
 
-        `project` and `sprint` (`none` for no sprint) narrow it. The read has one guard: whatever
+        `project` and `sprint` (`none` for no sprint) narrow it. The board read has one guard: whatever
         fails it is the document's unavailable source and its reason, so the board is shown as
-        unreadable rather than refused.
+        unreadable rather than refused. The skips are a source of their own and fail apart.
         """
         now = self._clock()
+        skips = read_source(
+            "ready_skips",
+            lambda: ready_skip_reasons(
+                json.loads(self._production_path(self.data_dir()).read_text(encoding="utf-8"))
+            ),
+            refusal=lambda exc: f"the dispatcher's Ready skips could not be read: {_reason(exc)}",
+            now=now,
+            evidence=None,
+        )
         try:
-            return board_reads.board_document(self._client(), now=now, project=project, sprint=sprint)
+            return board_reads.board_document(self._client(), now=now, project=project, sprint=sprint, skips=skips)
         except Exception as exc:  # noqa: BLE001 -- the board read's one guard
             return board_reads.unreadable(
-                f"the board could not be read: {_reason(exc)}", now=now, project=project, sprint=sprint
+                f"the board could not be read: {_reason(exc)}", now=now, project=project, sprint=sprint,
+                skips=skips,
             )
 
     def board_filters(self) -> dict[str, Any]:

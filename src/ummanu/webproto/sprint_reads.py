@@ -52,6 +52,7 @@ from ummanu.dispatch.observer import (
     observer_snapshot,
 )
 from ummanu.dispatch.post_merge import WATCHES_KEY
+from ummanu.dispatch.ready_skips import ready_skip_reasons
 from ummanu.head_registry import HeadRegistryConfigError, installed_heads, installed_pair
 from ummanu.kernel.errors import TaskError
 from ummanu.product_issues import ProductIssueStore, registered_projects
@@ -533,6 +534,28 @@ class SprintSections(SectionSet):
                 (SOURCE_SPRINTS, SOURCE_LIVENESS),
                 lambda sprint, _production: (
                     None if sprint[1] is None else {"items": sprint[1].get("degraded_cards")}
+                ),
+            ),
+            blank={"items": None},
+            narrates=(),
+        )
+
+    def ready_skips(self, read: SourceSet) -> Section:
+        """This sprint's Ready cards the dispatcher skips, each with its latest skip reason and since when."""
+        return read.decide(
+            Rule(
+                SOURCE_LIVENESS,
+                (SOURCE_SPRINTS, SOURCE_CARDS, SOURCE_LIVENESS),
+                lambda sprint, _linked, production: (
+                    None
+                    if sprint[1] is None
+                    else {
+                        "items": {
+                            ref: skip
+                            for ref, skip in ready_skip_reasons(production.payload).items()
+                            if ref in (sprint[1].get("cards") or {}).get("ready", ())
+                        }
+                    }
                 ),
             ),
             blank={"items": None},
@@ -1260,6 +1283,7 @@ class SprintReadLayer(ProtocolBoundary):
             "decision": SECTIONS.decision(sprint, SECTIONS.freshness(sprint)),
             "cards": SECTIONS.cards(sprint),
             "degraded_cards": SECTIONS.degraded_cards(sprint),
+            "ready_skips": SECTIONS.ready_skips(sprint),
             "checks": SECTIONS.checks(sprint),
             "waiting": SECTIONS.waiting(sprint),
             "waiting_on": _waiting_on(sprint),

@@ -722,7 +722,7 @@ class RecoveryMixin:
         if event.get("kind") == "archived":
             self._finish_pending_archive(event, retry_payload)
             return
-        if event.get("kind") == "cancelled":
+        if event.get("kind") in {"cancelled", "superseded"}:
             from ummanu.dispatch.card_cancel import finish_pending_cancel
 
             finish_pending_cancel(self, event, retry_payload)

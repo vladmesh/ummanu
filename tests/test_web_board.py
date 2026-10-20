@@ -7,6 +7,7 @@ board store statement returns; which rows the store selects is `tests/test_web_b
 
 from __future__ import annotations
 
+import json
 import re
 import tempfile
 import unittest
@@ -74,8 +75,10 @@ class BoardClient:
         return self.open_sprints
 
 
-def page(client: Any, path: str = "/board", *, instance: str = "/nonexistent/instance") -> tuple[int, str]:
-    reads = ReadLayer(instance, board_client=client, clock=lambda: NOW)
+def page(
+    client: Any, path: str = "/board", *, instance: str = "/nonexistent/instance", data_dir: Path | None = None
+) -> tuple[int, str]:
+    reads = ReadLayer(instance, board_client=client, clock=lambda: NOW, data_dir=data_dir)
     app = WebApp(reads, *(Recording() for _ in range(7)))
     route, _mark, query = path.partition("?")
     response = app.handle("GET", route, query=query)
@@ -280,6 +283,58 @@ class TileTests(unittest.TestCase):
         self.assertIn('title="choose the deploy window">waits for the owner</p>', waiting)
         self.assertTrue(tile_of(html, "u-2").startswith('<li class="tile">'))
         self.assertNotIn("waits for the owner", tile_of(html, "u-2"))
+
+
+class ReadySkipTests(unittest.TestCase):
+    """The dispatcher's skip reason on the Ready tiles it skipped, read from its production state."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.data_dir = Path(tmp.name)
+        streak = {"since": NOW - 2 * HOUR, "until": 0.0, "noticed": True}
+        (self.data_dir / "dispatcher").mkdir()
+        (self.data_dir / "dispatcher" / "production-state.json").write_text(
+            json.dumps(
+                {
+                    "records": {},
+                    "ready_skips": {
+                        "u-1": {**streak, "reason": "blocked_by task is not Done"},
+                        "u-3": {**streak, "reason": "code slot taken by u-9"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.client = BoardClient([row("u-1", "ready"), row("u-2", "ready"), row("u-3", "blocked")])
+
+    def tiles(self, document: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return {tile["ref"]: tile for column in document["columns"] for tile in column["cards"]}
+
+    def test_a_skipped_ready_card_carries_its_reason_and_since_and_no_other_card_does(self) -> None:
+        document = ReadLayer("/nonexistent/instance", board_client=self.client, clock=lambda: NOW,
+                             data_dir=self.data_dir).board_view()
+
+        self.assertEqual(document["ready_skips"]["source"]["state"], "available")
+        tiles = self.tiles(document)
+        self.assertEqual(
+            tiles["u-1"]["ready_skip"], {"reason": "blocked_by task is not Done", "since": "2027-01-15T06:00:00Z"}
+        )
+        self.assertIsNone(tiles["u-2"]["ready_skip"])
+        self.assertIsNone(tiles["u-3"]["ready_skip"])
+        _status, html = page(self.client, data_dir=self.data_dir)
+        self.assertIn("not taken since 2027-01-15T06:00:00Z: blocked_by task is not Done", text(tile_of(html, "u-1")))
+        self.assertNotIn("not taken", tile_of(html, "u-2"))
+
+    def test_an_unreadable_production_state_leaves_the_board_standing_without_skips(self) -> None:
+        (self.data_dir / "dispatcher" / "production-state.json").write_text("{", encoding="utf-8")
+
+        document = ReadLayer("/nonexistent/instance", board_client=self.client, clock=lambda: NOW,
+                             data_dir=self.data_dir).board_view()
+
+        self.assertEqual(document["source"]["state"], "available")
+        self.assertEqual(document["ready_skips"]["source"]["state"], "unavailable")
+        self.assertIsNone(self.tiles(document)["u-1"]["ready_skip"])
 
 
 class FilterTests(unittest.TestCase):

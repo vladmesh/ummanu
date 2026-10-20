@@ -19,6 +19,7 @@ from ummanu.board.owner_handover import waiting_owner
 from ummanu.board.sql_rows import comment_marker
 from ummanu.dispatch.worker_report import BLOCKED_RELAY
 from ummanu.webproto import sources
+from ummanu.webproto.section import Reading
 
 SCHEMA_VERSION = 1
 
@@ -58,10 +59,13 @@ NO_SPRINT = "none"
 UNREADABLE = "unreadable"
 
 
-def board_document(client: Any, *, now: float, project: str | None, sprint: str | None) -> dict[str, Any]:
+def board_document(
+    client: Any, *, now: float, project: str | None, sprint: str | None, skips: Reading
+) -> dict[str, Any]:
     """The board read from `client.board_cards`, every card placed in its column, oldest move first.
 
     `project` and `sprint` narrow it when given; the sprint `none` keeps only cards of no sprint.
+    `skips` is the dispatcher's `ready_skip_reasons`, shown on the Ready tiles it names.
     """
     rows = client.board_cards(
         done_since=datetime.fromtimestamp(now - DONE_WINDOW_HOURS * 3600, UTC),
@@ -76,12 +80,15 @@ def board_document(client: Any, *, now: float, project: str | None, sprint: str 
         state = row.get("state")
         if state not in placed:
             raise ValueError(f"card {row.get('ref')!r} is in state {state!r}, which no board column shows")
-        placed[state].append(_tile(row, state, now=now))
+        tile = _tile(row, state, now=now)
+        tile["ready_skip"] = skips.value.get(row.get("ref")) if state == "ready" and skips.answered else None
+        placed[state].append(tile)
     return _document(
         now,
         source=sources.available(now),
         project=project,
         sprint=sprint,
+        skips=skips,
         columns=[
             {"state": state, "title": title, "count": len(placed[state]), "cards": sorted(placed[state], key=_oldest_first)}
             for state, title in COLUMNS
@@ -89,10 +96,13 @@ def board_document(client: Any, *, now: float, project: str | None, sprint: str 
     )
 
 
-def unreadable(reason: str, *, now: float, project: str | None, sprint: str | None) -> dict[str, Any]:
+def unreadable(
+    reason: str, *, now: float, project: str | None, sprint: str | None, skips: Reading
+) -> dict[str, Any]:
     """The board that could not be read: its reason, and no columns rather than empty ones."""
     return _document(
-        now, source=sources.unavailable(reason, now=now), project=project, sprint=sprint, columns=None
+        now, source=sources.unavailable(reason, now=now), project=project, sprint=sprint, skips=skips,
+        columns=None,
     )
 
 
@@ -102,6 +112,7 @@ def _document(
     source: sources.Source,
     project: str | None,
     sprint: str | None,
+    skips: Reading,
     columns: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     return {
@@ -109,6 +120,7 @@ def _document(
         "kind": "board",
         "observed_at": sources.isoformat(now),
         "source": source.to_json(),
+        "ready_skips": {"source": skips.source.to_json()},
         "filter": {"project": project, "sprint": sprint},
         "done_window_hours": DONE_WINDOW_HOURS,
         "columns": columns,
