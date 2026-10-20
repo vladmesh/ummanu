@@ -54,7 +54,7 @@ class StageResumeTests(DispatcherRuntimeFixture, unittest.TestCase):
             self.runtime, self.reader.show(CARD_REF), record, records, payload, record.attempt_id,
             kind="review", stall=1, trigger="confirmed stall",
         )
-        self.assertEqual(stalled["status"], "blocked", stalled)
+        self.assertEqual(stalled["to"], "blocked", stalled)
         self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
         return attempt
 
