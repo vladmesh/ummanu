@@ -10,14 +10,15 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ummanu.board.audit_contract import card_transition_of
 from ummanu.board.completion_evidence import has_candidate, is_po_executed, is_wait
+from ummanu.broad_check import admitted_check
 from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch.assessment_decision import rework_instruction
-from ummanu.dispatch.helpers import _REPORT_ACTIONS, _worker_id, scrub_host_output
+from ummanu.dispatch.helpers import _REPORT_ACTIONS, _round_report_ids, _worker_id, scrub_host_output
 from ummanu.dispatch.host import _blocked_actions_and_their_infrastructure_twins
 from ummanu.dispatch.host_runtime.catalog import live_root_project_refusal
 from ummanu.dispatch.launch import (
@@ -38,6 +39,7 @@ from ummanu.dispatch.state import (
     CLAIM_SKIP_RESOURCE_NOT_READY,
     CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE,
     DispatcherRecord,
+    OutcomeTerminalPath,
     PersistedHeadRun,
     attempt_request_id as _attempt_request_id,
     new_attempt_id as _new_attempt_id,
@@ -74,6 +76,8 @@ STAGE_ADMISSION = "admission"
 STAGE_WORKER = "worker"
 STAGE_GATE = "gate"
 STAGE_REVIEW = "review"
+#: The record state of a claim held on its round's candidate, before its move into Validate.
+STAGE_RESUME_STATE = "stage_resume"
 #: Blocked actions written before the attempt had a checkout, so the next claim creates one.
 _NO_CHECKOUT_ACTIONS = _blocked_actions_and_their_infrastructure_twins(
     SPRINT_RESERVATION_BLOCKED_ACTION,
@@ -81,6 +85,14 @@ _NO_CHECKOUT_ACTIONS = _blocked_actions_and_their_infrastructure_twins(
     "contract-preflight-blocked",
     "git-access-preflight-blocked",
     "codex-fanout-blocked",
+)
+#: Blocked actions out of Validate or Assessment that judged the candidate itself, so only new
+#: work continues the card: a red review stop, a ledgered candidate, a reslice decision.
+_WORKER_ACTIONS = (
+    "red-review-ceiling",
+    "red-review-repeated-blockers",
+    "rejected-candidate-blocked",
+    "assessment-reslice",
 )
 #: Action families the gate and the merge path block with out of Validate or Assessment, each
 #: matched with any phase prefix (`merge-gate-blocked`, `review-freeze-infrastructure-...`).
@@ -94,7 +106,9 @@ _GATE_ACTIONS = (
     "infrastructure-reruns-exhausted",
     "infrastructure-rerun-blocked",
     "merge-blocked",
-    "rejected-candidate-blocked",
+    "release-drift-blocked",
+    "release-failed-blocked",
+    "release-red-blocked",
     "cleanup-provenance-blocked",
     "completion-evidence-missing",
     "research-report-transfer-refused",
@@ -124,7 +138,8 @@ class ResumePoint:
     """The round a dispatcher Blocked move interrupted, as the next claim of the card continues it.
 
     `generation` is the highest one the card's worker reports were filed under; the claim opens the
-    next. The default is a card with no interrupted round.
+    next. `round_report` is the interrupted round's admitted `report:done`, with its generation and
+    candidate SHA, when that report is the round's last. The default is a card with no interrupted round.
     """
 
     require_existing_workspace: bool = False
@@ -133,6 +148,9 @@ class ResumePoint:
     decision: str = ""
     protocol_prerequisites: tuple[str, ...] = ()
     generation: int = 0
+    round_report: str = ""
+    round_generation: int = 0
+    candidate_sha: str = ""
 
 
 @dataclass(frozen=True)
@@ -819,14 +837,84 @@ def _prepare_claim(
         preferred_head=worker_choice.preferred if worker_choice.substituted else "",
         preferred_review_head=(review_choice.preferred if review_choice.substituted else ""),
     )
-    runtime.open_worker_round(record, round_number=runtime._journal_round(ref) + 1)
+    held = _held_candidate_workspace(runtime, claimed, record, resume)
+    if held:
+        # No worker round opens: the record continues the interrupted round and its accepted report.
+        record.workspace = held
+        record.report_generation = resume.round_generation
+        record.state = STAGE_RESUME_STATE
+        record.attempt_round = max(runtime._journal_round(ref), 1)
+        record.outcome_terminal_path = OutcomeTerminalPath.FOLLOWS_ACCEPTED_REPORT
+    else:
+        runtime.open_worker_round(record, round_number=runtime._journal_round(ref) + 1)
     records[ref] = record
     runtime.save_records(payload, records)
+    if held:
+        return continue_in_validate(runtime, claimed, record, records, payload)
     return ClaimHandoff(
         claimed=claimed,
         record=record,
         require_existing_workspace=resume.require_existing_workspace,
     )
+
+
+def _held_candidate_workspace(
+    runtime: Any, task: dict[str, Any], record: DispatcherRecord, resume: ResumePoint
+) -> str:
+    """The retained checkout when a gate or review stage continues on the round's own candidate, else "".
+
+    Its HEAD must be the interrupted round's admitted candidate, and its TASK.md must still name that
+    round's reports, which is where the Validate path reads the round's admission evidence from.
+    """
+    if resume.stage not in {STAGE_GATE, STAGE_REVIEW} or not resume.candidate_sha:
+        return ""
+    ref = str(task["ref"])
+    workspace = runtime.host.restore_workspace(task, record.worker)
+    if resume.round_report not in _round_report_ids(workspace, record.attempt_id, ref, resume.round_generation):
+        return ""
+    if runtime.host.head_commit(replace(record, workspace=workspace)) != resume.candidate_sha:
+        return ""
+    return workspace
+
+
+def continue_in_validate(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Move a claim held on its round's candidate into Validate, where the gate and review run on it.
+
+    Idempotent under one record: a tick that dies before the move replays it with the same request id.
+    """
+    ref = str(task["ref"])
+    attempt_accounting.persist_outcome_round_context(runtime, task, record, phase="worker")
+    attempt_accounting.capture_outcome_source(
+        runtime, task, record, phase="report", kind="card.reported", marker="report:done"
+    )
+    runtime.writer.move(
+        role="dispatcher",
+        actor=runtime.owner,
+        reference=ref,
+        target="validate",
+        reason=(
+            "the checkout still holds the candidate of the round's accepted report:done; "
+            "validation continues on it with no worker round"
+        ),
+        request_id=_attempt_request_id(record.attempt_id, "stage-resume", ref, str(record.report_generation)),
+    )
+    record.state = "validate"
+    runtime.save_records(payload, records)
+    return {
+        "status": "ok",
+        "step": "claim",
+        "pilot_ref": ref,
+        "attempt_id": record.attempt_id,
+        "action": "stage-resumed",
+        "workspace": record.workspace,
+        "to": "validate",
+    }
 
 
 def resume_point(runtime: Any, task: dict[str, Any]) -> ResumePoint:
@@ -838,17 +926,21 @@ def resume_point(runtime: Any, task: dict[str, Any]) -> ResumePoint:
     """
     ref = str(task["ref"])
     token = re.escape(request_token(ref))
-    reports = re.compile(rf"-(?:{'|'.join(map(re.escape, _REPORT_ACTIONS))})-{token}-(\d+)$")
+    reports = re.compile(rf"-({'|'.join(map(re.escape, _REPORT_ACTIONS))})-{token}-(\d+)$")
     bounce = re.compile(rf"-stale-done-rework-{token}-\d+$")
     events = runtime.audit.events(ref)
     generation = 0
     decision: dict[str, Any] | None = None
     stage = ""
     stage_decision: dict[str, Any] | None = None
+    # The round's last worker report, and that report as the interrupted round left it.
+    last_report: tuple[dict[str, Any], str, int] | None = None
+    stage_report: tuple[dict[str, Any], str, int] | None = None
     for index, event in enumerate(events):
         request_id = str(event.get("request_id") or "")
         if match := reports.search(request_id):
-            generation = max(generation, int(match[1]))
+            generation = max(generation, int(match[2]))
+            last_report = (event, match[1], int(match[2]))
         dispatcher = _actor_role(event) == "dispatcher"
         if dispatcher and bounce.search(request_id):
             decision = None
@@ -864,14 +956,21 @@ def resume_point(runtime: Any, task: dict[str, Any]) -> ResumePoint:
                 decision = stage_decision
             else:
                 decision = None
+            if source in {"validate", "assessment"}:
+                last_report = None
             stage, stage_decision = "", None
         elif target == "blocked" and dispatcher and source in {"in_progress", "validate", "assessment"}:
             stage = _interrupted_stage(request_id, token, source)
             stage_decision = None if source == "assessment" else decision
+            stage_report = last_report
     if not stage:
         return ResumePoint()
     body, prerequisites = (
         rework_instruction(task, events, stage_decision) if stage_decision is not None else ("", ())
+    )
+    report, action, report_generation = stage_report or ({}, "", 0)
+    admitted = (
+        admitted_check(_event_payload(report).get("worker_check")) if action == "worker-report-done" else None
     )
     return ResumePoint(
         require_existing_workspace=stage != STAGE_ADMISSION,
@@ -880,6 +979,9 @@ def resume_point(runtime: Any, task: dict[str, Any]) -> ResumePoint:
         decision=body,
         protocol_prerequisites=prerequisites,
         generation=generation,
+        round_report=str(report.get("request_id") or "") if admitted else "",
+        round_generation=report_generation if admitted else 0,
+        candidate_sha=str(admitted["candidate_sha"]) if admitted else "",
     )
 
 
@@ -895,7 +997,7 @@ def _interrupted_stage(request_id: str, token: str, source: str) -> str:
 
     if names(_NO_CHECKOUT_ACTIONS):
         return STAGE_ADMISSION
-    if source == "in_progress":
+    if source == "in_progress" or names(_WORKER_ACTIONS):
         return STAGE_WORKER
     return STAGE_GATE if names(_GATE_ACTIONS) else STAGE_REVIEW
 

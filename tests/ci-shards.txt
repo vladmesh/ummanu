@@ -92,6 +92,7 @@ integration-board tests/test_data.py
 component tests/test_ndjson.py
 integration-dispatcher tests/test_dispatcher.py
 integration-dispatcher tests/test_dispatcher_claim_contract.py
+integration-dispatcher tests/test_dispatcher_stage_resume.py
 integration-heads tests/test_dispatcher_review_lifecycle.py
 integration-dispatcher tests/test_dispatcher_no_candidate.py
 integration-dispatcher tests/test_e2e_stage.py

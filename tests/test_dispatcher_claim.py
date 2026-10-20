@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
+from tests.support.completion_receipt import SHA, TREE, declared_receipt
 from ummanu.board.audit_contract import PROTOCOL_EVENT_RECORD_TYPE
 from ummanu.board.models import EventKind
+from ummanu.broad_check import admission_snapshot
 from ummanu.dispatch import claim, production
+from ummanu.dispatch.helpers import _REPORT_ACTIONS, _round_record_line, _round_report_ids
 from ummanu.dispatch.host import _blocked_actions_and_their_infrastructure_twins
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id, is_claim_skip
 from ummanu.dispatch.watchdog import wait_cycle_token
@@ -106,16 +111,6 @@ class ClaimBoundaryTests(unittest.TestCase):
             ("stale-done-blocked", "2", "in_progress", claim.STAGE_WORKER),
             ("stale-done-infrastructure-blocked", "2", "in_progress", claim.STAGE_WORKER),
             ("headless-recovery-refused", "episode-1", "in_progress", claim.STAGE_WORKER),
-            ("gate-infrastructure-reruns-exhausted", "2", "validate", claim.STAGE_GATE),
-            ("merge-gate-infrastructure-reruns-exhausted", "2", "validate", claim.STAGE_GATE),
-            ("merge-gate-pending-stall", "", "assessment", claim.STAGE_GATE),
-            ("initial-gate-receipt-blocked", "", "validate", claim.STAGE_GATE),
-            ("rejected-candidate-blocked", "", "validate", claim.STAGE_GATE),
-            ("red-review-ceiling", "", "validate", claim.STAGE_REVIEW),
-            ("red-review-repeated-blockers", "", "validate", claim.STAGE_REVIEW),
-            ("review-infrastructure-blocked", cycle, "validate", claim.STAGE_REVIEW),
-            ("review-wait-stall", cycle, "validate", claim.STAGE_REVIEW),
-            ("assessment-reslice", "", "assessment", claim.STAGE_REVIEW),
         ]
         for action, suffix, source, stage in cases:
             with self.subTest(action=action, suffix=suffix):
@@ -129,6 +124,58 @@ class ClaimBoundaryTests(unittest.TestCase):
                 self.assertNotEqual(prepared.record.attempt_id, "old-attempt")
                 self.assertEqual(self.payload["attempts"][0]["attempt_id"], prepared.record.attempt_id)
         self.runtime.audit.committed_event.assert_not_called()
+
+    def test_a_dispatcher_block_out_of_validate_or_assessment_resumes_at_the_stage_its_action_names(self):
+        cycle = wait_cycle_token(DispatcherRecord.from_json({"comment_baseline": 7, "review_respawns": 2}))
+        cases = [
+            ("gate-blocked", "", "validate", claim.STAGE_GATE),
+            ("gate-transport-blocked", "", "validate", claim.STAGE_GATE),
+            ("gate-receipt-blocked", "", "validate", claim.STAGE_GATE),
+            ("initial-gate-receipt-blocked", "", "validate", claim.STAGE_GATE),
+            ("release-gate-receipt-blocked", "", "assessment", claim.STAGE_GATE),
+            ("gate-gate-topology-blocked", "", "validate", claim.STAGE_GATE),
+            ("merge-gate-gate-topology-blocked", "", "validate", claim.STAGE_GATE),
+            ("gate-infrastructure-reruns-exhausted", "2", "validate", claim.STAGE_GATE),
+            ("merge-gate-infrastructure-reruns-exhausted", "2", "validate", claim.STAGE_GATE),
+            ("review-freeze-infrastructure-rerun-blocked", "", "validate", claim.STAGE_GATE),
+            ("gate-pending-stall", "", "validate", claim.STAGE_GATE),
+            ("merge-gate-pending-stall", "", "assessment", claim.STAGE_GATE),
+            ("merge-gate-blocked", "", "validate", claim.STAGE_GATE),
+            ("merge-gate-result-blocked", "", "validate", claim.STAGE_GATE),
+            ("merge-gate-transport-blocked", "", "validate", claim.STAGE_GATE),
+            ("release-gate-transport-blocked", "", "assessment", claim.STAGE_GATE),
+            ("release-gate-result-blocked", "", "assessment", claim.STAGE_GATE),
+            ("release-drift-blocked", "", "assessment", claim.STAGE_GATE),
+            ("release-failed-blocked", "", "assessment", claim.STAGE_GATE),
+            ("release-red-blocked", "", "assessment", claim.STAGE_GATE),
+            ("merge-blocked", "", "assessment", claim.STAGE_GATE),
+            ("cleanup-provenance-blocked", "", "assessment", claim.STAGE_GATE),
+            ("completion-evidence-missing", "", "assessment", claim.STAGE_GATE),
+            ("research-report-transfer-refused", "", "assessment", claim.STAGE_GATE),
+            ("review-blocked", cycle, "validate", claim.STAGE_REVIEW),
+            ("review-infrastructure-blocked", cycle, "validate", claim.STAGE_REVIEW),
+            ("codex-fanout-review-blocked", "", "validate", claim.STAGE_REVIEW),
+            ("codex-provider-event-blocked", "review-run-1", "validate", claim.STAGE_REVIEW),
+            ("review-wait-stall", cycle, "validate", claim.STAGE_REVIEW),
+            ("review-provider-blocked", "run-1", "validate", claim.STAGE_REVIEW),
+            ("adopt-head-blocked", "", "validate", claim.STAGE_REVIEW),
+            ("active-mismatch-blocked", "", "validate", claim.STAGE_REVIEW),
+            ("production-activation-blocked", "", "assessment", claim.STAGE_REVIEW),
+            ("red-review-ceiling", "", "validate", claim.STAGE_WORKER),
+            ("red-review-repeated-blockers", "", "validate", claim.STAGE_WORKER),
+            ("rejected-candidate-blocked", "", "validate", claim.STAGE_WORKER),
+            ("assessment-reslice", "", "assessment", claim.STAGE_WORKER),
+        ]
+        for action, suffix, source, stage in cases:
+            with self.subTest(action=action, source=source):
+                self.records.clear()
+                self.payload.clear()
+                self.runtime.audit.events.return_value = [self.claimed(), self.block(action, suffix, source=source)]
+                self.assertEqual(claim.resume_point(self.runtime, self.task).stage, stage)
+                prepared = self.prepare()
+                self.assertIsInstance(prepared, claim.ClaimHandoff)
+                self.assertTrue(prepared.require_existing_workspace)
+                self.assertNotEqual(prepared.record.attempt_id, "old-attempt")
 
     def test_released_generic_move_to_blocked_is_a_workspace_retry(self):
         event = {"kind": "moved", "ref": "sample-1", "outcome": "success",
@@ -219,6 +266,75 @@ class ClaimBoundaryTests(unittest.TestCase):
                 point = claim.resume_point(self.runtime, self.task)
                 self.assertTrue(point.require_existing_workspace)
                 self.assertEqual((point.decision_id, point.decision), ("", ""))
+
+    def held_round(self, *, report="done", generation=1, document_generation=1, admitted=True):
+        """A round whose report was accepted, then a review stall out of Validate, on a retained checkout."""
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        _, path, receipt = declared_receipt(root / "candidate", root / "instance")
+        evidence = admission_snapshot(receipt, candidate_sha=SHA, tree_sha=TREE, path=path)
+        reported = self.report(report, generation)
+        if admitted:
+            reported["data"]["worker_check"] = evidence
+        workspace = root / "workspace"
+        workspace.mkdir()
+        issued = {
+            attempt_request_id("old-attempt", action, "sample-1", str(document_generation))
+            for action in _REPORT_ACTIONS
+        }
+        (workspace / "TASK.md").write_text(
+            f"# Task\n{_round_record_line(document_generation, issued)}\n", encoding="utf-8"
+        )
+        self.runtime.host.restore_workspace.return_value = str(workspace)
+        self.runtime.host.head_commit.return_value = SHA
+        self.runtime.writer.board_host.canon.events.return_value = []
+        to_validate = self.event(
+            attempt_request_id("old-attempt", "worker-done", "sample-1", str(generation)),
+            EventKind.CARD_MOVED, source="in_progress", target="validate",
+        )
+        stall = self.block("review-wait-stall", "cycle", source="validate")
+        self.runtime.audit.events.return_value = [self.claimed(), reported, to_validate, stall]
+        return str(workspace)
+
+    def test_a_review_stage_on_the_held_candidate_moves_to_validate_with_no_worker_round(self):
+        workspace = self.held_round(generation=3, document_generation=3)
+        point = claim.resume_point(self.runtime, self.task)
+        self.assertEqual((point.stage, point.round_generation, point.candidate_sha), (claim.STAGE_REVIEW, 3, SHA))
+
+        with mock.patch.object(claim, "launch_worker_after_claim") as launch:
+            outcome = claim.claim_ready_task(self.runtime, self.task, self.records, self.payload, "old-attempt")
+
+        launch.assert_not_called()
+        self.assertEqual((outcome["action"], outcome["to"]), ("stage-resumed", "validate"))
+        record = self.records["sample-1"]
+        self.assertNotEqual(record.attempt_id, "old-attempt")
+        self.assertEqual((record.state, record.workspace, record.report_generation), ("validate", workspace, 3))
+        self.assertEqual(
+            _round_report_ids(record.workspace, record.attempt_id, "sample-1", record.report_generation),
+            {attempt_request_id("old-attempt", action, "sample-1", "3") for action in _REPORT_ACTIONS},
+        )
+        moved = self.runtime.writer.move.call_args.kwargs
+        self.assertEqual(moved["target"], "validate")
+        self.assertEqual(moved["request_id"], attempt_request_id(record.attempt_id, "stage-resume", "sample-1", "3"))
+
+    def test_a_round_the_checkout_cannot_continue_opens_a_worker_round(self):
+        cases = {
+            "the round's last report is not done": {"report": "blocked-external_fact"},
+            "the done report carries no admitted evidence": {"admitted": False},
+            "the checkout's TASK.md names another round": {"document_generation": 2},
+        }
+        for name, round_shape in cases.items():
+            with self.subTest(name):
+                self.records.clear()
+                self.runtime.writer.move.reset_mock()
+                self.held_round(**round_shape)
+                prepared = self.prepare()
+                self.assertIsInstance(prepared, claim.ClaimHandoff)
+                self.assertTrue(prepared.require_existing_workspace)
+                self.assertEqual((prepared.record.state, prepared.record.workspace), ("claim_verified", ""))
+                self.assertEqual(prepared.record.report_generation, 2)
+                self.runtime.writer.move.assert_not_called()
 
     def test_production_claim_reads_the_audit_once_and_resumes_a_ceiling_block(self):
         def tasks(_runtime, states):
