@@ -36,6 +36,7 @@ def declared_receipt(root: Path, instance: Path, *, module: str = "shared"):
                                "environment_prefix": sys.prefix, "cwd": str(root),
                                "imported_package": "app", "imported_project": str(root / "app/__init__.py"),
                                "inside_workspace": True, "import_roots": [str(root), str(root / "src")]},
+        "environment_provenance": {"TMPDIR": "/tmp"},
         "started_at": "2026-10-10T00:00:00+00:00", "ended_at": "2026-10-10T00:00:01+00:00",
         "duration_seconds": 1, "exit_code": 0, "signal": 0, "status": "complete",
         "incomplete_reason": "", "verdict": "passed", "parsed": {"tests": 2}, "tail": "OK",

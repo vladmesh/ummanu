@@ -307,6 +307,33 @@ class ParsedVerdictTests(unittest.TestCase):
 
 
 class ReceiptIntegrityTests(BroadCheckTestCase):
+    def test_environment_provenance_is_strict_but_historic_receipts_still_load(self) -> None:
+        self._run("echo one")
+        path = receipt_path(self.root, "echo one")
+        current = json.loads(path.read_text(encoding="utf-8"))
+        original_digest = current["receipt_digest"]
+
+        current["environment_provenance"] = {"TMPDIR": "/other"}
+        path.write_text(json.dumps(current), encoding="utf-8")
+        self.assertIsNone(load_receipt(path))
+        current["receipt_digest"] = broad_check._receipt_digest(current)
+        path.write_text(json.dumps(current), encoding="utf-8")
+        self.assertIsNotNone(load_receipt(path))
+        self.assertNotEqual(current["receipt_digest"], original_digest)
+
+        for value in (None, {}, {"TMPDIR": 1}, {"TMPDIR": "/tmp", "PRIVATE_TOKEN": "x"}):
+            damaged = dict(current, environment_provenance=value)
+            damaged["receipt_digest"] = broad_check._receipt_digest(damaged)
+            path.write_text(json.dumps(damaged), encoding="utf-8")
+            with self.subTest(value=value):
+                self.assertIsNone(load_receipt(path))
+
+        historic = dict(current)
+        historic.pop("environment_provenance")
+        historic["receipt_digest"] = broad_check._receipt_digest(historic)
+        path.write_text(json.dumps(historic), encoding="utf-8")
+        self.assertIsNotNone(load_receipt(path))
+
     def test_a_truncated_or_edited_receipt_fails_closed(self) -> None:
         self._run("echo one")
         path = receipt_path(self.root, "echo one")

@@ -144,6 +144,17 @@ class RunAndCaptureTests(BroadCheckTestCase):
         self.assertGreaterEqual(receipt["duration_seconds"], 0.0)
         self.assertEqual(receipt["content_identity"]["tree_sha"], content_identity(self.root).tree_sha)
 
+    def test_the_receipt_binds_only_the_effective_tmpdir(self) -> None:
+        _, receipt = self._run(
+            "echo timed",
+            env={**os.environ, "TMPDIR": "/tmp", "PRIVATE_TOKEN": "must-not-be-attested"},
+        )
+
+        self.assertEqual(receipt["environment_provenance"], {"TMPDIR": "/tmp"})
+        stored = load_receipt(receipt_path(self.root, "echo timed"))
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored["environment_provenance"], {"TMPDIR": "/tmp"})
+
 
 
 class UnchangedContentReuseTests(BroadCheckTestCase):
