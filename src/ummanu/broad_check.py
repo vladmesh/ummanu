@@ -63,6 +63,8 @@ _MAX_EXIT_STATUS = 255
 _MAX_DETAIL_CHARS = 512
 _READ_CHUNK = 65536
 _GIT_TIMEOUT = 60
+_TMPDIR_PROVENANCE_KEY = "TMPDIR"
+_TMPDIR_PROVENANCE_MAX_BYTES = 2048
 
 _STATUS_COMPLETE = "complete"
 _STATUS_INCOMPLETE = "incomplete"
@@ -542,6 +544,23 @@ def _receipt_digest(payload: Mapping[str, object]) -> str:
     ).hexdigest()
 
 
+def _tmpdir_provenance(environment: Mapping[str, object]) -> dict[str, str]:
+    """Return the only execution-environment value broad receipts may attest."""
+    value = environment.get(_TMPDIR_PROVENANCE_KEY, "")
+    if (not isinstance(value, str) or "\x00" in value
+            or len(value.encode("utf-8", "surrogateescape")) > _TMPDIR_PROVENANCE_MAX_BYTES):
+        raise BroadCheckError("invalid_tmpdir", "TMPDIR must be a bounded string value")
+    return {_TMPDIR_PROVENANCE_KEY: value}
+
+
+def _valid_tmpdir_provenance(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {_TMPDIR_PROVENANCE_KEY}:
+        return False
+    tmpdir = value[_TMPDIR_PROVENANCE_KEY]
+    return (isinstance(tmpdir, str) and "\x00" not in tmpdir
+            and len(tmpdir.encode("utf-8", "surrogateescape")) <= _TMPDIR_PROVENANCE_MAX_BYTES)
+
+
 def _assert_ignored(root: Path, path: Path) -> None:
     """Refuse to write a receipt anywhere git would offer to commit it."""
     inside = _git(root, ["rev-parse", "--is-inside-work-tree"])
@@ -643,6 +662,7 @@ def _run_and_record(
     tail = _BoundedTail()
     scanner = _SummaryScanner()
     incomplete_reason = ""
+    environment_provenance = _tmpdir_provenance(environment)
     # One pipe preserves stdout/stderr ordering in the diagnostic tail.
     try:
         process = subprocess.Popen(
@@ -694,6 +714,7 @@ def _run_and_record(
                     root=root,
                     identity=identity,
                     provenance=_read_provenance(record, root),
+                    environment_provenance=environment_provenance,
                     started_at=started_at,
                     duration=time.monotonic() - started,
                     exit_code=exit_code,
@@ -714,6 +735,7 @@ def _run_and_record(
         root=root,
         identity=identity,
         provenance=_read_provenance(record, root),
+        environment_provenance=environment_provenance,
         started_at=started_at,
         duration=time.monotonic() - started,
         exit_code=exit_code,
@@ -748,6 +770,7 @@ def _build_payload(
     root: Path,
     identity: ContentIdentity,
     provenance: dict[str, object],
+    environment_provenance: dict[str, str],
     started_at: str,
     duration: float,
     exit_code: int,
@@ -773,6 +796,7 @@ def _build_payload(
         "command_or_check_set_digest": spec.digest,
         "cwd": str(Path(root).resolve()),
         "project_provenance": provenance,
+        "environment_provenance": environment_provenance,
         "content_identity": identity.as_dict(),
         "started_at": started_at,
         "ended_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
@@ -961,6 +985,9 @@ def intact_receipt(payload: object) -> dict[str, object] | None:
     # trusting the name it was filed under.
     if check_set_digest(check_set) != payload.get("command_or_check_set_digest"):
         return None
+    if ("environment_provenance" in payload
+            and not _valid_tmpdir_provenance(payload["environment_provenance"])):
+        return None
     return payload
 
 
@@ -1114,9 +1141,10 @@ ADMISSION_MAX_BYTES = 16 * 1024
 _TEXT_MAX_BYTES = 2048
 _COUNT_KEYS = ("tests", "skipped", "failures", "errors", "expected_failures", "unexpected_successes")
 _PROVENANCE_KEYS = ("origin", "python", "environment_prefix", "cwd", "imported_package", "imported_project", "import_roots")
-_ADMISSION_KEYS = {"schema", "candidate_sha", "tree_sha", "path", "receipt_digest", "check_set",
-                   "command_or_check_set_digest", "cwd", "project_provenance", "status", "exit_code",
-                   "verdict", "counts", "summary", "snapshot_digest"}
+_ADMISSION_LEGACY_KEYS = {"schema", "candidate_sha", "tree_sha", "path", "receipt_digest", "check_set",
+                          "command_or_check_set_digest", "cwd", "project_provenance", "status", "exit_code",
+                          "verdict", "counts", "summary", "snapshot_digest"}
+_ADMISSION_KEYS = _ADMISSION_LEGACY_KEYS | {"environment_provenance"}
 
 
 def _admission_text(value: object, limit: int = _TEXT_MAX_BYTES) -> bool:
@@ -1133,6 +1161,8 @@ def admission_snapshot(receipt: dict[str, object], *, candidate_sha: str, tree_s
     The original digest identifies that artifact; snapshot_digest seals this separate,
     bounded decision record. No output, timing arrays or arbitrary parsed fields enter it.
     """
+    if intact_receipt(receipt) is None or not _valid_tmpdir_provenance(receipt.get("environment_provenance")):
+        raise BroadCheckError("done_receipt_required", "full receipt has no valid TMPDIR provenance")
     parsed = receipt["parsed"] if isinstance(receipt["parsed"], dict) else {}
     counts = {key: parsed[key] for key in _COUNT_KEYS if key in parsed}
     provenance = receipt["project_provenance"]
@@ -1140,6 +1170,7 @@ def admission_snapshot(receipt: dict[str, object], *, candidate_sha: str, tree_s
                 "path": str(path), "receipt_digest": receipt["receipt_digest"],
                 "check_set": receipt["check_set"], "command_or_check_set_digest": receipt["command_or_check_set_digest"],
                 "cwd": receipt["cwd"], "project_provenance": {key: provenance.get(key) for key in _PROVENANCE_KEYS},
+                "environment_provenance": receipt["environment_provenance"],
                 "status": receipt["status"], "exit_code": receipt["exit_code"], "verdict": receipt["verdict"],
                 "counts": counts, "summary": _admission_summary(counts)}
     evidence["snapshot_digest"] = check_set_digest(evidence)
@@ -1151,7 +1182,8 @@ def admission_snapshot(receipt: dict[str, object], *, candidate_sha: str, tree_s
 
 def admitted_check(evidence: object) -> dict[str, object] | None:
     """Read a previously admitted immutable snapshot without re-deciding current config/tree."""
-    if not isinstance(evidence, dict) or set(evidence) != _ADMISSION_KEYS:
+    if (not isinstance(evidence, dict) or (set(evidence) != _ADMISSION_LEGACY_KEYS
+                                           and set(evidence) != _ADMISSION_KEYS)):
         return None
     if (evidence["schema"] != "worker-admission-v1" or evidence["status"] != "complete"
             or type(evidence["exit_code"]) is not int or evidence["exit_code"] != 0 or evidence["verdict"] != "passed"):
@@ -1170,6 +1202,8 @@ def admitted_check(evidence: object) -> dict[str, object] | None:
                 or any(type(value) is not int or not 0 <= value <= 2**63 - 1 for value in counts.values())):
             return None
         if not _admission_text(evidence["summary"], 512) or evidence["summary"] != _admission_summary(counts):
+            return None
+        if "environment_provenance" in evidence and not _valid_tmpdir_provenance(evidence["environment_provenance"]):
             return None
         check = evidence["check_set"]
         if not isinstance(check, dict) or set(check) != {"schema", "shape", "module", "args", "interpreter", "import_package"}:

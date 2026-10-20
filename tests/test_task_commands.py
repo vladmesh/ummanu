@@ -19,6 +19,7 @@ from ummanu.broad_check import (
     ContentIdentity,
     admitted_check,
     check_set_digest,
+    load_receipt,
 )
 from ummanu.check_commands import completion_check
 from ummanu.task_commands import resolve_data_dir
@@ -141,7 +142,37 @@ class CompletionAdmissionTests(unittest.TestCase):
                 self.assertEqual(data["tree_sha"], TREE)
                 self.assertEqual(data["receipt_digest"], self.receipt["receipt_digest"])
                 self.assertEqual(data["check_set"], self.spec.check_set)
+                self.assertEqual(data["environment_provenance"], {"TMPDIR": "/tmp"})
                 self.assertEqual(admitted_check(data), data)
+
+    def test_historic_receipt_and_snapshot_remain_readable(self):
+        current = completion_check("other", self.root, self.instance)
+        historic_receipt = copy.deepcopy(self.receipt)
+        historic_receipt.pop("environment_provenance")
+        save_receipt(self.path, historic_receipt)
+        self.assertIsNotNone(load_receipt(self.path))
+
+        historic_snapshot = copy.deepcopy(current)
+        historic_snapshot.pop("environment_provenance")
+        historic_snapshot["snapshot_digest"] = check_set_digest(
+            {key: value for key, value in historic_snapshot.items() if key != "snapshot_digest"}
+        )
+        self.assertEqual(admitted_check(historic_snapshot), historic_snapshot)
+
+    def test_snapshot_refuses_invalid_tmpdir_provenance_even_when_resealed(self):
+        original = completion_check("other", self.root, self.instance)
+        for value in (None, {}, {"TMPDIR": 1}, {"TMPDIR": "/tmp", "PRIVATE_TOKEN": "x"}):
+            evidence = copy.deepcopy(original)
+            evidence["environment_provenance"] = value
+            evidence["snapshot_digest"] = check_set_digest(
+                {key: item for key, item in evidence.items() if key != "snapshot_digest"}
+            )
+            with self.subTest(value=value):
+                self.assertIsNone(admitted_check(evidence))
+
+        tampered = copy.deepcopy(original)
+        tampered["environment_provenance"] = {"TMPDIR": "/other"}
+        self.assertIsNone(admitted_check(tampered))
 
     def test_large_timing_artifact_produces_bounded_writer_snapshot(self):
         self.report()
