@@ -35,8 +35,11 @@ Scoped HeadHandles and HeadRuns carry the launch generation, including retained
 pre-start failures. Runtime stop consumes that matching owner's proof while its
 lock is held. A failed launch that never published a heartbeat or journal can
 therefore settle after cleanup succeeds. Missing head records alone cannot settle
-a run; missing/malformed owners, generation mismatches and foreign/reused process
-identities still refuse. Genuinely unscoped runs keep their identity-based check.
+a run; malformed owners, generation mismatches and foreign/reused process
+identities still refuse. A missing owner refuses unless the run has ended on present
+evidence: its journal holds `run.exited` after its last `run.started`, its launch
+identity is absent or dead, and its cgroup is absent or `populated 0`. A missing
+journal is never that evidence. Genuinely unscoped runs keep their identity-based check.
 
 Product runs assign and save that generation in their write-ahead HeadRun before
 calling start. The runtime and launcher preserve it, so a crash before saving the

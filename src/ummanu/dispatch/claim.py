@@ -32,9 +32,11 @@ from ummanu.dispatch.po_cards import claim_po_card
 from ummanu.dispatch.state import (
     CLAIM_SKIP_FAILOVER_COLLAPSE,
     CLAIM_SKIP_GIT_ACCESS_UNREACHABLE,
+    CLAIM_SKIP_OLD_HEAD_STOP_UNCONFIRMED,
     CLAIM_SKIP_RESOURCE_NOT_READY,
     CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE,
     DispatcherRecord,
+    PersistedHeadRun,
     attempt_request_id as _attempt_request_id,
     new_attempt_id as _new_attempt_id,
     record_attempt as _record_attempt,
@@ -540,6 +542,19 @@ def _write_claim_preflight_block(
     records.pop(ref, None)
     runtime.save_records(payload, records)
 
+
+def _old_head_stop_skip(unconfirmed: dict[str, Any], run: PersistedHeadRun, role: str) -> dict[str, Any]:
+    """The claim skip for a card whose previous `role` head could not be confirmed stopped."""
+    run_id = str(run.get("run_id") or "")
+    named = f"{role} run {run_id}" if run_id else f"{role} head with no recorded run"
+    return {
+        **unconfirmed,
+        "status": "skipped",
+        "action": CLAIM_SKIP_OLD_HEAD_STOP_UNCONFIRMED,
+        "reason": f"{named}: {unconfirmed['reason']}",
+    }
+
+
 def _prepare_claim(
     runtime: Any,
     task: dict[str, Any],
@@ -647,11 +662,11 @@ def _prepare_claim(
                 initiator=STOPPED_BY_REPLACEMENT,
             )
             if unconfirmed is not None:
-                return unconfirmed
+                return _old_head_stop_skip(unconfirmed, active.review_head_run, "review")
         if active.needs_settling():
             unconfirmed = runtime._stop_worker_confirmed(active, ref, step="claim", attempt_id=attempt_id)
             if unconfirmed is not None:
-                return unconfirmed
+                return _old_head_stop_skip(unconfirmed, active.worker_head_run, WORKER_ROLE)
     if retry_after_block or requeued or refused_at_admission:
         attempt_id = _new_attempt_id()
         _record_attempt(payload, attempt_id, ref, runtime.owner, runtime.owner)

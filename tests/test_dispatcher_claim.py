@@ -10,7 +10,7 @@ from unittest import mock
 from ummanu.board.models import Actor, EntityKind, Event, EventKind
 from ummanu.dispatch import claim, production
 from ummanu.dispatch.host import _blocked_actions_and_their_infrastructure_twins
-from ummanu.dispatch.state import DispatcherRecord, attempt_request_id
+from ummanu.dispatch.state import DispatcherRecord, attempt_request_id, is_claim_skip
 from ummanu.dispatch.watchdog import wait_cycle_token
 from ummanu.tasks import TaskError
 
@@ -141,20 +141,27 @@ class ClaimBoundaryTests(unittest.TestCase):
         self.assertEqual(self.payload, {})
         self.assertEqual(self.records, {})
 
-    def test_unconfirmed_stop_keeps_each_old_identity_and_creates_no_attempt(self):
+    def test_unconfirmed_stop_is_a_claim_skip_that_keeps_each_old_identity_and_creates_no_attempt(self):
         for role in ("worker", "review"):
             with self.subTest(role=role):
                 old = DispatcherRecord.from_json({
                     "attempt_id": "old-attempt", "workspace": "/retained", "handle": "old-worker",
                     "review_handle": "old-review" if role == "review" else "",
                     "worker_leaf": "worker-leaf", "review_leaf": "review-leaf" if role == "review" else "",
+                    f"{role}_head_run": {"run_id": f"old-{role}-run"},
                 })
                 self.records["sample-1"] = old
-                refused = {"status": "degraded", "action": f"{role}-stop-unconfirmed"}
+                refused = {"status": "degraded", "step": "claim", "action": f"{role}-stop-unconfirmed",
+                           "reason": "the previous head could not be confirmed stopped: fixture"}
                 self.runtime._stop_worker_confirmed.return_value = refused if role == "worker" else None
                 self.runtime._end_review_pane_confirmed.return_value = refused if role == "review" else None
                 identity = old.to_json()
-                self.assertEqual(self.prepare(), refused)
+                skipped = self.prepare()
+                self.assertTrue(is_claim_skip(skipped), skipped)
+                self.assertEqual(
+                    skipped["reason"],
+                    f"{role} run old-{role}-run: the previous head could not be confirmed stopped: fixture",
+                )
                 self.assertEqual(old.to_json(), identity)
                 self.assertIs(self.records["sample-1"], old)
                 self.assertEqual(self.payload, {})

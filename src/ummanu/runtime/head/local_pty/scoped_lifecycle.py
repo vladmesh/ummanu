@@ -192,6 +192,29 @@ class ScopedHeadLifecycle:
         return ScopedHeadLifecycle(record["run_id"], 1, directory=run_dir, generation=record["generation"])
 
     @staticmethod
+    def scope_populated(run_id: str) -> bool:
+        """Whether this run's scope cgroup still has members; an absent cgroup has none.
+
+        `cgroup.events` counts descendants, including separate process groups.
+        """
+        cgroup = CGROUP_ROOT / "system.slice" / scope_unit(run_id)
+        try:
+            fields = (cgroup / "cgroup.events").read_text(encoding="ascii").splitlines()
+        except FileNotFoundError:
+            try:
+                cgroup.stat()
+            except FileNotFoundError:
+                return False
+            raise MemoryScopeError(f"head scope {scope_unit(run_id)} has no membership evidence") from None
+        except OSError as exc:
+            raise MemoryScopeError(f"could not verify empty head scope {scope_unit(run_id)}: {exc}") from exc
+        if "populated 0" in fields:
+            return False
+        if "populated 1" in fields:
+            return True
+        raise MemoryScopeError(f"head scope {scope_unit(run_id)} has no membership evidence")
+
+    @staticmethod
     def read_owner(run_dir: Path) -> dict[str, Any]:
         try:
             record = json.loads((run_dir / "scope-owner.json").read_text(encoding="utf-8"))
@@ -557,22 +580,9 @@ class ScopedHeadLifecycle:
                 raise MemoryScopeError(f"could not stop head scope {scope_unit(self.run_id)}: {detail}")
         deadline = time.monotonic() + bound(10.0, "the scope membership proof")
         while True:
-            try:
-                fields = (cgroup / "cgroup.events").read_text(encoding="ascii").splitlines()
-            except FileNotFoundError:
-                try:
-                    cgroup.stat()
-                except FileNotFoundError:
-                    self._record_empty(record)
-                    return  # systemd removed the cgroup after its final member left.
-                raise MemoryScopeError(f"head scope {scope_unit(self.run_id)} has no membership evidence")
-            except OSError as exc:
-                raise MemoryScopeError(
-                    f"could not verify empty head scope {scope_unit(self.run_id)}: {exc}"
-                ) from exc
-            if "populated 0" in fields:
+            if not self.scope_populated(self.run_id):
                 self._record_empty(record)
-                return  # cgroup.events counts descendants, including separate process groups.
+                return
             if time.monotonic() >= deadline:
                 raise MemoryScopeError(f"head scope {scope_unit(self.run_id)} still has members")
             time.sleep(0.05)

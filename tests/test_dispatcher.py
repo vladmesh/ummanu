@@ -92,6 +92,7 @@ from ummanu.dispatch.review import (
 from ummanu.dispatch.review_packet import dispositions, resolve_review_evidence
 from ummanu.dispatch.runtime import DispatcherRuntime
 from ummanu.dispatch.state import (
+    CLAIM_SKIP_OLD_HEAD_STOP_UNCONFIRMED,
     DispatcherRecord,
 )
 from ummanu.dispatch.types import (
@@ -6425,7 +6426,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         requeue = self.tick()
 
-        self.assertEqual(requeue["action"], "worker-stop-unconfirmed")
+        self.assertEqual(requeue["action"], CLAIM_SKIP_OLD_HEAD_STOP_UNCONFIRMED)
+        self.assertIn("Orca cannot confirm terminal stop", requeue["reason"])
         self.assertEqual(self.reader.show("ummanu-510")["state"], "ready")
         self.assertIn("ummanu-510", self.runtime.production_state.load()["records"])
         self.assertEqual(self.host.prepared, ["ummanu-510"])

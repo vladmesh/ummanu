@@ -39,12 +39,15 @@ CLAIM_SKIP_GIT_ACCESS_UNREACHABLE = "project-git-access-unreachable"
 # A code card linked to no sprint whose project's sprint reservations could not be verified. Nothing
 # is written: the Blocked move would meet the same unverifiable index at the write guard.
 CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE = "sprint-reservation-unverifiable"
+# A previous head of the card could not be confirmed stopped, so no new head may share its checkout.
+CLAIM_SKIP_OLD_HEAD_STOP_UNCONFIRMED = "old-head-stop-unconfirmed"
 CLAIM_SKIP_ACTIONS = frozenset(
     {
         CLAIM_SKIP_RESOURCE_NOT_READY,
         CLAIM_SKIP_FAILOVER_COLLAPSE,
         CLAIM_SKIP_GIT_ACCESS_UNREACHABLE,
         CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE,
+        CLAIM_SKIP_OLD_HEAD_STOP_UNCONFIRMED,
     }
 )
 

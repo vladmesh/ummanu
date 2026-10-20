@@ -677,6 +677,8 @@ class LocalPtyHeadRuntime(PromptDeliveryMixin):
         `stop_if_quiescent` is the conditional form. The initiator is recorded on the run before the
         signal, so a stop that outlives this process names who began it. A scoped head also needs
         the durable owner's recursive empty proof; the identity going dead only confirms the exit.
+        A scoped head whose owner record is gone is stopped only when it has already ended
+        (`_ownerless_run_ended`); nothing is signalled.
 
         A caller's `remaining` (seconds left of its deadline, as a callable) cuts every wait of the
         stop: this runtime's lock, the supervisor exchange, the scope's termination and the exit
@@ -745,9 +747,13 @@ class LocalPtyHeadRuntime(PromptDeliveryMixin):
                         gone = record["cleanup_complete"] and (
                             not address.pid_file.exists() or self._await_gone(address, run, remaining)
                         )
+                elif run.scope_generation:
+                    if not self._ownerless_run_ended(address, run):
+                        raise MemoryScopeError(
+                            "the scoped run has lost its owner and no present evidence shows it ended"
+                        )
+                    gone = True
                 else:
-                    if run.scope_generation:
-                        raise MemoryScopeError("the scoped run has lost its owner")
                     asked = self._ask(address, initiator, signal_name, remaining)
                     gone = self._await_gone(address, run, remaining)
             except (MemoryScopeError, OSError, ValueError) as exc:
@@ -1186,6 +1192,18 @@ class LocalPtyHeadRuntime(PromptDeliveryMixin):
             bool(status.get("alive"))
             and bool(status.get("match"))
             and str(record.get("run_id") or "") == run.run_id
+        )
+
+    def _ownerless_run_ended(self, address: _Address, run: HeadRun) -> bool:
+        """Whether a scoped run with no owner record has ended on present evidence.
+
+        Its journal holds `run.exited` after its last `run.started`, its launch identity is absent
+        or dead, and its scope has no members. A missing journal proves nothing.
+        """
+        return (
+            _has_exited(address)
+            and (not address.pid_file.exists() or self._identity_says_dead(address))
+            and not ScopedHeadLifecycle.scope_populated(run.run_id)
         )
 
     def _identity_says_dead(self, address: _Address) -> bool:
