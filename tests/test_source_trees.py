@@ -76,6 +76,28 @@ class SourceIndexTests(unittest.TestCase):
         self.assertEqual(len(self.index.modules(self.root)), 4)
         self.assertEqual(self.index.parses, 4)
 
+    def test_a_walk_lists_the_nodes_of_ast_walk_in_its_order(self) -> None:
+        tree = self.index.parse(
+            "async def f(x, /, *a, k=1, **kw):\n"
+            "    return {**kw, 'a': [y async for y in a if y]}\n"
+            "match x:\n"
+            "    case {'k': [1, *rest]} if rest:\n"
+            "        del x\n"
+        )
+        self.assertEqual(self.index.walk(tree), tuple(ast.walk(tree)))
+
+    def test_a_whole_name_is_not_a_part_of_a_longer_one(self) -> None:
+        for text, expected in (
+            ("from ummanu.board import fake\n", True),
+            ("patch('ummanu.board.fake.uuid')\n", True),
+            ("\uff46ake = 1\n", True),
+            ("from tests.fakes import board\n", False),
+            ("fake_run = make_fake()\n", False),
+        ):
+            with self.subTest(text=text):
+                self.assertIs(source_trees.may_name(text, ("fake",), whole=True), expected)
+                self.assertTrue(source_trees.may_name(text, ("fake",)))
+
     def test_a_one_pass_parse_keeps_nothing(self) -> None:
         source = "import json\n"
         tree = self.index.parse(source, retain=False)

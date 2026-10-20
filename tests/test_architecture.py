@@ -13,6 +13,12 @@ from tests import source_trees
 ROOT = Path(__file__).resolve().parents[1]
 
 
+# architecture-guard: most guards below scan every `src/` tree; built once, their cold cost is the module's
+def setUpModule() -> None:
+    for _path, tree in source_trees.modules(ROOT / "src"):
+        source_trees.walk(tree)
+
+
 # Existing flat modules may leave this set one feature at a time. New modules belong in one of the
 # feature packages documented in ARCHITECTURE.md instead of making the root wider again.
 LEGACY_FLAT_MODULES = frozenset(
@@ -163,10 +169,12 @@ def _board_fake_offenders(relative: str, source: str) -> list[str]:
     offenders = []
     if relative == "src/ummanu/board/fake.py":
         offenders.append(f"{relative}: retired product location")
-    # Imports need only statement traversal. A full expression walk is needed
-    # only when a host class or a dynamic import/patch call can be spelled here.
+    # Imports need only statement traversal. A full expression walk is needed only when a host
+    # class, or a dynamic import/patch call with a target this guard refuses, can be spelled here.
     classes = "class" in source and source_trees.may_name(source, ("FakeBoardHost", "MemoryAudit"))
-    calls = source_trees.may_name(source, ("import_module", "__import__", "patch"))
+    calls = source_trees.may_name(source, ("import_module", "__import__", "patch")) and source_trees.may_name(
+        source, ("fake", "tests") if product else ("fake",), whole=True
+    )
     for node in source_trees.walk(tree) if classes or calls else ():
         if isinstance(node, ast.ClassDef) and (
             (node.name == "FakeBoardHost" and relative != "tests/fakes/board.py")
@@ -224,6 +232,19 @@ class SourceLayoutTests(unittest.TestCase):
             ):
                 self.assertEqual(_board_fake_offenders("src/ummanu/probe.py", source), expected)
 
+    def test_board_double_walks_only_where_a_call_can_name_a_refused_target(self) -> None:
+        for relative, source in (
+            ("tests/probe.py", "from unittest import mock\nmock.patch('ummanu.dispatch.fakes.clock')\n"),
+            ("src/ummanu/probe.py", "import importlib\nimportlib.import_module('ummanu.board.models')\n"),
+        ):
+            with (
+                self.subTest(relative=relative, source=source),
+                mock.patch.object(
+                    source_trees, "walk", side_effect=AssertionError("unnecessary expression walk")
+                ),
+            ):
+                self.assertEqual(_board_fake_offenders(relative, source), [])
+
     def test_board_double_has_one_test_owner_and_no_product_dependency(self) -> None:
         self.assertFalse((ROOT / "src/ummanu/board/fake.py").exists())
         owner = ROOT / "tests/fakes/board.py"
@@ -272,8 +293,11 @@ class SourceLayoutTests(unittest.TestCase):
         """Shared fakes are a one-way dependency, not bridges between test modules."""
         offenders: list[str] = []
         for path in (ROOT / "tests").rglob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            if not source_trees.may_name(text, ("tests.test",)):
+                continue
             # Read once, by this check only: nothing keeps the test files' trees.
-            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path), retain=False)
+            tree = source_trees.parse(text, filename=str(path), retain=False)
             for node in source_trees.imports(tree):
                 module = node.module if isinstance(node, ast.ImportFrom) else None
                 if module and (module == "tests.test" or module.startswith("tests.test_")):

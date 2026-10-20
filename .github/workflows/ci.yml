@@ -76,6 +76,9 @@ jobs:
       - uses: ./.github/actions/python-setup
         with:
           extras: ${{ matrix.suite == 'unit' && 'ci,dev' || 'memory,ci' }}
+      - name: Remove the runner image's debuginfod login profile
+        # It calls `tr`, absent from the role's narrow PATH, so role login shells gain stderr the control host never prints.
+        run: sudo rm -f /etc/profile.d/debuginfod.sh
       - name: Run the hermetic fast profile
         if: ${{ matrix.suite == 'unit' && needs.selection.outputs.mode == 'full' }}
         run: python3 scripts/ci_test_shards.py --fast
