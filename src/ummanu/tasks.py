@@ -27,7 +27,14 @@ from ummanu.board.blocked_rework import (
     blocked_rework,
     return_blocked_rework,
 )
-from ummanu.board.card_transitions import CardTransitionForbidden, card_transition
+from ummanu.board.card_transitions import (
+    DECISION_BOUND_ROLES,
+    CardMoveFacts,
+    CardMoveReasonRequired,
+    CardTransitionForbidden,
+    admit_card_move,
+    forbidden_move_message,
+)
 from ummanu.board.completion_evidence import (
     PO_COMPLETION_MARKERS,
     has_candidate,
@@ -142,7 +149,6 @@ from ummanu.board.task_protocol.recovery import RecoveryMixin
 from ummanu.board.task_protocol.rows import (
     _BATCH_CHUNK as _BATCH_CHUNK,
     _CODEX_LAUNCH_MODES as _CODEX_LAUNCH_MODES,
-    _DECISION_BOUND_ROLES as _DECISION_BOUND_ROLES,
     _MARKER_EVENT_ACTIONS as _MARKER_EVENT_ACTIONS,
     _READY_RESET_METADATA as _READY_RESET_METADATA,
     _TYPED_RECORD_TYPES as _TYPED_RECORD_TYPES,
@@ -171,7 +177,6 @@ from ummanu.board.task_protocol.rows import (
     _done_retention_request_id as _done_retention_request_id,
     _event_action as _event_action,
     _event_payload as _event_payload,
-    _forbidden_move_message as _forbidden_move_message,
     _has_archive_reason as _has_archive_reason,
     _is_steward_report as _is_steward_report,
     _is_steward_report_card as _is_steward_report_card,
@@ -2416,16 +2421,6 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         if role == "observer" and task.get("record_type") in _TYPED_RECORD_TYPES:
             # The observer files issues and never promotes, moves or closes one.
             raise TaskError("role_forbidden", "the observer may file an issue but not move one", 3)
-        if (
-            role == "steward"
-            and (task["state"], target) == ("in_progress", "done")
-            and not _is_steward_report(task)
-        ):
-            raise TaskError(
-                "transition_forbidden",
-                "steward may close In progress only for its own report card",
-                3,
-            )
         if self._legacy_record(request_id) is not None:
             # A move recorded before Card transitions migrated is a generic audit operation, and
             # it stays one: its retry replays that record and its pending form is finished by the
@@ -2470,7 +2465,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             except ValueError:
                 raise TaskError(
                     "transition_forbidden",
-                    _forbidden_move_message(role, task["state"], target),
+                    forbidden_move_message(role, task["state"], target),
                     3,
                 ) from None
             # A replay repeats no admission check and no backend move, but it does finish the
@@ -2525,23 +2520,12 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         if role == "observer" and not override_payload and not self._sprint_holds_project(task["project"]):
             raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
         try:
-            target_state = CardState(target)
-            card_transition(role, source, target_state)
-        except (ValueError, CardTransitionForbidden):
-            raise TaskError(
-                "transition_forbidden", _forbidden_move_message(role, source, target), 3
-            ) from None
-        if (
-            role == "steward"
-            and (target == "blocked" or (source, target) == ("blocked", "done"))
-            and not reason.strip()
-        ):
-            raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
-        # A Blocked exit records the observer's disposition of its classification.
-        if role == "observer" and source == "blocked" and not reason.strip():
-            raise TaskError("validation", "moving a card out of Blocked requires a non-empty reason", 2)
-        if role == "dispatcher" and (refusal := self._dispatcher_wait_edge_refusal(task, source, target)):
-            raise TaskError("transition_forbidden", refusal, 3)
+            admit_card_move(role, source, target, self._move_facts(task, reason))
+        except CardMoveReasonRequired as exc:
+            raise TaskError("validation", str(exc), 2) from None
+        except CardTransitionForbidden as exc:
+            raise TaskError("transition_forbidden", str(exc), 3) from None
+        target_state = CardState(target)
         self._check_decision(task, source, target, decision, role)
         result = self._transition_card(
             reference=reference,
@@ -2575,35 +2559,35 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         self._steward_needs_human(task, role=role, target=target, reason=reason, moved=moved)
         return moved
 
-    def _dispatcher_wait_edge_refusal(self, task: dict[str, Any], source: str, target: str) -> str:
-        """Why the dispatcher may not take one of its two wait edges here, or `""`. In
-        progress -> Done is a wait card's `target_reached` or `cancelled`, once its result is frozen;
-        Ready -> Blocked is a card held by a wait card (`blocked_by`) that ended
-        another way, or the hotfix card the dispatcher itself cut for a red after-merge
-        e2e run that no open sprint and no PO origin owns.
-        """
-        if (source, target) == ("in_progress", "done"):
+    def _move_facts(self, task: dict[str, Any], reason: str) -> CardMoveFacts:
+        """The facts of `task` the registry's conditional edges read, each read on demand."""
+
+        def wait_outcome() -> str | None:
             result = wait_card.wait_state(task).result if is_wait(task) else None
-            if result is None or result.get("outcome") not in (wait_card.TARGET_REACHED, wait_card.CANCELLED):
-                return (
-                    "the dispatcher moves an In progress card to Done only as a wait card's "
-                    "target_reached or cancelled"
-                )
-        if (source, target) == ("ready", "blocked"):
-            created = self.audit.events(str(task.get("ref") or ""), kind="created")
-            if any(
-                str(event.get("request_id") or "").startswith(e2e_record.AFTER_MERGE_HOTFIX_REQUEST_PREFIX)
-                for event in created
-            ):
-                return ""
+            return None if result is None else str(result.get("outcome") or "")
+
+        def held_by_wait_card() -> bool:
             for blocker in _blocker_refs(task):
                 try:
                     if is_wait(self.reader.show(blocker)):
-                        return ""
+                        return True
                 except TaskError:
                     continue
-            return "the dispatcher Blocks a Ready card only when a wait card it is blocked by ended unreached"
-        return ""
+            return False
+
+        def after_merge_hotfix() -> bool:
+            return any(
+                str(event.get("request_id") or "").startswith(e2e_record.AFTER_MERGE_HOTFIX_REQUEST_PREFIX)
+                for event in self.audit.events(str(task.get("ref") or ""), kind="created")
+            )
+
+        return CardMoveFacts(
+            reason=reason,
+            steward_report=_is_steward_report(task),
+            wait_outcome=wait_outcome,
+            held_by_wait_card=held_by_wait_card,
+            after_merge_hotfix=after_merge_hotfix,
+        )
 
     def _steward_needs_human(
         self, task: dict[str, Any], *, role: str, target: str, reason: str, moved: dict[str, Any]
@@ -2796,7 +2780,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             source == "assessment"
             and target in DECIDED_TARGETS
             and decision_kind is None
-            and role in _DECISION_BOUND_ROLES
+            and role in DECISION_BOUND_ROLES
         ):
             raise TaskError(
                 "decision_required",
@@ -2804,7 +2788,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                 "`task decide` and pass it as --decision",
                 3,
             )
-        if source == "assessment" and target in UNDECIDED_EXITS and role in _DECISION_BOUND_ROLES:
+        if source == "assessment" and target in UNDECIDED_EXITS and role in DECISION_BOUND_ROLES:
             raise TaskError(
                 "decision_required",
                 f"{role} may not move a parked card to {target}: that leaves Assessment with "

@@ -3425,8 +3425,6 @@ class AssessmentStateTests(CardStoreCase):
     def test_worker_and_reviewer_stay_out_of_assessment(self) -> None:
         self.assertEqual(CARD_TRANSITIONS["worker"], frozenset())
         self.assertEqual(CARD_TRANSITIONS["reviewer"], frozenset())
-        for role in ("po", "observer"):
-            self.assertIn((CardState.VALIDATE, CardState.ASSESSMENT), CARD_TRANSITIONS[role])
         self.assertIn((CardState.ASSESSMENT, CardState.READY), CARD_TRANSITIONS["po"])
         self.assertEqual(
             {edge for edge in CARD_TRANSITIONS["steward"] if CardState.ASSESSMENT in edge},
@@ -3439,10 +3437,10 @@ class AssessmentStateTests(CardStoreCase):
         self.assertEqual(
             {edge for edge in CARD_TRANSITIONS["observer"] if edge[0] is CardState.ASSESSMENT}, set()
         )
-        self.assertIn((CardState.VALIDATE, CardState.ASSESSMENT), CARD_TRANSITIONS["observer"])
 
-    def test_writer_preserves_the_complete_legacy_role_by_edge_contract(self) -> None:
-        """Exercise the public writer instead of proving a copied table equals the registry."""
+    def test_writer_admits_the_dispatcher_stages_to_the_dispatcher_only(self) -> None:
+        """Every role over every edge through the public writer: only the dispatcher moves a card
+        into In progress, Validate or Assessment, and every other edge keeps its holders."""
         dispatcher = {
             ("ready", "in_progress"),
             ("in_progress", "validate"),
@@ -3467,8 +3465,10 @@ class AssessmentStateTests(CardStoreCase):
             ("assessment", "blocked"),
         }
 
-        def legacy_authorized(role: str, source: str, target: str) -> bool:
+        def authorized(role: str, source: str, target: str) -> bool:
             if source == target:
+                return False
+            if role in {"po", "observer"} and target in {"in_progress", "validate", "assessment"}:
                 return False
             if role == "po":
                 return True
@@ -3498,9 +3498,7 @@ class AssessmentStateTests(CardStoreCase):
                             admitted = exc.code != "transition_forbidden"
                         else:
                             admitted = True
-                        self.assertEqual(
-                            admitted, legacy_authorized(role, source, target), (role, source, target)
-                        )
+                        self.assertEqual(admitted, authorized(role, source, target), (role, source, target))
 
     def _park(self, request_id: str = "into-assessment") -> None:
         self.client.move(12, "validate")
@@ -4536,29 +4534,25 @@ class AssessmentStateTests(CardStoreCase):
 
         self.assertEqual(requeued["task"]["state"], "ready")
 
-    def test_a_po_override_takes_a_parked_card_to_the_decided_targets_too(self) -> None:
-        """The escape hatch is the whole exit, not the two thirds of it that need nothing decided.
-
-        A seam stuck with no observer to release it is exactly when an operator has to finish or
-        return a parked card by hand, and Done and In progress are where it would send it. Only
-        the dispatcher is held to a recorded decision, because only the dispatcher performs one.
+    def test_a_po_override_finishes_a_parked_card_with_nothing_decided(self) -> None:
+        """A seam stuck with no observer to release it is when an operator finishes a parked card
+        by hand. Only the dispatcher is held to a recorded decision, because only it performs one.
         """
         self.reserve_project()
-        for target, request_id in (("done", "po-release"), ("in_progress", "po-return")):
-            self._park(request_id=f"{request_id}-park")
+        self._park(request_id="po-release-park")
 
-            moved = self.writer.move(
-                role="po",
-                actor="operator",
-                reference="ummanu-468",
-                target=target,
-                reason="finishing this one by hand",
-                sprint_override=True,
-                sprint_override_reason="no observer is coming back for it",
-                request_id=request_id,
-            )
+        moved = self.writer.move(
+            role="po",
+            actor="operator",
+            reference="ummanu-468",
+            target="done",
+            reason="finishing this one by hand",
+            sprint_override=True,
+            sprint_override_reason="no observer is coming back for it",
+            request_id="po-release",
+        )
 
-            self.assertEqual(moved["task"]["state"], target)
+        self.assertEqual(moved["task"]["state"], "done")
 
     def test_a_po_move_out_of_assessment_still_checks_a_decision_it_names(self) -> None:
         """Not being held to a decision is not licence to invent one: a decision the PO passes is
@@ -4581,7 +4575,7 @@ class AssessmentStateTests(CardStoreCase):
                 role="po",
                 actor="operator",
                 reference="ummanu-468",
-                target="in_progress",
+                target="ready",
                 reason="",
                 decision="accept",
                 sprint_override=True,
@@ -5596,9 +5590,9 @@ class BlockedContractTests(CardStoreCase):
                 role="observer",
                 actor="observer",
                 reference="ummanu-468",
-                target="in_progress",
+                target="done",
                 reason="",
-                request_id="observer-silent-resume",
+                request_id="observer-silent-close",
             )
 
     def test_the_observer_may_still_move_a_card_into_blocked_without_a_reason(self) -> None:
@@ -5614,6 +5608,47 @@ class BlockedContractTests(CardStoreCase):
             request_id="observer-into-blocked",
         )
         self.assertEqual(moved["task"]["state"], "blocked")
+
+    def test_a_po_move_from_blocked_into_validate_names_the_return_to_ready(self) -> None:
+        self.client.move(12, "blocked")
+
+        with self.assertRaises(TaskError) as raised:
+            self.writer.move(
+                role="po",
+                actor="operator",
+                reference="ummanu-468",
+                target="validate",
+                reason="relaunch the reviewer",
+                request_id="po-blocked-to-validate",
+            )
+
+        self.assertEqual(raised.exception.code, "transition_forbidden")
+        message = str(raised.exception)
+        self.assertIn("po may not move blocked to validate", message)
+        self.assertIn("return the card to Ready", message)
+        self.assertIn("`task decide --kind rework`", message)
+        self.assertEqual(self.client.state(12), "blocked")
+
+    def test_an_observer_move_from_ready_into_in_progress_names_the_withdraw_verbs(self) -> None:
+        self._reserve()
+        self.client.move(12, "ready")
+
+        with self.assertRaises(TaskError) as raised:
+            self.writer.move(
+                role="observer",
+                actor="observer",
+                reference="ummanu-468",
+                target="in_progress",
+                reason="start it now",
+                request_id="observer-ready-to-in-progress",
+            )
+
+        self.assertEqual(raised.exception.code, "transition_forbidden")
+        message = str(raised.exception)
+        self.assertIn("observer may not move ready to in_progress", message)
+        self.assertIn("`task cancel`", message)
+        self.assertIn("`task supersede`", message)
+        self.assertEqual(self.client.state(12), "ready")
 
     def test_the_record_of_a_block_survives_the_card_leaving_blocked(self) -> None:
         """The classification is history, not card state: nothing on the card to go stale."""

@@ -508,14 +508,17 @@ class NarrowCleanupLockTests(unittest.TestCase):
             thread, errors = self.blocked_thread(
                 lambda: results.append(self.owner.cleanup(task, record, "done")), entered, release
             )
-            self.writer.move(
-                role="po",
-                actor="test-po",
-                reference="sample-1",
-                target="in_progress",
-                reason="rework",
-                request_id="assessment-race-rework",
-            )
+            # The dispatcher performs an observer's rework decision while the cleanup is admitted.
+            with mock.patch.object(self.writer, "_decision_recorded", return_value=True):
+                self.writer.move(
+                    role="dispatcher",
+                    actor="test-dispatcher",
+                    reference="sample-1",
+                    target="in_progress",
+                    reason="rework",
+                    decision="rework",
+                    request_id="assessment-race-rework",
+                )
             release.set()
             thread.join(5)
         self.assertFalse(thread.is_alive())

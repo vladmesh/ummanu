@@ -106,9 +106,30 @@ Board columns, in order: `Issues, Ready, In progress, Validate, Assessment, Bloc
 the card there: the reviewer is stopped, the round's worker stays suspended with its workspace, and
 nothing merges or reworks until a decision. A worker's partial report parks it from In progress the
 same way, with no review (see `report --kind partial`). Mechanical gate outcomes (CI, stand run, pre-merge
-re-check) resolve in Validate and never pass through Assessment. The steward may move a card from
-Assessment to Blocked with a reason; workers and reviewers move nothing. A card left in Assessment
-past the steward's stale threshold is reported like any other stuck card.
+re-check) resolve in Validate and never pass through Assessment. A card left in Assessment past the
+steward's stale threshold is reported like any other stuck card.
+
+### Roles and transitions
+
+Which role may move a card along which edge is one registry, `CARD_TRANSITIONS` in
+`board/card_transitions.py`, with the conditions some edges carry declared beside it. `task move`
+admits a move through its one entry point, `admit_card_move`.
+
+- Only the dispatcher moves a card into In progress, Validate or Assessment: a claim, a report, a
+  verdict, a gate outcome or a decision it performs. Its other edges are Blocked moves out of its
+  stages, Validate or Assessment to Done, In progress to Ready, and the two
+  [wait card](#wait-cards) edges.
+- The PO moves a card from any column to Issues, Ready, Blocked or Done.
+- The observer has the PO's edges except any out of Assessment. A move out of Blocked needs a reason.
+- The steward moves a card from Ready, In progress, Validate or Assessment to Blocked and from Blocked
+  to Done, each with a reason, from Blocked to Ready, and its own report card from In progress to Done.
+- Workers, reviewers and retro move nothing.
+
+Blocked is the emergency stop for the PO, the observer and the steward from every column but Done. A
+refused move names the role, the edge and the handle to use instead: `task decide` for a parked card;
+for a Blocked card, a return to Ready, which continues the round at the stage it stopped
+([Return from Blocked](#return-from-blocked)), or `task decide --kind rework`; `task cancel` or
+`task supersede` to withdraw a card.
 
 ### Card kinds, live impact and the review choice
 
@@ -1296,8 +1317,8 @@ ceiling. Ordering with the headless recovery below: the delivery-evidence refusa
 
 ### A card in an active state with no worker
 
-A card can be in an active column with nothing running: a raw board move out of Blocked into In
-progress, or a bring-up whose tick died before binding anything. `_adopt` rebuilds a record from the
+A card can be in an active column with nothing running: a lost dispatcher record, or a bring-up whose
+tick died before binding anything. `_adopt` rebuilds a record from the
 board; unless the worker's own pid heartbeat can be bound, that record names no head.
 
 The tick settles it before any wait, establishing exactly one of:
@@ -1467,8 +1488,9 @@ A move out of Assessment carries the decision it performs, with one destination 
 Done, `rework` → In progress, `reslice` → Blocked. A `--decision` the card's audit does not hold since
 it entered the column, or paired with the wrong destination, is refused whoever passes it. The
 dispatcher must carry a decision: its move to Done or In progress without `--decision` is refused, as
-are `assessment -> ready`, `-> validate` and `-> issues`. The PO is not bound by this (its move is the
-escape hatch; on a card of a sprint that holds its project it carries `--sprint-override` and a reason).
+are `assessment -> ready`, `-> validate` and `-> issues`. The PO is not bound by this: its escape hatch
+is `assessment -> done`, `-> ready`, `-> issues` or `-> blocked`, and on a card of a sprint that holds
+its project it carries `--sprint-override` and a reason.
 `assessment -> blocked` takes no decision from anyone (steward escalation and dispatcher failures).
 The observer takes no exit out of Assessment at all, even with a matching decision; its authority is
 `task decide`.
@@ -2971,8 +2993,9 @@ move. Events without the key reject nothing.
 A `done` report on a rejected SHA does not move to Validate, including the first report of a new
 attempt after Blocked: the first sends the worker back to rework in the same workspace (a new commit is
 required) with a comment naming the rejecting verdict or gate event; the second in the same attempt
-moves the card to Blocked. A card that reaches Validate on a rejected SHA by any other path (a manual
-move, a kept record whose gate was green, an adopted lost record) is Blocked before the gate runs or a
+moves the card to Blocked. A card that reaches Validate on a rejected SHA by any other path (a kept
+record whose gate was green, an adopted lost record, a gate or review stage resumed from Blocked) is
+Blocked before the gate runs or a
 review launches, so it is never gated or reviewed again.
 A gate that never reached CI (`publication`) judged no code: its SHA is refused only within the attempt.
 If the code deliberately does not change for a substantive rejection (e.g. the defect is in a test or

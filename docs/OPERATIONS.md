@@ -2311,7 +2311,7 @@ board comment.
 ### A card in an active column with no worker at all
 
 Before waiting, the tick checks there is a head to wait for. A card moved into an active column with
-nothing running (typically a raw move out of Blocked) is settled in that tick:
+nothing running (a lost dispatcher record) is settled in that tick:
 
 - `headless-worker-replacement-launched` (ok) — a replacement runs on the retained checkout; the outcome
   and a card comment name workspace, branch, candidate SHA and dirty flag. Nothing was reset.

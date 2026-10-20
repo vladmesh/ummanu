@@ -165,8 +165,6 @@ _READY_RESET_METADATA = {
     "retry_switch": "",
     "retry_heads": "",
 }
-# Dispatcher Assessment moves require decisions; human escape-hatch moves do not.
-_DECISION_BOUND_ROLES: frozenset[Role] = frozenset({Role.DISPATCHER})
 # A Product or an Issue is not an execution task: it never takes a claim or a task transition,
 # whatever column it currently sits in.
 _TYPED_RECORD_TYPES = {"issue", "product"}
@@ -345,16 +343,6 @@ def _check_execution_record(task: dict[str, Any]) -> None:
             "Product issues and products cannot enter execution task columns",
             3,
         )
-
-
-def _forbidden_move_message(role: str, source: str, target: str) -> str:
-    """Why a role may not make this move, said in the terms of the role that asked."""
-    if role == "observer" and source == "assessment":
-        return (
-            "the observer decides about a parked card and the dispatcher performs the decision: "
-            "record it with `task decide` instead of moving the card"
-        )
-    return f"{role} may not move {source} to {target}"
 
 
 def _transition_reason(reason: str, target: str) -> str:
