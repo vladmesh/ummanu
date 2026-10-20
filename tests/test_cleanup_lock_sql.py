@@ -44,6 +44,8 @@ class CleanupLockSqlTests(CardStoreCase):
             def external_move():
                 try:
                     self.external.move(role="po", actor="test-po", reference="beta-1",
+                                       target="ready", reason="external admission", request_id="external-ready")
+                    self.external.move(role="dispatcher", actor="test-dispatcher", reference="beta-1",
                                        target="in_progress", reason="external admission", request_id="external-move")
                 except Exception as exc:  # noqa: BLE001 - propagate the independent connection's failure
                     failures.append(exc)

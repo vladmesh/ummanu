@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from itertools import product
 
 from ummanu.board.card_transitions import (
     CARD_TRANSITIONS,
+    CardMoveFacts,
+    CardMoveReasonRequired,
     CardTransitionForbidden,
+    admit_card_move,
     card_transition,
 )
 from ummanu.board.models import Actor, CardState
@@ -62,6 +66,63 @@ class RoleVocabularyTests(unittest.TestCase):
     def test_unknown_role_is_refused_at_the_transition_boundary(self) -> None:
         with self.assertRaises(CardTransitionForbidden):
             card_transition("dispatchre", CardState.READY, CardState.IN_PROGRESS)
+
+
+class DispatcherStageTests(unittest.TestCase):
+    STAGES = frozenset({CardState.IN_PROGRESS, CardState.VALIDATE, CardState.ASSESSMENT})
+
+    @staticmethod
+    def holds(role: Role, source: CardState, target: CardState) -> bool:
+        try:
+            card_transition(role, source, target)
+        except CardTransitionForbidden:
+            return False
+        return True
+
+    def test_only_the_dispatcher_moves_a_card_into_its_stages_and_blocked_stays_an_emergency_stop(self) -> None:
+        emergency_sources = {
+            Role.PO: set(CardState) - {CardState.BLOCKED, CardState.DONE},
+            Role.OBSERVER: set(CardState) - {CardState.BLOCKED, CardState.DONE, CardState.ASSESSMENT},
+            Role.STEWARD: {CardState.READY, CardState.IN_PROGRESS, CardState.VALIDATE, CardState.ASSESSMENT},
+        }
+        for role, source, target in product(Role, CardState, CardState):
+            with self.subTest(role=role.value, source=source.value, target=target.value):
+                held = self.holds(role, source, target)
+                if target in self.STAGES and role is not Role.DISPATCHER:
+                    self.assertFalse(held)
+                if target is CardState.BLOCKED and source in emergency_sources.get(role, ()):
+                    self.assertTrue(held)
+
+    def test_a_refused_move_into_a_dispatcher_stage_names_the_handle_to_use(self) -> None:
+        handles = {
+            CardState.ASSESSMENT: ("`task decide`",),
+            CardState.BLOCKED: ("return the card to Ready", "`task decide --kind rework`"),
+            CardState.READY: ("`task cancel`", "`task supersede`"),
+        }
+        for role, (source, expected) in product((Role.PO, Role.OBSERVER, Role.STEWARD), handles.items()):
+            target = CardState.VALIDATE if source is not CardState.ASSESSMENT else CardState.IN_PROGRESS
+            with self.subTest(role=role.value, source=source.value):
+                with self.assertRaises(CardTransitionForbidden) as raised:
+                    card_transition(role, source, target)
+                message = str(raised.exception)
+                self.assertIn(f"{role.value} may not move {source.value} to {target.value}", message)
+                for handle in expected:
+                    self.assertIn(handle, message)
+
+    def test_the_steward_stops_a_card_under_review_only_with_a_reason(self) -> None:
+        def facts(reason: str) -> CardMoveFacts:
+            return CardMoveFacts(
+                reason=reason,
+                steward_report=False,
+                wait_outcome=lambda: None,
+                held_by_wait_card=lambda: False,
+                after_merge_hotfix=lambda: False,
+            )
+
+        with self.assertRaises(CardMoveReasonRequired):
+            admit_card_move(Role.STEWARD, CardState.VALIDATE, CardState.BLOCKED, facts("  "))
+        declaration = admit_card_move(Role.STEWARD, CardState.VALIDATE, CardState.BLOCKED, facts("head silent"))
+        self.assertEqual((declaration.source, declaration.target), (CardState.VALIDATE, CardState.BLOCKED))
 
 
 if __name__ == "__main__":

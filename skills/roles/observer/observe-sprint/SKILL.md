@@ -353,7 +353,12 @@ fork or a proven DoD impossibility is a permitted stop with what is missing, the
 The worker's `classification:` line under `[report:blocked]` (`external_fact` or `wrong_task_definition`)
 is a start, not the verdict; one naming a wrong task definition on every card is a fact about the head
 (`reported` audit events carry each). Only you return a Blocked card to work, after analysis, whatever
-pipeline health says, with a non-empty reason.
+pipeline health says, with a non-empty reason. A move into In progress or Validate is the dispatcher's
+and is refused to you; the handles are:
+
+- `task move --to ready`: the round continues at the stage it stopped (worker, gate or review);
+- `task decide --kind rework` on the Blocked card: back to Ready with your instruction for a worker round;
+- `task cancel` or `task supersede --by <successor>`: withdraw the card.
 
 ## 9. Keep hotfixes narrow
 

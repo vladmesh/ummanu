@@ -1213,7 +1213,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     def test_production_tick_does_not_reconcile_a_card_that_races_back_to_in_progress(self) -> None:
         # secretary-755 reviewer finding: `active_refs` is a snapshot taken at the top of the
-        # tick, before reconciliation runs. If a PO moves the card out and back between that
+        # tick, before reconciliation runs. If the card leaves the cycle and returns between that
         # snapshot and the moment reconciliation asks the board directly, the ref is missing from
         # the snapshot even though the card is live again. Only the state fetched immediately
         # before removal may decide the record is orphaned.
@@ -1244,8 +1244,16 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                     role="po",
                     actor="operator",
                     reference="ummanu-510",
-                    target="in_progress",
+                    target="ready",
                     reason="PO put it right back before the tick finished looking",
+                    request_id="move-back-to-ready-race",
+                )
+                self.writer.move(
+                    role="dispatcher",
+                    actor="dispatcher",
+                    reference="ummanu-510",
+                    target="in_progress",
+                    reason="claimed again before the tick finished looking",
                     request_id="move-back-to-in-progress-race",
                 )
             return real_show(reference)
@@ -1351,8 +1359,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             }
         )
         self.writer.move(
-            role="po",
-            actor="operator",
+            role="dispatcher",
+            actor="dispatcher",
             reference="ummanu-510",
             target="in_progress",
             reason="claimed elsewhere",
@@ -3175,9 +3183,18 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             sprint_override=True,
             sprint_override_reason="the operator moves a card of a reserved project by hand",
             reference="ummanu-510",
-            target="in_progress",
+            target="ready",
             reason="operator retries the card",
             request_id="po-unblock",
+        )
+        # Back in progress with no record: the next tick adopts it under the card's constant attempt.
+        self.writer.move(
+            role="dispatcher",
+            actor="dispatcher",
+            reference="ummanu-510",
+            target="in_progress",
+            reason="operator retries the card",
+            request_id="dispatcher-restart",
         )
         second = self._stall_worker_wait_to_blocked()
 
@@ -3228,9 +3245,18 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             sprint_override=True,
             sprint_override_reason="the operator moves a card of a reserved project by hand",
             reference="ummanu-510",
-            target="in_progress",
+            target="ready",
             reason="operator restored the workspace",
             request_id="po-unblock",
+        )
+        # Back in progress with no record: the next tick adopts it under the card's constant attempt.
+        self.writer.move(
+            role="dispatcher",
+            actor="dispatcher",
+            reference="ummanu-510",
+            target="in_progress",
+            reason="operator restored the workspace",
+            request_id="dispatcher-restart",
         )
         second = self._stall_worker_wait_to_respawn_failure()
 
@@ -5489,12 +5515,10 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertNotEqual(self.runtime.production_state.load()["attempt_id"], first_attempt)
 
     def _move_to_validate(self, request_id: str) -> None:
-        """The operator moves the card to Validate by hand, on whatever commit it holds."""
+        """The dispatcher moves the card to Validate on whatever commit it holds, with no worker report."""
         self.writer.move(
-            role="po",
-            actor="operator",
-            sprint_override=True,
-            sprint_override_reason="the operator moves a card of a reserved project by hand",
+            role="dispatcher",
+            actor="dispatcher",
             reference="ummanu-510",
             target="validate",
             reason="validate the current commit",
@@ -5603,6 +5627,16 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self._pilot_record()["gate_state"], "green")
         gate_calls = list(self.host.gate_calls)
         reviews = list(self.host.reviews)
+        self._decide("rework")
+        self.writer.move(
+            role="dispatcher",
+            actor="dispatcher",
+            reference="ummanu-510",
+            target="in_progress",
+            reason="",
+            decision="rework",
+            request_id="rework-after-parked-red-review",
+        )
         self._move_to_validate("manual-validate-after-parked-red-review")
 
         result = self.tick()
@@ -5644,7 +5678,11 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.reader.show("ummanu-510")["state"], "blocked")
 
         gate_calls = len(self.host.gate_calls)
-        self._move_to_validate("manual-validate-after-infrastructure")
+        # The publication rework left the round without an admitted done, so the return opens a
+        # worker round in a new attempt, where the same SHA is reported again.
+        self._requeue_blocked("return-after-infrastructure")
+        self._report_done("the same commit after the CI outage")
+        self.assertEqual(self.tick()["to"], "validate")
         result = self.tick()
 
         self.assertNotEqual(result.get("reason"), "rejected candidate")
@@ -8095,9 +8133,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertTrue(self.host.prepare_requires_existing[-1])
         self.host.commit = "resumed-c0ffee5678"
         self.writer.move(
-            role="po", actor="operator", reference="ummanu-510", target="validate",
-            reason="validate the new commit", sprint_override=True,
-            sprint_override_reason="the PO validates by hand", request_id="validate-resumed-round",
+            role="dispatcher", actor="dispatcher", reference="ummanu-510", target="validate",
+            reason="validate the new commit", request_id="validate-resumed-round",
         )
         validated = self.tick()
         self.assertEqual(validated["action"], "review-started", validated)
