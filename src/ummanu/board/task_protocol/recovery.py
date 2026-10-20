@@ -30,6 +30,7 @@ from ummanu.board.task_protocol.rows import (
     _done_retention_request_id,
     _has_archive_reason,
     _is_steward_report,
+    _is_steward_report_card,
     _matches_optional,
     _normalize_comment,
     _now,
@@ -50,6 +51,68 @@ from ummanu.kernel.errors import TaskError as TaskError
 
 
 class RecoveryMixin:
+
+    def _legacy_move(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        target: str,
+        reason: str,
+        decision: str,
+        sprint_override: bool,
+        sprint_override_reason: str,
+        request_id: str,
+        task: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Replay a move this request id already recorded as a released generic operation."""
+        override_payload = self._guard_sprint_write(
+            role=role,
+            actor=actor,
+            project=task["project"],
+            card_sprint=str(task.get("sprint") or ""),
+            linked_sprint=None,
+            sprint_override=sprint_override,
+            sprint_override_reason=sprint_override_reason.strip(),
+            request_id=request_id,
+            reference=reference,
+            steward_report=_is_steward_report_card(task),
+        )
+        return self._write(
+            "moved",
+            role,
+            actor,
+            reference,
+            request_id,
+            lambda task: {
+                "from": task["state"],
+                "to": target,
+                "reason_sha256": _digest(reason) if reason else None,
+                **({"decision": decision} if decision else {}),
+                **override_payload,
+            },
+            lambda task: None,
+            # `from` is the column the move already left, so it is the one field a retry cannot
+            # recompute. Everything the caller asked for is compared.
+            identity={
+                "to": target,
+                "reason_sha256": _digest(reason) if reason else None,
+                "decision": decision or None,
+                "sprint_override_reason": override_payload.get("sprint_override_reason"),
+            },
+        )
+
+    def _legacy_record(self, request_id: str) -> dict[str, Any] | None:
+        """The released generic audit record this request id owns, if it owns one.
+
+        The two representations are told apart by the record's own discriminator, never by guessing from
+        a payload.
+        """
+        record = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
+        if record is None or is_protocol_event(record):
+            return None
+        return record
 
     def archive(
         self,

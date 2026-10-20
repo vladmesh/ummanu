@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ummanu.dispatch.candidate_ledger import ledger_entry
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from ummanu.dispatch.watchdog import reset_wait as _reset_wait
 
@@ -53,6 +54,11 @@ def complete_park(
     and the tick recovering from a crash before that move run the same call and it moves once.
     """
     continuation = record.worker_continuation
+    rejection = (
+        ledger_entry(runtime, ref, record)
+        if continuation.phase == "review" and continuation.verdict_outcome == "red"
+        else None
+    )
     runtime.writer.move(
         role="dispatcher",
         actor=runtime.owner,
@@ -65,6 +71,7 @@ def complete_park(
             ref,
             str(continuation.report_baseline),
         ),
+        **({"rejected_candidate": rejection} if rejection is not None else {}),
     )
     continuation.confirm_park()
     record.state = "assessment"

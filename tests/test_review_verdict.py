@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 from unittest import mock
 
@@ -55,6 +56,27 @@ class RedVerdictIntakeTests(unittest.TestCase):
                 self.assertEqual((data["marker"], data["body"]), (f"review:{kind}", body))
 
 
+class RejectedCandidateMoveTests(unittest.TestCase):
+    def test_only_the_dispatcher_moves_a_card_with_a_rejected_candidate(self):
+        board = mock.MagicMock(name="board")
+        writer = TaskWriter(board, data_dir=tempfile.mkdtemp())
+        writer.reader = mock.MagicMock()
+        before = list(board.mock_calls)
+        for role, actor in (("po", "operator"), ("steward", "steward")):
+            with self.subTest(role=role), self.assertRaises(TaskError) as raised:
+                writer.move(
+                    role=role,
+                    actor=actor,
+                    reference="sample-1",
+                    target="in_progress",
+                    reason="moved by hand",
+                    rejected_candidate={"sha": "a" * 40, "source": "gate"},
+                )
+            self.assertEqual((raised.exception.code, raised.exception.exit_code), ("role_forbidden", 3))
+        writer.reader.show.assert_not_called()
+        self.assertEqual(board.mock_calls, before)
+
+
 class RedVerdictRoutingTests(unittest.TestCase):
     def setUp(self):
         self.task = {"ref": "sample-1", "state": "validate", "comments": []}
@@ -64,9 +86,12 @@ class RedVerdictRoutingTests(unittest.TestCase):
             review_baseline=0, state="validate", claimed_at=1.0, report_generation=1,
         )
         self.records = {"sample-1": self.record}
+        self.events = []
+        self.terminal_effects = []
         self.runtime = mock.Mock()
         self.runtime.owner = "dispatcher"
         self.runtime.reader.show.return_value = self.task
+        self.runtime.audit.events.side_effect = lambda reference: list(self.events)
         self.runtime.host.head_commit.return_value = "a" * 40
         self.runtime._end_review_pane_confirmed.return_value = None
         self.runtime.writer.move.side_effect = self.move
@@ -84,10 +109,16 @@ class RedVerdictRoutingTests(unittest.TestCase):
         self.task["comments"].append({"marker": None, "body": reason})
 
     def terminal_move(self, runtime, task, record, **kwargs):
+        self.terminal_effects.append(kwargs)
         self.move(target=kwargs["target"], reason=kwargs["reason"])
 
     def verdict(self, body, kind="red"):
         self.task["comments"].append({"marker": f"review:{kind}", "body": f"[review:{kind}]\n{body}"})
+        self.events.append({
+            "record_type": "board.protocol_event",
+            "event_id": f"evt_verdict_{len(self.events)}",
+            "data": {"marker": f"review:{kind}", "body": body},
+        })
 
     def advance(self):
         return advance_review_verdict(
@@ -163,3 +194,19 @@ class RedVerdictRoutingTests(unittest.TestCase):
         self.assertEqual(outcome["reason"], "red review ceiling reached")
         self.assertEqual(self.task["state"], "blocked")
         self.assertEqual(self.delivery.call_count, 2)
+
+    def test_red_review_ledgers_the_reviewed_candidate_and_its_verdict(self):
+        self.events.append({
+            "record_type": "board.protocol_event",
+            "event_id": "evt_report",
+            "data": {
+                "marker": "report:done",
+                "worker_check": {"candidate_sha": "a" * 40, "tree_sha": "b" * 40},
+            },
+        })
+        self.verdict("Open blockers: BLOCKER-a")
+        self.advance()
+        self.assertEqual(
+            self.terminal_effects[-1]["rejected_candidate"],
+            {"sha": "a" * 40, "tree": "b" * 40, "source": "review", "verdict_event_id": "evt_verdict_1"},
+        )

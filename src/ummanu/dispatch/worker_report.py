@@ -19,6 +19,7 @@ from ummanu.board.completion_evidence import (
 )
 from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch.assessment_park import begin_park as _begin_park, complete_park as _complete_park
+from ummanu.dispatch.candidate_ledger import rejected_candidate
 from ummanu.dispatch.gate import reset_infrastructure_reruns as _reset_infrastructure_reruns
 from ummanu.dispatch.head_vitality_episode import VitalityVerdict
 from ummanu.dispatch.helpers import (
@@ -152,6 +153,12 @@ def handle_worker_report(
             }
         if has_candidate(task):
             current_sha = runtime.host.head_commit(record)
+            # The card's ledger outlives this record: a verdict of any attempt refuses its candidate.
+            rejection = rejected_candidate(runtime.audit, ref, current_sha)
+            if rejection is not None:
+                return _reject_stale_done(
+                    runtime, task, record, records, payload, attempt_id, current_sha, rejection.named()
+                )
             if current_sha and current_sha == record.rejected_sha:
                 if record.rejected_failure_class == "infrastructure":
                     return _accept_stale_infrastructure_done(
@@ -163,7 +170,16 @@ def handle_worker_report(
                         attempt_id,
                         current_sha,
                     )
-                return _reject_stale_done(runtime, task, record, records, payload, attempt_id, current_sha)
+                return _reject_stale_done(
+                    runtime,
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
+                    current_sha,
+                    "the mechanical gate or by a red review",
+                )
         else:
             # No candidate: an unchanged HEAD is not a stale result, and every done report of a
             # new round is a fresh one. An infra report leaves its completion record here.
@@ -517,6 +533,7 @@ def _reject_stale_done(
     payload: dict[str, Any],
     attempt_id: str,
     sha: str,
+    rejected_by: str,
 ) -> dict[str, Any]:
     """Bounce one repeated rejected result, then leave the diagnosis to a human."""
     ref = task["ref"]
@@ -532,8 +549,7 @@ def _reject_stale_done(
             target="blocked",
             reason=(
                 f"The worker reported done twice with no new work: HEAD {sha} was already "
-                "rejected by the mechanical gate or by a red review. A human needs to look at "
-                "this."
+                f"rejected by {rejected_by}. A human needs to look at this."
             ),
             request_id=_attempt_request_id(
                 record.attempt_id or attempt_id,
@@ -571,8 +587,8 @@ def _reject_stale_done(
         actor=runtime.owner,
         reference=ref,
         body=(
-            f"The done report was rejected: HEAD {sha} was already rejected by the mechanical "
-            "gate or by a red review. Do and commit new work, then report again. If the cause "
+            f"The done report was rejected: HEAD {sha} was already rejected by {rejected_by}. "
+            "Do and commit new work, then report again. If the cause "
             "is a test or the gate itself and the code should not change, use "
             "report --kind blocked; another done on this SHA moves the card to Blocked."
         ),

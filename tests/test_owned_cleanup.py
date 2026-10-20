@@ -427,6 +427,7 @@ class OwnedCleanupTests(unittest.TestCase):
         worker = successor.worker_head_run.to_json()
         attestation = successor.gate_attestation.to_json()
         self.host.review_status = lambda *args: {"live": False, "known": True}
+        self.host.head_commit = lambda record: self.base
 
         def reviewer(task, record):
             with self.owner.admission(task, launch=True):

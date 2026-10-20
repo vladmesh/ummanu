@@ -8,6 +8,7 @@ from ummanu.board.completion_evidence import has_candidate
 from ummanu.board.review_blockers import repeated_open_blockers
 from ummanu.dispatch import attempt_accounting, e2e_stage, release_lifecycle
 from ummanu.dispatch.assessment_park import begin_park, complete_park
+from ummanu.dispatch.candidate_ledger import ledger_entry
 from ummanu.dispatch.gate import GateResult
 from ummanu.dispatch.gate_lifecycle import (
     accept_green_gate as _accept_green_gate,
@@ -443,4 +444,5 @@ def block_unobserved_red_review(
         reason=reason,
         step="review",
         outcome="repeated review blockers" if repeated else "red review ceiling reached",
+        rejected_candidate=ledger_entry(runtime, task["ref"], record),
     )

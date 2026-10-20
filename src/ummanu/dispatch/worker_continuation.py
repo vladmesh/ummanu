@@ -14,6 +14,7 @@ from dataclasses import replace
 from typing import Any
 
 from ummanu.dispatch import attempt_accounting
+from ummanu.dispatch.candidate_ledger import ledger_entry
 from ummanu.dispatch.gate import reset_infrastructure_reruns as _reset_infrastructure_reruns
 from ummanu.dispatch.handoff_liveness import (
     PENDING_ATTEMPT,
@@ -252,6 +253,8 @@ def complete_red_transition(
             if continuation.verdict_outcome in {"green", "red"}
             else "missing"
         ),
+        # A decision's rework round acts on a rejection already ledgered when the card parked.
+        rejected_candidate=None if continuation.decision else ledger_entry(runtime, ref, record),
     )
     moved = runtime.reader.show(ref)
     # The previous round's report stays behind this baseline, so no tick reads it as this one's.

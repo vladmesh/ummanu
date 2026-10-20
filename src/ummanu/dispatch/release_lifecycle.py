@@ -113,6 +113,7 @@ def block_merge_path(
     outcome: str,
     decision: str = "",
     request_id: str = "",
+    rejected_candidate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """A merge path that cannot finish leaves the card Blocked with its heads down."""
     ref = task["ref"]
@@ -132,6 +133,7 @@ def block_merge_path(
             if record.worker_continuation.verdict_outcome in {"green", "red", "blocked"}
             else "missing",
             blocked_reason=blocked_reason,
+            rejected_candidate=rejected_candidate,
         )
         records.pop(ref, None)
         runtime.save_records(payload, records)
