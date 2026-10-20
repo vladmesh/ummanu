@@ -20,7 +20,6 @@ from ummanu.board import (
     po_origin as origin_field,
     wait_card,
 )
-from ummanu.board.audit_contract import is_protocol_event
 from ummanu.board.backend import BOARD_STORE_KIND, entity_id
 from ummanu.board.card_transitions import CardTransitionForbidden, card_transition
 from ummanu.board.completion_evidence import (
@@ -2410,6 +2409,8 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             raise TaskError("validation", "a release merge marker belongs on a dispatcher Done", 2)
         if release_claim and (role != "dispatcher" or target != "blocked"):
             raise TaskError("validation", "a claim release belongs on a dispatcher Blocked", 2)
+        if rejected_candidate is not None and role != "dispatcher":
+            raise TaskError("role_forbidden", "only the dispatcher ledgers a rejected candidate", 3)
         task = self.reader.show(reference)
         if role == "observer" and task.get("record_type") in _TYPED_RECORD_TYPES:
             # The observer files issues and never promotes, moves or closes one.
@@ -2624,68 +2625,6 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             f"{owner_events.STEWARD_NEEDS_HUMAN}:{reference}:{moved.get('event_id')}",
             to=self.client,
         )
-
-    def _legacy_move(
-        self,
-        *,
-        role: str,
-        actor: str,
-        reference: str,
-        target: str,
-        reason: str,
-        decision: str,
-        sprint_override: bool,
-        sprint_override_reason: str,
-        request_id: str,
-        task: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Replay a move this request id already recorded as a released generic operation."""
-        override_payload = self._guard_sprint_write(
-            role=role,
-            actor=actor,
-            project=task["project"],
-            card_sprint=str(task.get("sprint") or ""),
-            linked_sprint=None,
-            sprint_override=sprint_override,
-            sprint_override_reason=sprint_override_reason.strip(),
-            request_id=request_id,
-            reference=reference,
-            steward_report=_is_steward_report_card(task),
-        )
-        return self._write(
-            "moved",
-            role,
-            actor,
-            reference,
-            request_id,
-            lambda task: {
-                "from": task["state"],
-                "to": target,
-                "reason_sha256": _digest(reason) if reason else None,
-                **({"decision": decision} if decision else {}),
-                **override_payload,
-            },
-            lambda task: None,
-            # `from` is the column the move already left, so it is the one field a retry cannot
-            # recompute. Everything the caller asked for is compared.
-            identity={
-                "to": target,
-                "reason_sha256": _digest(reason) if reason else None,
-                "decision": decision or None,
-                "sprint_override_reason": override_payload.get("sprint_override_reason"),
-            },
-        )
-
-    def _legacy_record(self, request_id: str) -> dict[str, Any] | None:
-        """The released generic audit record this request id owns, if it owns one.
-
-        The two representations are told apart by the record's own discriminator, never by guessing from
-        a payload.
-        """
-        record = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
-        if record is None or is_protocol_event(record):
-            return None
-        return record
 
     def _transition_cleanup(
         self,

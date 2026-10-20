@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 from unittest import mock
 
@@ -53,6 +54,27 @@ class RedVerdictIntakeTests(unittest.TestCase):
                 self.assertEqual(self.verdict(body, kind), {"action": "verdict"})
                 data = self.writer._marker_write.call_args.kwargs["data"]
                 self.assertEqual((data["marker"], data["body"]), (f"review:{kind}", body))
+
+
+class RejectedCandidateMoveTests(unittest.TestCase):
+    def test_only_the_dispatcher_moves_a_card_with_a_rejected_candidate(self):
+        board = mock.MagicMock(name="board")
+        writer = TaskWriter(board, data_dir=tempfile.mkdtemp())
+        writer.reader = mock.MagicMock()
+        before = list(board.mock_calls)
+        for role, actor in (("po", "operator"), ("steward", "steward")):
+            with self.subTest(role=role), self.assertRaises(TaskError) as raised:
+                writer.move(
+                    role=role,
+                    actor=actor,
+                    reference="sample-1",
+                    target="in_progress",
+                    reason="moved by hand",
+                    rejected_candidate={"sha": "a" * 40, "source": "gate"},
+                )
+            self.assertEqual((raised.exception.code, raised.exception.exit_code), ("role_forbidden", 3))
+        writer.reader.show.assert_not_called()
+        self.assertEqual(board.mock_calls, before)
 
 
 class RedVerdictRoutingTests(unittest.TestCase):
