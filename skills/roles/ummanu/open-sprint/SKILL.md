@@ -170,8 +170,9 @@ python3 -P -m ummanu sprint create --role po --actor <you> \
 - Do not set `--ref`: the entity gets its own `sprint:<ID>`. If you do set it, the value must start with
   `sprint:` and must clash with neither an existing sprint nor a card.
 - Instead of `--dod-file` there is a `--definition-of-done` string; use the file for multi-line text.
-- Items change after opening only through `sprint dod add --ref <sprint> --role po --text ... --reason
-  ...`, which is also how an open sprint with a free-text DoD gets addressable items.
+- Items change after opening only through the PO's `sprint dod add --ref <sprint> --role po --text ...
+  --reason ...` (also how an open sprint with a free-text DoD gets addressable items), `sprint dod edit`
+  (reword one item) and `sprint dod descope` (take one open item out of scope with a reason).
 
 Read back what you created immediately and check the fields are the ones agreed:
 

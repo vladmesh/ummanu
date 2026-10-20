@@ -390,14 +390,17 @@ def _short(text: Any, chars: int) -> str:
 
 
 def _dod_scale(dod: dict[str, Any]) -> str:
-    """The sprint's progress: one segment per DoD item, as wide as the reader's share, met ones filled."""
+    """The sprint's progress: one segment per DoD item in scope, as wide as the reader's share, met ones filled."""
     if not dod.get("structured"):
         return (
             '<div class="dod-scale none"><span class="label">progress</span>'
             f'<span class="muted">no scale: {escape(str(dod.get("reason") or ""))}</span></div>'
         )
     segments = []
-    for item in _entries(dod.get("items")):
+    items = _entries(dod.get("items"))
+    for item in items:
+        if item.get("state") == "descoped":
+            continue
         weight = item.get("weight") if item.get("weight") is not None else "not weighed"
         said = f"{item.get('id')} · weight {weight} · {item.get('text')}"
         if item.get("evidence"):
@@ -408,8 +411,11 @@ def _dod_scale(dod: dict[str, Any]) -> str:
             f'title="{escape(said)}"></i>'
         )
     progress = dod.get("progress")
-    words = f"{dod.get('met')} of {dod.get('total')} items met" + (
-        f" · {float(progress) * 100:.0f}%" if progress is not None else ""
+    descoped = sum(1 for item in items if item.get("state") == "descoped")
+    words = (
+        f"{dod.get('met')} of {dod.get('total')} items met"
+        + (f" · {float(progress) * 100:.0f}%" if progress is not None else "")
+        + (f" · {descoped} descoped" if descoped else "")
     )
     unweighed = "" if dod.get("estimated") else _chip("not estimated")
     return (

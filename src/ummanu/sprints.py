@@ -138,6 +138,9 @@ SPRINT_CREATED = "created"
 SPRINT_STATUSES = {state.value for state in SprintState}
 # Terminal sprint states reject semantic writes, so their resume freshness is stable.
 SPRINT_TERMINAL_STATUSES = {SprintState.CLOSED.value, SprintState.STOPPED.value}
+#: A DoD write: the stored items (None when free text) and who writes it when, to the new items.
+_DodChange = Callable[[list[dict[str, Any]] | None, dict[str, str]], list[dict[str, Any]]]
+_DodFacts = Callable[[list[dict[str, Any]] | None], dict[str, Any]]
 
 
 def public_current_task(status: str, stored: str | None) -> str | None:
@@ -2106,7 +2109,7 @@ class SprintWriter(SprintLifecycleMixin):
         payload = {"texts": texts, "reason": _required(reason, "adding Definition of Done items needs a --reason")}
         return self._dod_write(
             "dod_items_added", role, actor, reference, request_id, payload,
-            lambda items, _event: sprint_dod.new_items(texts, existing=items or []),
+            lambda items, _by: sprint_dod.new_items(texts, existing=items or []),
         )
 
     def set_dod_weight(
@@ -2118,7 +2121,7 @@ class SprintWriter(SprintLifecycleMixin):
         payload = {"item": item, "weight": weight, "reason": _required(reason, "a weight needs a --reason")}
         return self._dod_write(
             "dod_item_weighed", role, actor, reference, request_id, payload,
-            lambda items, _event: sprint_dod.weighed(_structured(items), item, weight, payload["reason"]),
+            lambda items, _by: sprint_dod.weighed(_structured(items), item, weight, payload["reason"]),
         )
 
     def meet_dod_item(
@@ -2127,12 +2130,10 @@ class SprintWriter(SprintLifecycleMixin):
     ) -> dict[str, Any]:
         self._role(role, {"po", "observer"}, actor=actor)
         payload = {"item": item, "evidence": _required(evidence, "a met item needs its --evidence")}
-
-        def change(items: list[dict[str, Any]] | None, event: dict[str, Any]) -> list[dict[str, Any]]:
-            by = {"role": role, "actor": actor, "at": str(event["occurred_at"])}
-            return sprint_dod.met(_structured(items), item, payload["evidence"], by)
-
-        return self._dod_write("dod_item_met", role, actor, reference, request_id, payload, change)
+        return self._dod_write(
+            "dod_item_met", role, actor, reference, request_id, payload,
+            lambda items, by: sprint_dod.met(_structured(items), item, payload["evidence"], by),
+        )
 
     def reopen_dod_item(
         self, *, role: str, actor: str, reference: str, item: str, reason: str,
@@ -2143,58 +2144,76 @@ class SprintWriter(SprintLifecycleMixin):
         payload = {"item": item, "reason": _required(reason, "reopening an item needs a --reason")}
         return self._dod_write(
             "dod_item_reopened", role, actor, reference, request_id, payload,
-            lambda items, _event: sprint_dod.reopened(_structured(items), item),
+            lambda items, _by: sprint_dod.reopened(_structured(items), item),
+        )
+
+    def edit_dod_item(
+        self, *, role: str, actor: str, reference: str, item: str, text: str, reason: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Reword one open or met item; its history event keeps the wording it replaced."""
+        self._role(role, {"po"}, actor=actor)
+        payload = {"item": item, "text": _required(text, "an item needs its new wording in --text"),
+                   "reason": _required(reason, "rewording an item needs a --reason")}
+        return self._dod_write(
+            "dod_item_edited", role, actor, reference, request_id, payload,
+            lambda items, _by: sprint_dod.reworded(_structured(items), item, payload["text"]),
+            recorded=lambda items: {"previous_text": sprint_dod.find(_structured(items), item)["text"]},
+        )
+
+    def descope_dod_item(
+        self, *, role: str, actor: str, reference: str, item: str, reason: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Take one open item out of the sprint's scope: it counts in no progress and blocks no close."""
+        self._role(role, {"po"}, actor=actor)
+        payload = {"item": item, "reason": _required(reason, "descoping an item needs a --reason")}
+        return self._dod_write(
+            "dod_item_descoped", role, actor, reference, request_id, payload,
+            lambda items, by: sprint_dod.descoped(_structured(items), item, payload["reason"], by),
         )
 
     def _dod_write(
-        self,
-        kind: str,
-        role: str,
-        actor: str,
-        reference: str,
-        request_id: str | None,
-        payload: dict[str, Any],
-        change: Callable[[list[dict[str, Any]] | None, dict[str, Any]], list[dict[str, Any]]],
+        self, kind: str, role: str, actor: str, reference: str, request_id: str | None,
+        payload: dict[str, Any], change: _DodChange, *, recorded: _DodFacts | None = None,
     ) -> dict[str, Any]:
         request_id = request_id or str(uuid.uuid4())
         self._guard_observer_identity(role=role, actor=actor, reference=reference, request_id=request_id)
         return self._dod_write_atomic(
             kind=kind, role=role, actor=actor, reference=reference, request_id=request_id,
-            payload=payload, change=change,
+            payload=payload, change=change, recorded=recorded,
         )
 
     @_sql_atomic
     def _dod_write_atomic(
-        self,
-        *,
-        kind: str,
-        role: str,
-        actor: str,
-        reference: str,
-        request_id: str,
-        payload: dict[str, Any],
-        change: Callable[[list[dict[str, Any]] | None, dict[str, Any]], list[dict[str, Any]]],
+        self, *, kind: str, role: str, actor: str, reference: str, request_id: str,
+        payload: dict[str, Any], change: _DodChange, recorded: _DodFacts | None,
     ) -> dict[str, Any]:
         self.client._execute("SELECT ref FROM sprints WHERE ref = %s FOR UPDATE", (reference,))
         known = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
         if known is not None:
-            if (known.get("kind"), known.get("ref"), known.get("payload")) != (kind, reference, payload):
+            # A replay is matched on what the caller asked; `recorded` facts were read at the first write.
+            asked = {key: (known.get("payload") or {}).get(key) for key in payload}
+            if (known.get("kind"), known.get("ref"), asked) != (kind, reference, payload):
                 raise TaskError("validation", "request id already belongs to another sprint write", 2)
             return self._write(kind, role, actor, reference, request_id, payload, lambda _: None)
         items = sprint_dod.items_of(self.reader.show(reference, include_cards=False)["dod"])
         # Refuse a change the items cannot take before anything is staged.
         try:
-            change(items, {"occurred_at": _now()})
+            change(items, {"role": role, "actor": actor, "at": _now()})
+            if recorded is not None:
+                payload = {**payload, **recorded(items)}
         except ValueError as exc:
             raise TaskError("validation", str(exc), 2) from None
 
         def mutation(snapshot: SprintWriteSnapshot) -> None:
             event = self.audit.pending_event(request_id)
             assert event is not None
+            by = {"role": role, "actor": actor, "at": str(event["occurred_at"])}
             self.client.call(
                 "saveTaskMetadata",
                 task_id=_sprint_number(snapshot),
-                values={sprint_dod.FIELD: sprint_dod.encode(change(items, event))},
+                values={sprint_dod.FIELD: sprint_dod.encode(change(items, by))},
             )
 
         return self._write(kind, role, actor, reference, request_id, payload, mutation)
@@ -2753,6 +2772,7 @@ class SprintWriter(SprintLifecycleMixin):
             "dod_item_weighed",
             "dod_item_met",
             "dod_item_reopened",
+            "dod_item_edited", "dod_item_descoped",
         }:
             raise TaskError("closed", "sprint is closed", 3)
         event = self._event(kind, role, actor, reference, request_id, payload, sprint)

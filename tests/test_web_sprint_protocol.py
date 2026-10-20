@@ -3358,6 +3358,8 @@ class TerminalSprintWriteTests(SprintProtocolFixture):
         "budget_recorded": ("accepted",),
         "commented": ("accepted",),
         "current_task_set": REFUSED,
+        "dod_item_descoped": REFUSED,
+        "dod_item_edited": REFUSED,
         "dod_item_met": REFUSED,
         "dod_item_reopened": REFUSED,
         "dod_item_weighed": REFUSED,

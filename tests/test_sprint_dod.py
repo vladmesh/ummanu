@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
+from ummanu import restore
 from ummanu.board import sprint_dod
+from ummanu.data import normalize_sprint_entity
 from ummanu.dispatch.observer_prompt import render_observer_prompt
+from ummanu.sprint_close import closeout_document
 
 BY = {"role": "observer", "actor": "observer", "at": "2026-10-15T00:00:00Z"}
+PO = {"role": "po", "actor": "operator", "at": "2026-10-16T00:00:00Z"}
 
 
 def weighed(*weights: int) -> list[dict]:
@@ -98,6 +105,91 @@ class ItemChangeTests(unittest.TestCase):
                 sprint_dod.stored_items(value)
 
 
+class DescopeTests(unittest.TestCase):
+    def test_a_descoped_item_counts_in_no_progress_and_is_not_unmet(self) -> None:
+        items = sprint_dod.met(weighed(3, 8, 2), "d1", "PR 1", BY)
+        items = sprint_dod.descoped(items, "d2", "the owner dropped the live check", PO)
+
+        view = sprint_dod.section(items)
+
+        self.assertAlmostEqual(view["progress"], 3 / 5)
+        self.assertEqual((view["met"], view["total"]), (1, 2))
+        self.assertEqual([round(item["share"], 4) for item in view["items"]], [0.6, 0.0, 0.4])
+        self.assertEqual(view["items"][1]["descoped"], {**PO, "reason": "the owner dropped the live check"})
+        self.assertEqual([item["id"] for item in sprint_dod.unmet(items)], ["d3"])
+        self.assertEqual(sprint_dod.unmet(sprint_dod.met(items, "d3", "PR 3", BY)), [])
+
+    def test_an_unweighed_descoped_item_leaves_the_scale_estimated(self) -> None:
+        items = sprint_dod.weighed(sprint_dod.new_items(["a", "b"]), "d1", 5, "the adapter")
+        items = sprint_dod.descoped(items, "d2", "out of this sprint", PO)
+
+        self.assertTrue(sprint_dod.section(items)["estimated"])
+
+    def test_only_an_open_item_is_descoped_and_only_with_a_reason(self) -> None:
+        items = sprint_dod.met(sprint_dod.new_items(["a", "b"]), "d1", "PR 1", BY)
+        with self.assertRaisesRegex(ValueError, "d1 is met"):
+            sprint_dod.descoped(items, "d1", "too late", PO)
+        with self.assertRaises(ValueError):
+            sprint_dod.descoped(items, "d2", "  ", PO)
+        items = sprint_dod.descoped(items, "d2", "dropped", PO)
+        with self.assertRaisesRegex(ValueError, "d2 is descoped"):
+            sprint_dod.descoped(items, "d2", "again", PO)
+
+    def test_a_descoped_item_takes_no_meet_reopen_weight_or_rewording(self) -> None:
+        items = sprint_dod.descoped(sprint_dod.new_items(["a"]), "d1", "dropped", PO)
+        refusals = {
+            "meet": lambda: sprint_dod.met(items, "d1", "PR 1", BY),
+            "reopen": lambda: sprint_dod.reopened(items, "d1"),
+            "weigh": lambda: sprint_dod.weighed(items, "d1", 3, "late estimate"),
+            "reword": lambda: sprint_dod.reworded(items, "d1", "new words"),
+        }
+        for verb, change in refusals.items():
+            with self.subTest(verb=verb), self.assertRaisesRegex(ValueError, "descoped"):
+                change()
+
+    def test_rewording_keeps_id_weight_state_and_evidence(self) -> None:
+        items = sprint_dod.met(weighed(5, 2), "d1", "PR 4", BY)
+
+        changed = sprint_dod.reworded(items, "d1", "  the adapter is rewritten and deployed ")
+
+        self.assertEqual(changed[0], {**items[0], "text": "the adapter is rewritten and deployed"})
+        self.assertEqual(changed[1], items[1])
+        with self.assertRaises(ValueError):
+            sprint_dod.reworded(items, "d2", " ")
+        with self.assertRaisesRegex(ValueError, "d9"):
+            sprint_dod.reworded(items, "d9", "words")
+
+    def test_stored_descoped_items_round_trip_and_a_bare_one_is_refused(self) -> None:
+        items = sprint_dod.descoped(weighed(2, 5), "d2", "dropped", PO)
+        self.assertEqual(sprint_dod.stored_items(sprint_dod.encode(items)), items)
+        broken = [
+            [{key: value for key, value in items[1].items() if key != "descoped"}],
+            [{**items[0], "descoped": {**PO, "reason": "dropped"}}],
+            [{**items[1], "descoped": PO}],
+        ]
+        for value in broken:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                sprint_dod.stored_items(value)
+
+    def test_a_checkpoint_of_a_descoped_item_restores_it(self) -> None:
+        items = sprint_dod.met(sprint_dod.new_items(["a", "b", "c"]), "d1", "PR 1", BY)
+        items = sprint_dod.descoped(items, "d2", "dropped", PO)
+        sprint = {
+            "ref": "sprint:7", "status": "open", "goal": "goal", "definition_of_done": "", "current_task": "",
+            "repositories": [], "dod": sprint_dod.section(items),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            board = Path(directory) / "board"
+            board.mkdir()
+            exported = {"sprints": [normalize_sprint_entity(sprint)]}
+            (board / "sprints.json").write_text(json.dumps(exported), encoding="utf-8")
+            (validated,) = restore._normalized_sprints(Path(directory))
+
+        restored = restore._restore_sprint_metadata(validated)[sprint_dod.FIELD]
+
+        self.assertEqual(sprint_dod.stored_items(restored), items)
+
+
 class ReaderTests(unittest.TestCase):
     def test_the_observer_launch_document_lists_each_item_with_state_and_weight(self) -> None:
         items = sprint_dod.met(weighed(5, 2), "d1", "PR 4", BY)
@@ -107,6 +199,21 @@ class ReaderTests(unittest.TestCase):
         self.assertIn("- d1 [met, weight 5; evidence: PR 4] fact 1", document)
         self.assertIn("- d2 [open, weight 2] fact 2", document)
         self.assertIn("1 of 2 met.", document)
+
+    def test_the_observer_launch_document_and_the_closeout_show_a_descoped_item_with_its_reason(self) -> None:
+        items = sprint_dod.met(sprint_dod.new_items(["landed", "live check"]), "d1", "PR 4", BY)
+        dod = sprint_dod.section(sprint_dod.descoped(items, "d2", "the owner dropped it", PO))
+
+        document = render_observer_prompt({"ref": "sprint:1", "comments": [], "dod": dod})
+        closeout = closeout_document(
+            reference="sprint:1", goal="goal", actor="observer", reason="done", body="all landed",
+            decisions=None, dod=dod,
+        )
+
+        self.assertIn("- d2 [descoped, weight not weighed; reason: the owner dropped it] live check", document)
+        self.assertIn("1 of 1 met.", document)
+        self.assertIn("- d1 [met; evidence: PR 4] landed", closeout)
+        self.assertIn("- d2 [descoped; reason: the owner dropped it] live check", closeout)
 
 
 if __name__ == "__main__":

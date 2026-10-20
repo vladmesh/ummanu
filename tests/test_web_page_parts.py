@@ -181,6 +181,24 @@ class DodScaleTests(unittest.TestCase):
         self.assertIn("1 of 2 items met · 25%", drawn)
         self.assertNotIn("not estimated", drawn)
 
+    def test_the_scale_and_the_sprint_page_show_a_descoped_item_apart_from_met_and_open(self) -> None:
+        from ummanu.web.page_sprint import _sprint_tabs
+        from ummanu.webproto.sprint_reads import _sprint_value
+
+        po = {"role": "po", "actor": "operator", "at": "now"}
+        items = sprint_dod.met(self.items(3, 1, 8), "d2", "PR 5", po)
+        dod = sprint_dod.section(sprint_dod.descoped(items, "d3", "the owner dropped the <live> check", po))
+
+        drawn = page_parts._dod_scale(dod)
+        page = _sprint_tabs("sprint:7", _sprint_value({"dod": dod}), {})
+
+        self.assertNotIn("seg descoped", drawn)
+        self.assertIn("1 of 2 items met · 25% · 1 descoped", drawn)
+        self.assertIn('<span class="chip chip-warn">descoped</span>', page)
+        self.assertIn('descoped: <span class="prose">the owner dropped the &lt;live&gt; check</span>', page)
+        self.assertIn('<span class="chip chip-ok">met</span>', page)
+        self.assertIn('<span class="chip">open</span>', page)
+
     def test_an_unweighed_scale_says_so_and_a_free_text_dod_draws_none(self) -> None:
         self.assertIn("not estimated", page_parts._dod_scale(sprint_dod.section(sprint_dod.new_items(["a"]))))
         drawn = page_parts._dod_scale(sprint_dod.section(None))

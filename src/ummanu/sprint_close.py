@@ -266,7 +266,9 @@ def closeout_document(
     reason: str,
     body: str,
     decisions: SprintCloseDecisions | Mapping[str, Any] | None,
+    dod: Mapping[str, Any],
 ) -> str:
+    """The closeout text: the close, its decisions and, for a sprint with items, each item's end state."""
     plan = SprintCloseDecisions.from_document(decisions)
     lines = [
         f"# Sprint closeout: {reference}",
@@ -288,7 +290,18 @@ def closeout_document(
     lines.extend(_closeout_entries(plan.issues, "This sprint declared no issue."))
     lines.extend(["", "## Cards that were not done", ""])
     lines.extend(_closeout_entries(plan.cards, "No card was left in a working state at the close."))
+    if dod["structured"]:
+        lines.extend(["", "## Definition of Done items", ""])
+        lines.extend(_closeout_dod_item(item) for item in dod["items"])
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _closeout_dod_item(item: Mapping[str, Any]) -> str:
+    if item["state"] == "descoped":
+        basis = f"; reason: {item['descoped']['reason']}"
+    else:
+        basis = f"; evidence: {item['evidence']}" if item["evidence"] else ""
+    return f"- {item['id']} [{item['state']}{basis}] {item['text']}"
 
 
 def _closeout_entries(entries: Sequence[SprintCloseDecision], empty: str) -> list[str]:
