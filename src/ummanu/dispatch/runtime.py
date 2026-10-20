@@ -17,7 +17,9 @@ from ummanu.dispatch import attempt_accounting, release_activation, release_life
 from ummanu.dispatch.assessment_decision import advance_assessment as _advance_assessment
 from ummanu.dispatch.candidate_ledger import rejected_candidate
 from ummanu.dispatch.claim import (
+    STAGE_RESUME_STATE,
     claim_ready_task as _claim_ready_task,
+    continue_in_validate,
     resolve_head as _resolve_claim_head,
 )
 from ummanu.dispatch.cleanup import ownership_lock
@@ -512,6 +514,8 @@ class DispatcherRuntime:
         if record.state == "claim_verified":
             with tick_stage("launch"):
                 return _launch_worker_after_claim(self, task, record, records, payload)
+        if record.state == STAGE_RESUME_STATE:
+            return continue_in_validate(self, task, record, records, payload)
         with tick_stage("report"):
             marker = _worker_report_marker(self, task, record, records, payload, attempt_id)
             recovered = _recover_worker_continuation(
