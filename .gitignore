@@ -6,6 +6,8 @@ build/
 dist/
 *.egg-info/
 
+# Local build and interpreter artifacts are intentionally excluded from commits.
+
 # Live operational state written by the board/task CLI; never a git repo.
 ummanu-data/
 runtime.env
