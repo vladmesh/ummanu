@@ -20,3 +20,5 @@ REVIEW.md
 # Local secret drop-box: plaintext owner credentials, never committed.
 .env
 *.pem
+
+# Synthetic candidate marker for immutable temporary-directory evidence.
