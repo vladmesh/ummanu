@@ -6,6 +6,7 @@ build/
 dist/
 *.egg-info/
 
+# Local build artifacts remain outside version control.
 # Live operational state written by the board/task CLI; never a git repo.
 ummanu-data/
 runtime.env
