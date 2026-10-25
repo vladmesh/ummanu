@@ -453,7 +453,7 @@ class RecoveryMixin:
                 "event_id": event_id,
                 "replayed": True,
             }
-        ownership_change = kind in {"claimed", "moved", "archived", "completed", "restored", "retired"}
+        ownership_change = kind in {"claimed", "moved", "archived", "completed", "restored", "retired", "dod_item_bound"}
         with (reference_lock(self.data_dir, reference) if ownership_change else contextlib.nullcontext()), (
             reference_lock(self.data_dir, "capacity", lane="admission")
             if kind in {"claimed", "moved", "restored"} else contextlib.nullcontext()
@@ -709,6 +709,11 @@ class RecoveryMixin:
         """Complete idempotent backend cleanup before recording a pending event."""
         payload = event.get("payload")
         if not isinstance(payload, dict):
+            return
+        if event.get("kind") == "dod_item_bound":
+            task = self.reader.show(str(event["ref"]))
+            if task["sprint"] != payload["sprint"] or task["dod_item"] != payload["dod_item"]:
+                raise TaskError("backend_error", "pending binding does not match the stored card", 1)
             return
         if event.get("kind") == "created":
             self._finish_pending_create(event, payload)

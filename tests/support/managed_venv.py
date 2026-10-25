@@ -29,11 +29,8 @@ def managed_product_root(parent: Path) -> Path:
 
 
 def guarded_product_env(parent: Path) -> dict[str, str]:
-    """A managed test product and a native Docker stub for probes that never call Docker.
-
-    Login profiles need `id` and the launch probes use `printenv`; expose only those host tools,
-    not a host PATH directory. The PATH has no host Docker fallback. Any unexpected native call
-    leaves `docker-calls` in `parent` and fails; callers assert that the file is absent afterwards.
+    """A managed product with transcript-only Docker and isolated login-profile hooks.
+    Only id and printenv come from the host; unexpected Docker calls are recorded and fail.
     """
     product = managed_product_root(parent)
     native_bin = parent / "native-bin"
@@ -43,6 +40,10 @@ def guarded_product_env(parent: Path) -> dict[str, str]:
         if executable is None:
             raise RuntimeError(f"the guarded launch fixture requires {name}")
         (native_bin / name).symlink_to(executable)
+    # System login profiles must not run unrelated host startup hooks in the fixture.
+    run_parts = native_bin / "run-parts"
+    run_parts.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    run_parts.chmod(0o755)
     docker = native_bin / "docker"
     docker.write_text(
         f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {shlex.quote(str(parent / 'docker-calls'))}\nexit 97\n",

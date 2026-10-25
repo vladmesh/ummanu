@@ -8,9 +8,11 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
+from ummanu.board import sprint_dod
 from ummanu.board.backend import BOARD_STORE_KIND
 from ummanu.board.models import Actor, EntityKind, Event, EventKind
 from ummanu.board.protocol_artifacts import ArtifactOwnershipViolation
+from ummanu.board.roles import Role
 from ummanu.board.task_protocol.rows import (
     ArtifactOwnershipTaskError,
     SprintReservationUnverifiable,
@@ -18,11 +20,55 @@ from ummanu.board.task_protocol.rows import (
     _now,
     _sprint_guard_denial_request_id,
     _sprint_guard_override_request_id,
+    _task_number,
 )
 from ummanu.kernel.errors import TaskError as TaskError
 
 
 class SprintGuardMixin:
+
+    def bind_dod(
+        self, *, role: str, actor: str, reference: str, sprint: str, dod_item: str,
+        sprint_override: bool = False, sprint_override_reason: str = "",
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Bind an unlinked card of an open sprint once; a saved request replays its result."""
+        role = self._role(role, {Role.OBSERVER, Role.PO}, actor=actor)
+        request_id = request_id or str(uuid.uuid4())
+        if not sprint or not dod_item:
+            raise TaskError("validation", "binding requires --sprint and one --dod-item d<N>", 2)
+        reason = self._redact_for_board(sprint_override_reason.strip())
+        identity = {"sprint": sprint, "dod_item": dod_item, "sprint_override": sprint_override,
+                    "sprint_override_reason": reason}
+        self._guard_observer_identity(role=role, actor=actor, project="", card_sprint=sprint,
+                                      request_id=request_id, reference=reference)
+
+        def payload(task: dict[str, Any]) -> dict[str, Any]:
+            if task["sprint"] != sprint:
+                raise TaskError("validation", "the card does not belong to the named sprint", 2)
+            entity = self._sprint_entity(sprint)
+            if entity["status"] != "open":
+                raise TaskError("closed", "binding requires an open sprint", 3)
+            try:
+                sprint_dod.card_item(entity, dod_item)
+            except ValueError as exc:
+                raise TaskError("validation", str(exc), 2) from None
+            if task["dod_item"] is not None and task["dod_item"] != dod_item:
+                raise TaskError("validation", "the card already links another Definition of Done item", 2)
+            self._guard_sprint_write(
+                role=role, actor=actor, project=task["project"], card_sprint=sprint,
+                linked_sprint=entity, sprint_override=sprint_override,
+                sprint_override_reason=reason, request_id=request_id, reference=reference,
+            )
+            return identity
+
+        def mutate(task: dict[str, Any]) -> None:
+            if task["dod_item"] is None:
+                saved = self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"dod_item": dod_item})
+                if saved is not True or self.reader.show(reference)["dod_item"] != dod_item:
+                    raise TaskError("backend_error", "board store did not save the Definition of Done link", 1)
+
+        return self._write("dod_item_bound", role, actor, reference, request_id, payload, mutate, identity=identity)
 
     def _sprint_holds_project(self, project: str) -> bool:
         """Whether an open sprint reserves this card's project."""

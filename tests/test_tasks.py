@@ -18,11 +18,12 @@ from pathlib import Path
 from typing import ClassVar
 from unittest import mock
 
-from tests.fakes.tasks import empty_seed, reader_seed, writer_seed
+from tests.fakes.tasks import empty_seed, open_sprint, reader_seed, writer_seed
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
 from tests.retired_board import LEGACY_ENV, LEGACY_VALUES, RETIRED_STORE, write_stale_leftovers
 from tests.sql_backend_fixtures import CardStoreCase, ensure_sprint_row
 from ummanu import tasks
+from ummanu.board import sprint_dod
 from ummanu.board.card_transitions import CARD_TRANSITIONS, CardTransitionForbidden
 from ummanu.board.completion_evidence import po_completion_record
 from ummanu.board.done_retention import close_old_done
@@ -60,21 +61,6 @@ from ummanu.tasks import (
 )
 
 CARD_STATES = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
-
-
-@contextlib.contextmanager
-def open_sprint(ref: str = "sprint:test", project: str = "ummanu"):
-    """Stand in for the open sprint every Ready card needs.
-
-    These tests are about the create and audit path; the sprint link is a precondition of a
-    create on the board, and the guard behind it is covered in tests/test_sprints.py.
-
-    The caller is bound to the same sprint, because the observer creating a card linked to it is
-    that sprint's own head; an unbound caller is refused before the create path is reached.
-    """
-    sprint = {"ref": ref, "status": "open", "repositories": [project], "reservations": [project]}
-    with mock.patch("ummanu.sprints.SprintReader.show", return_value=sprint), as_observer(ref):
-        yield ref
 
 
 # The sprint the assessment fixture's card belongs to.
@@ -865,6 +851,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
                 },
                 "retry": {"same": 0, "switched": 0, "heads": []},
                 "sprint": None,
+                "dod_item": None,
                 "record_type": "task",
                 # secretary-1638: a research card's stored review choice defaults to skipped.
                 "review": "skipped",
@@ -1804,6 +1791,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
                 "status": "open",
                 "repositories": ["ummanu"],
                 "reservations": ["ummanu"],
+                "dod": sprint_dod.section(None),
                 "executors": {"worker": executor_pinned("codex-worker"), "reviewer": executor_pinned("claude-review")},
             }
             with mock.patch("ummanu.sprints.SprintReader.show", return_value=sprint):

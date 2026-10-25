@@ -949,6 +949,7 @@ def _create_wait(runtime: Any, project: str, carrier_ref: str, state: E2eState, 
     """The wait card for this run, created once: its request id is derived from the dispatch id."""
     sprint = run.charged_to if run.charged_to != "cards" and _sprint_open(runtime, run.charged_to) else ""
     covered = ", ".join(item["ref"] for item in run.covered)
+    carrier = runtime.reader.show(carrier_ref)
     created = runtime.writer.create(
         role="dispatcher",
         actor=runtime.owner,
@@ -962,6 +963,7 @@ def _create_wait(runtime: Any, project: str, carrier_ref: str, state: E2eState, 
         ),
         target="ready",
         sprint=sprint,
+        **({"dod_item": carrier["dod_item"]} if sprint and carrier.get("dod_item") else {}),
         wait={"run": run.run_url, "deadline": run.deadline, "returns": [wait_card.CARD_PREFIX + carrier_ref]},
         request_id=stage_request_id("e2e-wait", run.dispatch_id),
     )
@@ -1153,6 +1155,7 @@ def _hotfix(runtime: Any, project: str, carrier_ref: str, run: E2eRun) -> str:
             description=run.closing_reason,
             target="ready",
             sprint=sprint,
+            **({"dod_item": carrier["dod_item"]} if sprint and carrier.get("dod_item") else {}),
             budget_event="hotfix" if sprint else "",
             origin=origin,
             request_id=request_id,
@@ -1222,6 +1225,7 @@ def _create_disposition(runtime: Any, project: str, carrier_ref: str, run: E2eRu
             json.dumps({"operation": "<this operation>", "carrier": carrier_ref, "run": run.dispatch_id,
                         "covered": run.covered}, sort_keys=True)]),
         target="ready", sprint=sprint, origin=origin, touches_production="none",
+        **({"dod_item": carrier["dod_item"]} if sprint and carrier.get("dod_item") else {}),
         **({"po_execution": po_execution.create_assignment(request_id, "e2e_disposition",
                                                            [item["ref"] for item in run.covered])}
            if not sprint and origin is None else {}), request_id=request_id)

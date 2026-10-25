@@ -470,6 +470,7 @@ def _create_wait(runtime: Any, task: dict[str, Any], state: E2eState, run: E2eRu
         ),
         target="ready",
         sprint=str(task.get("sprint") or ""),
+        **({"dod_item": task["dod_item"]} if task.get("sprint") and task.get("dod_item") else {}),
         wait={
             "run": run.run_url,
             "deadline": run.deadline,
@@ -973,6 +974,7 @@ def _decision_card(
             ),
             target="ready",
             sprint=sprint_route,
+            **({"dod_item": task["dod_item"]} if sprint_route and task.get("dod_item") else {}),
             origin=origin,
             **({"po_execution": po_execution.create_assignment(request_id, "e2e_budget", [ref for ref, _, _ in waiting])}
                if not sprint_route and origin is None else {}),

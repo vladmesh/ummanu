@@ -423,7 +423,7 @@ class GateTests(unittest.TestCase):
         })
         self.assertEqual(result.attempts, 3)
         self.assertEqual(result.returncode, 2)
-        self.assertIn("integer expression expected", result.stderr)
+        self.assertRegex(result.stderr, r"oops: integer (?:expression )?expected")
 
     def test_missing_non_executable_and_wrong_venv_interpreters_fail_before_precheck(self):
         missing = self.root / "missing"

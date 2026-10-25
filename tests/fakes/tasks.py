@@ -14,6 +14,7 @@ from typing import Any, ClassVar
 from unittest import mock
 
 from tests.observer_identity import as_observer
+from ummanu.board import sprint_dod
 
 CARD_STATES = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
 
@@ -28,7 +29,8 @@ def open_sprint(ref: str = "sprint:test", project: str = "ummanu"):
     The caller is bound to the same sprint, because the observer creating a card linked to it is
     that sprint's own head; an unbound caller is refused before the create path is reached.
     """
-    sprint = {"ref": ref, "status": "open", "repositories": [project], "reservations": [project]}
+    sprint = {"ref": ref, "status": "open", "repositories": [project], "reservations": [project],
+              "dod": sprint_dod.section(None)}
     with mock.patch("ummanu.sprints.SprintReader.show", return_value=sprint), as_observer(ref):
         yield ref
 

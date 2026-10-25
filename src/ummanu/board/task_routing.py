@@ -234,6 +234,7 @@ class TaskMetadata:
     retry_switched: int
     retry_heads: tuple[str, ...]
     sprint_ref: str | None
+    dod_item: str | None
     record_type: str | None
     review: TaskReview
     live_impact: bool
@@ -260,6 +261,7 @@ class TaskMetadata:
             retry_switched=nonnegative_int(meta.get("retry_switch")),
             retry_heads=tuple(split_heads(meta.get("retry_heads"))),
             sprint_ref=null_if_empty(meta.get("sprint_ref")),
+            dod_item=null_if_empty(meta.get("dod_item")),
             record_type=null_if_empty(meta.get("record_type")),
             review=_review(meta.get("review")),
             live_impact=live_impact_flag(meta.get("live_impact")),
@@ -288,6 +290,7 @@ class TaskMetadata:
                 "heads": list(self.retry_heads),
             },
             "sprint": self.sprint_ref,
+            "dod_item": self.dod_item,
             "record_type": self.record_type,
             "review": self.review.value,
             "live_impact": self.live_impact,

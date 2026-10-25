@@ -45,6 +45,7 @@ from ummanu.head_registry import (
 )
 from ummanu.host import SHIPPED_PACKAGING_ROOT, LiveHostSource
 from ummanu.host_apply import HostCommandError, SystemdUnitInstaller, resolve_packaged, strict_manifest
+from ummanu.infra.host_space_policy import ROOT_FREE_MIN_BYTES
 from ummanu.installation import commands as installation_commands
 from ummanu.installation.upgrade import (
     host as upgrade_host,
@@ -454,6 +455,7 @@ class PackagedRuntimeParityTests(PortableFixture):
 
     def setUp(self) -> None:
         super().setUp()
+        self.enterContext(mock.patch("ummanu.status.disk_free_bytes", return_value=ROOT_FREE_MIN_BYTES))
         shutil.copytree(SHIPPED_PACKAGING_ROOT, self.product / "packaging" / "systemd", dirs_exist_ok=True)
         context = self.context()
         prepared = upgrade.run_steps(

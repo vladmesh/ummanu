@@ -187,6 +187,10 @@ def add_task_subcommands(subparsers) -> None:
     # "invalid choice" over a flag whose only remaining value is the default anyway.
     task_create.add_argument("--codex-mode", "--codex-launch-mode", dest="codex_mode", default="")
     task_create.add_argument("--sprint", default="", help="link the card to an open sprint reference")
+    task_create.add_argument(
+        "--dod-item", action="append", metavar="dN",
+        help="exactly one in-scope DoD item; required for every fresh card of a structured --sprint",
+    )
     task_create.add_argument("--priority", default="", help="rejected: tasks do not carry product priority")
     task_create.add_argument(
         "--budget-event",
@@ -196,6 +200,19 @@ def add_task_subcommands(subparsers) -> None:
     )
     _add_sprint_override_args(task_create)
     task_create.set_defaults(handler=run_task_create)
+    task_bind = task_subcommands.add_parser(
+        "bind-dod", help="observer/PO: bind an existing unlinked card of an open structured sprint once",
+    )
+    task_bind.add_argument("--ref", required=True)
+    task_bind.add_argument("--sprint", required=True, help="the sprint already stored on the card")
+    task_bind.add_argument("--dod-item", action="append", required=True, metavar="dN",
+                           help="exactly one existing, non-descoped DoD item; reassignment is refused")
+    task_bind.add_argument("--role", required=True, choices=("observer", "po"))
+    task_bind.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
+    task_bind.add_argument("--request-id")
+    _add_data_dir_args(task_bind)
+    _add_sprint_override_args(task_bind)
+    task_bind.set_defaults(handler=run_task_bind_dod)
     for name, handler in (
         ("comment", run_task_comment),
         ("report", run_task_report),
@@ -580,6 +597,7 @@ def run_task_create(args: argparse.Namespace) -> int:
     from ummanu.tasks import TaskWriter
 
     def command() -> object:
+        dod_item = _dod_item_arg(args)
         admit_role(args.role, args.actor or args.role, CREATE_ROLES)
         _validate_codex_mode_for_create(args)
         _refuse_unrunnable_project(Path(_instance(args)), args.project, args.type)
@@ -605,6 +623,7 @@ def run_task_create(args: argparse.Namespace) -> int:
             family_preference=args.family_preference,
             codex_launch_mode=args.codex_mode,
             sprint=args.sprint,
+            dod_item=dod_item,
             priority=args.priority,
             budget_event=args.budget_event,
             sprint_override=args.sprint_override,
@@ -619,6 +638,25 @@ def run_task_create(args: argparse.Namespace) -> int:
         )
 
     return run_task_command(command)
+
+
+def _dod_item_arg(args: argparse.Namespace) -> str:
+    if args.dod_item is None:
+        return ""
+    if len(args.dod_item) != 1:
+        raise TaskError("validation", "supply exactly one --dod-item d<N>", 2)
+    return args.dod_item[0]
+
+
+def run_task_bind_dod(args: argparse.Namespace) -> int:
+    return _run_task_write(
+        args,
+        lambda writer, body, actor: writer.bind_dod(
+            role=args.role, actor=actor, reference=args.ref, sprint=args.sprint,
+            dod_item=_dod_item_arg(args), sprint_override=args.sprint_override,
+            sprint_override_reason=_read_body(args.sprint_override_reason_file), request_id=args.request_id,
+        ),
+    )
 
 
 def _refuse_unrunnable_project(instance: Path, project: str, task_type: str) -> None:

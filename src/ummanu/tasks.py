@@ -18,6 +18,7 @@ from ummanu.board import (
     owner_events,
     po_execution as execution_field,
     po_origin as origin_field,
+    sprint_dod,
     wait_card,
 )
 from ummanu.board.backend import BOARD_STORE_KIND, entity_id
@@ -738,6 +739,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         family_preference: str = FamilyPreference.AUTO.value,
         codex_launch_mode: str = "",
         sprint: str = "",
+        dod_item: str = "",
         priority: str = "",
         budget_event: str = "",
         sprint_override: bool = False,
@@ -777,6 +779,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             family_preference=family_preference,
             codex_launch_mode=codex_launch_mode,
             sprint=sprint,
+            dod_item=dod_item,
             priority=priority,
             budget_event=budget_event,
             sprint_override=sprint_override,
@@ -815,6 +818,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         family_preference: str = FamilyPreference.AUTO.value,
         codex_launch_mode: str = "",
         sprint: str = "",
+        dod_item: str = "",
         priority: str = "",
         budget_event: str = "",
         sprint_override: bool = False,
@@ -1104,6 +1108,10 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                 )
         elif review_value is TaskReview.SKIPPED:
             self._refuse_unpinned_reviewer_on_skipped(sprint_ref="", review_head=explicit_review_head)
+        try:
+            sprint_dod.card_item(linked_sprint, dod_item, required=not restoring)
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
         if budget_event not in {"", "recreated_task", "hotfix"}:
             raise TaskError("validation", "budget event must be recreated_task or hotfix", 2)
         if budget_event and not sprint:
@@ -1157,6 +1165,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             "family_preference": family_preference,
             "codex_launch_mode": codex_launch_mode or None,
             "sprint": sprint or None,
+            "dod_item": dod_item or None,
             "budget_event": budget_event or None,
             "review": review,
             **({"live_impact": True} if live_impact else {}),
@@ -1248,6 +1257,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                     family_preference=family_preference,
                     codex_launch_mode=codex_launch_mode,
                     sprint=sprint,
+                    dod_item=dod_item,
                     review=review,
                     live_impact=live_impact,
                     touches_production=touches_production,
@@ -1346,6 +1356,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         steward_report: bool,
         event: dict[str, Any],
         request_id: str,
+        dod_item: str = "",
         estimate_minutes: int | None = None,
         wait_spec: str = "",
         po_origin: str = "",
@@ -1418,6 +1429,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                         supersedes=supersedes,
                         codex_launch_mode=codex_launch_mode,
                         sprint=sprint,
+                        dod_item=dod_item,
                         steward_report=steward_report,
                     )
                     self.client.call("saveTaskMetadata", task_id=task_id, values=values)

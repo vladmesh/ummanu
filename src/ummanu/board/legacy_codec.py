@@ -43,6 +43,7 @@ TASK_KNOWN_METADATA = {
     "quota_snapshot_at",
     "codex_launch_mode",
     "sprint_ref",
+    "dod_item",
     "review",
     "live_impact",
 }

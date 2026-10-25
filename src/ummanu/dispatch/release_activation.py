@@ -68,6 +68,7 @@ def block_refused_activation(
                 "description": _description(task, facts),
                 "target": "ready",
                 "sprint": sprint,
+                **({"dod_item": task["dod_item"]} if sprint and task.get("dod_item") else {}),
                 "touches_production": project,
                 "origin": None if sprint else origin_field.po_origin(task),
                 "request_id": operation_request_id(ref, attempt),
