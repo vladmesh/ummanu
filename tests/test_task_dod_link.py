@@ -16,10 +16,10 @@ from tests.fakes.tick_board import SPRINT, CountingStore
 from tests.observer_identity import as_observer, unbound_observer
 from tests.po_handover_fakes import MemoryAudit
 from ummanu.board import sprint_dod
-from ummanu.board.backend import record_key
-from ummanu.cli import main
 from ummanu.board.audit_contract import PROTOCOL_EVENT_RECORD_TYPE
+from ummanu.board.backend import record_key
 from ummanu.board.tick_snapshot import tick_snapshot
+from ummanu.cli import main
 from ummanu.sprints import SprintReader, SprintWriter
 from ummanu.tasks import TaskError, TaskReader, TaskWriter
 from ummanu.web.page_sprint import sprint as sprint_page
@@ -112,6 +112,20 @@ class TaskDodLinkTests(unittest.TestCase):
         self.assertEqual(writer.reader.show(SPRINT)["dod"]["in_main"], 0)
         self.assertEqual(writer.mark_dod_in_main(**fields)["event_id"], first["event_id"])
         self.assertEqual(writer.reader.show(SPRINT)["dod"]["in_main"], 0)
+
+    def test_metadata_only_read_leaves_delivery_unknown_until_cards_and_audit_are_loaded(self):
+        writer = SprintWriter(self.store, data_dir=self.root)
+        writer.mark_dod_in_main(role="observer", actor="observer", reference=SPRINT,
+                                item="d2", evidence="operator proof")
+        metadata = writer.reader.show(SPRINT, include_cards=False)["dod"]
+        loaded = writer.reader.show(SPRINT, include_cards=True)["dod"]
+        self.assertIsNone(metadata["in_main"])
+        self.assertEqual(metadata["items"][1]["delivery"]["state"], "unknown")
+        self.assertIn("not loaded", metadata["items"][1]["delivery"]["reason"])
+        self.assertEqual((loaded["in_main"], loaded["met"]), (1, 0))
+        self.create(dod_item="d2")
+        self.assertIsNone(writer.reader.show(SPRINT, include_cards=False)["dod"]["in_main"])
+        self.assertEqual(writer.reader.show(SPRINT, include_cards=True)["dod"]["in_main"], 0)
 
     def test_manual_delivery_cli_refuses_cards_blank_evidence_and_foreign_or_terminal_sprint(self):
         writer = SprintWriter(self.store, data_dir=self.root)

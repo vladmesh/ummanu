@@ -25,6 +25,7 @@ from unittest import mock
 from urllib.parse import quote, urlencode
 
 from tests.webproto_sprint_fixtures import OBSERVER_PROFILE as PROTOCOL_OBSERVER, SprintProtocolFixture
+from ummanu.board import sprint_dod
 from ummanu.web.app import ROUTES, WebApp, cross_origin_reason
 from ummanu.web.server import build_server
 from ummanu.webproto.errors import (
@@ -176,6 +177,7 @@ def sprint_document(
                 "ref": reference,
                 "goal": "Make the web a client of the sprint contract",
                 "definition_of_done": "the form and the page exist and are tested",
+                "dod": sprint_dod.section(None),
                 "status": "open",
                 "product": "ummanu",
                 "issues": ["issue:web"],

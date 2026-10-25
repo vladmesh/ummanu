@@ -14,6 +14,7 @@ import unittest
 from typing import Any
 
 from tests.webproto_sprint_fixtures import SprintProtocolFixture
+from ummanu.board import sprint_dod
 from ummanu.config import validate
 from ummanu.status import collect_status
 from ummanu.tasks import TaskWriter
@@ -768,7 +769,7 @@ class DashboardPageTests(FakeAppFixture):
                 "ref": "sprint:7",
                 "sprint": {
                     "source": available(),
-                    "value": {"ref": "sprint:7", "status": "open", "goal": "g"},
+                    "value": {"ref": "sprint:7", "status": "open", "goal": "g", "dod": sprint_dod.section(None)},
                 },
                 "observer": {},
                 "work": {},
@@ -783,7 +784,7 @@ class DashboardPageTests(FakeAppFixture):
                 "ref": "sprint:7",
                 "sprint": {
                     "source": available(),
-                    "value": {"ref": "sprint:7", "status": "open", "goal": "g"},
+                    "value": {"ref": "sprint:7", "status": "open", "goal": "g", "dod": sprint_dod.section(None)},
                 },
                 "observer": {},
                 "work": {"waiting": {"state": "working", "reason": "busy"}},

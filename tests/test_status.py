@@ -13,6 +13,7 @@ from unittest import mock
 
 from tests.fakes.sprints import sprint_store, status_seed
 from ummanu import state_repo
+from ummanu.board import sprint_dod
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.cli import main
 from ummanu.config import validate, validate_instance
@@ -1257,6 +1258,7 @@ class HeadlessWorkStatusTests(unittest.TestCase):
         sprint = {
             "ref": "sprint:1416",
             "goal": "g",
+            "dod": sprint_dod.section(None),
             "status": "open",
             "current_task": None,
             "budget": {},
