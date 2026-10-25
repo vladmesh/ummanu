@@ -59,6 +59,8 @@ from ummanu.tasks import (
     specification_revision,
     standing_decision,
 )
+from ummanu.web.page_card import _timeline
+from ummanu.webproto.journal import CommittedAudit
 
 CARD_STATES = ("issues", "ready", "in_progress", "validate", "ci", "review", "assessment", "blocked", "done")
 
@@ -5099,6 +5101,85 @@ class RoutingJournalTests(CardStoreCase):
         self.assertIsInstance(snapshot, HeadRun)
         self.assertEqual(snapshot.prompt_path, str(document))
         self.assertEqual(snapshot.prompt_version, "sha256:" + hashlib.sha256(original).hexdigest())
+
+
+class HeadChangeJournalTests(CardStoreCase):
+    """A head change is one journal-only record that `task show` and the card Timeline read back."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.client = self.card_store(writer_seed(), instance_dir=self.tmpdir.name)
+        self.writer = TaskWriter(self.client, data_dir=self.tmpdir.name)
+
+    def _write(self, request_id: str = "head-change-run-a", **override: object) -> dict:
+        payload = {
+            "role": "worker",
+            "cause": "stall",
+            "reason": "no terminal output for 1900s",
+            "before": {"run_id": "run-a", "profile": "codex", "adapter": "codex", "model": "", "effort": "high"},
+            "after": {"run_id": "run-b", "profile": "codex", "adapter": "codex", "model": "", "effort": "high"},
+            **override,
+        }
+        return self.writer.head_changed(
+            role="dispatcher", actor="pilot", reference="ummanu-468", payload=payload, request_id=request_id
+        )
+
+    def _show(self) -> dict:
+        output = io.StringIO()
+        with (
+            mock.patch("ummanu.task_commands.card_client", return_value=self.client),
+            mock.patch.dict("os.environ", {}, clear=True),
+            contextlib.redirect_stdout(output),
+        ):
+            code = main(["task", "show", "--ref", "ummanu-468", "--instance", self.tmpdir.name])
+        self.assertEqual(code, 0)
+        return json.loads(output.getvalue())
+
+    def test_task_show_and_the_timeline_read_the_written_change(self) -> None:
+        state = self.client.state(12)
+        self._write()
+
+        self.assertEqual(
+            [call for call in self.client.calls if call[0] not in _READ_METHODS],
+            [],
+            "a head change is history; it must not mutate the card",
+        )
+        card = self._show()
+        self.assertEqual(self.client.state(12), state)
+        [change] = card["head_changes"]
+        self.assertEqual(
+            (change["role"], change["change"], change["cause"], change["reason"]),
+            ("worker", "replaced", "stall", "no terminal output for 1900s"),
+        )
+        self.assertEqual((change["before"]["run_id"], change["after"]["run_id"]), ("run-a", "run-b"))
+        self.assertTrue(change["at"])
+        page = CommittedAudit(self.writer.audit).page("ummanu-468", cursor=None, limit=500, now=0.0)
+        html = _timeline(list(page.items))
+        self.assertIn("worker replaced", html)
+        self.assertIn("confirmed stall: codex → codex (same profile, new run)", html)
+        self.assertIn(change["at"], html)
+
+    def test_a_replay_commits_once_and_another_payload_under_that_id_is_refused(self) -> None:
+        first = self._write()
+        replayed = self._write()
+        with self.assertRaises(TaskError) as refused:
+            self._write(after=None)
+
+        self.assertEqual((first["replayed"], replayed["replayed"]), (False, True))
+        self.assertEqual(refused.exception.code, "validation")
+        self.assertEqual(len(self._show()["head_changes"]), 1)
+        self._write("head-change-run-b", before={"run_id": "run-b", "profile": "codex"}, after=None)
+        self.assertEqual([change["change"] for change in self._show()["head_changes"]], ["replaced", "stopped"])
+
+    def test_only_the_dispatcher_writes_a_valid_change(self) -> None:
+        with self.assertRaisesRegex(TaskError, "not permitted"):
+            self.writer.head_changed(
+                role="worker", actor="w", reference="ummanu-468", payload={}, request_id="head-change-w"
+            )
+        with self.assertRaisesRegex(TaskError, "cause is one of"):
+            self._write("head-change-bad", cause="guess")
+        self.assertEqual(self._show()["head_changes"], [])
 
 
 class ReportDurabilityGateTests(CardStoreCase):

@@ -641,8 +641,8 @@ The `UNIQUE (request_id)` on comment tables means at most one comment per claime
   `settle_stale_staged` before its gate counts staged rows, and settles each row staged longer than
   `STALE_STAGED_GRACE_SECONDS` (15 min). It commits the row when its effect is proven present: the
   record is its whole effect (`attempt.usage`, `attempt.outcome`, guard decisions, `routing`,
-  `outcome_round_context`, anything marked `backend.revision = "not_written"`), or an effect table
-  (`sprint_budget_events`, `sprint_comments`, `sprint_decisions`, `task_comments`,
+  `head_changed`, `outcome_round_context`, anything marked `backend.revision = "not_written"`), or an
+  effect table (`sprint_budget_events`, `sprint_comments`, `sprint_decisions`, `task_comments`,
   `issue_comments`, `product_comments`) holds a row claiming its request id. Every other row is
   refused, whether its effect is absent or cannot be proven. Refusal moves that same row to
   `discarded` in one statement guarded by `status = 'staged'`, which is the only writer of that

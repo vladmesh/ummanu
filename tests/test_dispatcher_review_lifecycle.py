@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from ummanu.board.head_changes import HEAD_CHANGED_KIND, head_changes
 from ummanu.checkpoint import CheckpointResult
 from ummanu.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
 from ummanu.dispatch.host import CommandHostRuntime
@@ -1402,6 +1403,18 @@ class ProductionPauseTests(unittest.TestCase):
         self.assertEqual(record.handle, "")
         self.assertEqual(record.workspace, workspace)
         self.assertGreater(record.paused_worker_at, 0)
+
+    def test_freeze_journals_the_worker_stop_as_a_manual_head_change(self) -> None:
+        self.runtime.production_tick()
+        stopped = str(self.record().worker_head_run["run_id"])
+
+        self.pause("freeze")
+        self.runtime.resume_pipeline(actor="operator")
+
+        [change] = head_changes(task_audit_for(self.board).events(self.ref, kind=HEAD_CHANGED_KIND))
+        self.assertEqual((change["role"], change["change"], change["cause"]), ("worker", "stopped", "operator_stop"))
+        self.assertEqual((change["before"]["run_id"], change["after"]), (stopped, None))
+        self.assertEqual(change["reason"], "pipeline freeze by operator: host maintenance")
 
     def test_freeze_stops_the_reviewer_head(self) -> None:
         self.drive_into_review()

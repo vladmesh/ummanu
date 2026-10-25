@@ -3222,6 +3222,51 @@ carries the head that earned it.
 Reader: `ummanu.routing_journal.attempts(events, ref)` returns a finished card's attempts with heads
 and outcome. These events travel in the recovery checkpoint with the rest of the event log.
 
+### Head changes
+
+A worker or reviewer head of a card that the dispatcher stopped is one journal-only
+`kind: "head_changed"` record on that card, written through the normal pending/commit path. It is an
+event of the card's history, not a card state: it moves nothing on the board, charges no budget and
+wakes nobody. Each producer writes after the stop was confirmed; a refused or unconfirmed stop writes
+nothing. `cause` names the producer:
+
+- `stall`: the wait watchdog's confirmed stall (or its silence ceiling) respawned the head, or
+  escalated the next stall to Blocked;
+- `head_exit`: the watchdog saw the head's run end (`Dead`) and respawned the head, or escalated;
+- `provider_failover`: a turn ended on a provider error and the role moved along its fallback chain,
+  or the chain had nothing launchable and the card was Blocked;
+- `operator_stop`: a pipeline freeze stopped the head; the reason is
+  `pipeline freeze by <actor>: <reason>`.
+
+```json
+{"kind": "head_changed", "ref": "PROJECT-N", "occurred_at": "...", "payload": {
+  "role": "worker", "change": "replaced", "cause": "stall",
+  "reason": "no terminal output for 1900s",
+  "before": {"run_id": "...", "profile": "codex-terra-high", "adapter": "codex",
+             "model": "gpt-5.6-terra", "effort": "high"},
+  "after": {"run_id": "...", "profile": "codex-terra-high", "adapter": "codex",
+            "model": "gpt-5.6-terra", "effort": "high"},
+  "requested": ""}}
+```
+
+`before` is the stopped `HeadRun`, which must be this card's own (a `card` `TaskRef` naming the card
+and the worker or reviewer role), so observer, PO and standing heads never appear here; a run that had
+already ended before the operation is not attributed to it. `after` is the successor actually launched
+and recorded (`change: "replaced"`), or `null` (`change: "stopped"`) when the role was left without one;
+a successor whose bring-up is still unresolved writes nothing. A same-profile respawn differs in
+`run_id`. `requested` is the profile a failover walked its chain from, which differs from
+`before.profile` when the stopped head was itself a fallback. The time of the change is the record's
+`occurred_at`.
+
+The request id is the stopped run's (`dispatcher-<attempt>-head-change-<ref>-<role>-<run_id>`): a replay
+commits nothing new and never rewrites recorded facts, and the next run's stop is a record of its own.
+Stops from before these records existed are not reconstructed.
+
+Readers: `task show` carries `head_changes`, oldest first, each with `at`, `request_id` and the payload.
+The card page's Timeline draws each change between the transitions in time order: role, stopped or
+replaced, cause, profile before -> after, run ids and reason. Raw events and their cursors are
+unchanged.
+
 ### Outcome lineage
 
 Worker and reviewer launches create a durable round handoff. The dispatcher adds the exact report,

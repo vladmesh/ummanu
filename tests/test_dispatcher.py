@@ -23,6 +23,7 @@ from unittest import mock
 from tests.fakes.review_packet import marker_event
 from tests.observer_identity import bind_observer
 from ummanu._fsutil import file_lock, try_file_lock, write_json
+from ummanu.board.head_changes import HEAD_CHANGED_KIND, head_changes
 from ummanu.board.models import Actor, AttemptUsageOutcome, EntityKind, Event, EventKind
 from ummanu.board.sprint_read import BUDGET_UNCHARGED_INFRASTRUCTURE
 from ummanu.checkpoint import CheckpointResult
@@ -2929,6 +2930,92 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         result = self.tick()
 
         self.assertEqual(result["action"], "worker-respawned")
+
+    def _head_changes(self) -> list[dict]:
+        return head_changes(self.writer.audit.events("ummanu-510", kind=HEAD_CHANGED_KIND))
+
+    def _kill_recorded_head(self, kind: str) -> str:
+        """Leave the role's head dead behind a reaped pid, and hand back its run id."""
+        self.host.head_pid = self._dead_pid()
+        record = self._record_of()
+        run = record.review_head_run if kind == "review" else record.worker_head_run
+        leaf = record.review_leaf if kind == "review" else record.worker_leaf
+        self.host._write_head_pid(kind, "ummanu-510", head_run=run, leaf=leaf)
+        setattr(self.host, f"{kind}_status_result", {"known": True, "live": False, "reason": "missing-terminal"})
+        return str(run["run_id"])
+
+    def test_a_dead_worker_respawn_and_its_escalation_are_head_changes_of_the_card(self) -> None:
+        self.start_dispatcher()
+        self.tick()
+        dead = self._kill_recorded_head("worker")
+
+        self.assertEqual(self.tick()["action"], "worker-respawned")
+
+        successor = str(self._record_of().worker_head_run["run_id"])
+        [replaced] = self._head_changes()
+        self.assertEqual((replaced["role"], replaced["change"], replaced["cause"]), ("worker", "replaced", "head_exit"))
+        self.assertEqual((replaced["before"]["run_id"], replaced["after"]["run_id"]), (dead, successor))
+        self.assertEqual((replaced["before"]["profile"], replaced["after"]["profile"]), ("codex", "codex"))
+        self.assertIn("gone", replaced["reason"])
+        self.assertTrue(replaced["at"])
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "in_progress")
+
+        self.assertEqual(self.tick()["to"], "blocked")
+
+        changes = self._head_changes()
+        self.assertEqual([change["change"] for change in changes], ["replaced", "stopped"])
+        self.assertEqual((changes[1]["before"]["run_id"], changes[1]["after"]), (successor, None))
+        self.assertEqual(changes[0], replaced, "a later change leaves the recorded one as it was")
+
+    def test_a_stalled_worker_respawn_is_a_same_profile_head_change_recorded_once(self) -> None:
+        self.start_dispatcher()
+        self.tick()
+        self.tick()
+        stalled = str(self._record_of().worker_head_run["run_id"])
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        self.host.worker_status_result = {
+            "known": True,
+            "live": True,
+            "reason": "live",
+            "last_activity": time.time() - stall_seconds("worker") - 1,
+        }
+
+        self.assertEqual(self.tick()["action"], "worker-respawned")
+        self.host.worker_status_result = None
+        self.tick()
+
+        [replaced] = self._head_changes()
+        self.assertEqual((replaced["cause"], replaced["before"]["run_id"]), ("stall", stalled))
+        self.assertNotEqual(replaced["after"]["run_id"], stalled)
+        self.assertEqual(replaced["before"]["profile"], replaced["after"]["profile"])
+
+    def test_a_dead_reviewer_respawn_is_a_reviewer_head_change(self) -> None:
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.tick()
+        dead = self._kill_recorded_head("review")
+
+        self.assertEqual(self.tick()["action"], "review-respawned")
+
+        [replaced] = self._head_changes()
+        self.assertEqual((replaced["role"], replaced["cause"]), ("reviewer", "head_exit"))
+        self.assertEqual(replaced["before"]["run_id"], dead)
+        self.assertEqual(replaced["after"]["run_id"], self._record_of().review_head_run["run_id"])
+        self.assertEqual(replaced["after"]["profile"], "codex-reviewer")
+
+    def test_an_unconfirmed_stop_is_no_head_change(self) -> None:
+        self.start_dispatcher()
+        self.tick()
+        self._kill_recorded_head("worker")
+        self.assertEqual(self.tick()["action"], "worker-respawned")
+        self.host.fail_stop_head_reason = "Orca cannot confirm terminal stop"
+
+        self.assertEqual(self.tick()["action"], "worker-stop-unconfirmed")
+
+        self.assertEqual([change["change"] for change in self._head_changes()], ["replaced"])
+        self.host.fail_stop_head_reason = ""
+        self.assertEqual(self.tick()["to"], "blocked")
+        self.assertEqual([change["change"] for change in self._head_changes()], ["replaced", "stopped"])
 
     def test_worker_without_first_output_is_respawned_within_the_short_window(self) -> None:
         """A live login prompt that never progresses is confirmed stalled by the ladder.

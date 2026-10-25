@@ -14,6 +14,7 @@ from typing import Any
 from unittest import mock
 
 from tests.dispatcher_fixtures import DispatcherRuntimeFixture
+from ummanu.board.head_changes import HEAD_CHANGED_KIND, head_changes
 from ummanu.dispatch.production import _budget_event_type
 from ummanu.dispatch.provider_failure import PROVIDER_UNAVAILABLE_READY_ACTION
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id
@@ -282,6 +283,58 @@ class ProviderFailureFallbackTests(DispatcherRuntimeFixture, unittest.TestCase):
         moves = [event for event in self.writer.audit.events(REF) if "provider-blocked" in str(event.get("request_id"))]
         self.assertEqual(len(moves), 1)
         self.assertIn("refused by its provider, not stalled", json.dumps(moves[0]))
+
+    def _head_changes(self) -> list[dict[str, Any]]:
+        return head_changes(self.writer.audit.events(REF, kind=HEAD_CHANGED_KIND))
+
+    def test_a_worker_failover_is_a_head_change_naming_the_requested_and_the_launched_profile(self) -> None:
+        self.catalog.profiles["codex"]["fallback"] = ["claude-opus"]
+        self.start_dispatcher()
+        self.tick()
+        failed_run = self._fail("worker", codex_first_turn_failure(codex_401_turn(self._record().worker_started_at)))
+
+        self.assertEqual(self.tick()["action"], "worker-provider-fallback")
+
+        [change] = self._head_changes()
+        self.assertEqual(
+            (change["role"], change["change"], change["cause"]), ("worker", "replaced", "provider_failover")
+        )
+        self.assertEqual((change["before"]["run_id"], change["before"]["profile"]), (failed_run, "codex"))
+        self.assertEqual(
+            (change["after"]["run_id"], change["after"]["profile"]),
+            (self._record().worker_head_run["run_id"], "claude-opus"),
+        )
+        self.assertEqual(change["requested"], "codex")
+        self.assertIn("openai-sub", change["reason"])
+        self.assertNotIn("sk-svcac", json.dumps(change))
+        self.assertEqual(self.reader.show(REF)["state"], "in_progress")
+
+    def test_a_reviewer_failover_is_a_reviewer_head_change(self) -> None:
+        self.catalog.profiles["codex-reviewer"]["fallback"] = ["claude-opus"]
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        error = codex_first_turn_failure(codex_401_turn(self._record().review_started_at))
+        assert error is not None
+        failed_run = self._fail("review", error)
+
+        with mock.patch("time.time", return_value=error.at + 60):
+            self.assertEqual(self.tick()["action"], "review-provider-fallback")
+
+        [change] = self._head_changes()
+        self.assertEqual((change["role"], change["before"]["run_id"]), ("reviewer", failed_run))
+        self.assertEqual((change["before"]["profile"], change["after"]["profile"]), ("codex-reviewer", "claude-opus"))
+
+    def test_a_failover_with_nothing_launchable_is_a_stop_without_successor(self) -> None:
+        self.start_dispatcher()
+        self.tick()
+        failed_run = self._fail("worker", codex_first_turn_failure(codex_401_turn(self._record().worker_started_at)))
+
+        self.assertEqual(self.tick()["to"], "blocked")
+
+        [change] = self._head_changes()
+        self.assertEqual((change["change"], change["after"]), ("stopped", None))
+        self.assertEqual((change["cause"], change["before"]["run_id"]), ("provider_failover", failed_run))
 
     def test_the_ready_return_is_no_budget_event_and_a_plain_preempt_still_is(self) -> None:
         def moved(request_id: str) -> dict[str, Any]:

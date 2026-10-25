@@ -69,7 +69,7 @@ REFUSAL_KEY = "stale_refusal"
 #: (guard decisions, product-run events) says the same thing about itself.
 _RECORD_ONLY_TYPED = frozenset({EventKind.ATTEMPT_USAGE.value, EventKind.ATTEMPT_OUTCOME.value})
 _RECORD_ONLY_GENERIC = frozenset(
-    {"sprint_guard_denied", "sprint_guard_override", "outcome_round_context", "routing"}
+    {"sprint_guard_denied", "sprint_guard_override", "outcome_round_context", "routing", "head_changed"}
 )
 
 #: The effect tables whose rows claim the request that wrote them (`request_id` column). A row
