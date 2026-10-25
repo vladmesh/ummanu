@@ -705,8 +705,10 @@ class MigrationScriptTests(unittest.TestCase):
             output.getvalue().strip().split(";\n\n"),
             [
                 "ALTER TABLE tasks DROP CONSTRAINT tasks_state_check",
-                "ALTER TABLE tasks ADD CONSTRAINT task_state_in_vocabulary CHECK "
-                "(state IN ('issues','ready','in_progress','validate','assessment','blocked','done','ci','review'));",
+                (
+                    "ALTER TABLE tasks ADD CONSTRAINT task_state_in_vocabulary CHECK "
+                    "(state IN ('issues','ready','in_progress','validate','assessment','blocked','done','ci','review'));"
+                ),
             ],
         )
 

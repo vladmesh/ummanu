@@ -129,9 +129,8 @@ class DispatcherStageTests(unittest.TestCase):
                 edge = card_transition(Role.DISPATCHER, source, target)
                 self.assertEqual((edge.source, edge.target), (source, target))
             for role in Role:
-                with self.subTest(role=role, source=source):
-                    with self.assertRaises(CardTransitionForbidden):
-                        card_transition(role, source, CardState.DONE)
+                with self.subTest(role=role, source=source), self.assertRaises(CardTransitionForbidden):
+                    card_transition(role, source, CardState.DONE)
 
     def test_the_steward_stops_a_card_under_review_only_with_a_reason(self) -> None:
         def facts(reason: str) -> CardMoveFacts:
