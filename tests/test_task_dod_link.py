@@ -11,9 +11,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes.tick_board import SPRINT, CountingStore
 from tests.observer_identity import as_observer, unbound_observer
 from tests.po_handover_fakes import MemoryAudit
-from tests.test_tick_board_snapshot import CountingStore, SPRINT
 from ummanu.board import sprint_dod
 from ummanu.board.backend import record_key
 from ummanu.cli import main
