@@ -3252,11 +3252,17 @@ nothing. `cause` names the producer:
 `before` is the stopped `HeadRun`, which must be this card's own (a `card` `TaskRef` naming the card
 and the worker or reviewer role), so observer, PO and standing heads never appear here; a run that had
 already ended before the operation is not attributed to it. `after` is the successor actually launched
-and recorded (`change: "replaced"`), or `null` (`change: "stopped"`) when the role was left without one;
-a successor whose bring-up is still unresolved writes nothing. A same-profile respawn differs in
-`run_id`. `requested` is the profile a failover walked its chain from, which differs from
-`before.profile` when the stopped head was itself a fallback. The time of the change is the record's
-`occurred_at`.
+and recorded (`change: "replaced"`), or `null` (`change: "stopped"`) when the role was left without one.
+A same-profile respawn differs in `run_id`. `requested` is the profile a failover walked its chain from,
+which differs from `before.profile` when the stopped head was itself a fallback. The time of the change
+is the record's `occurred_at`.
+
+A respawn or failover owes its change on the dispatcher record (`head_changes_owed`, per role) from the
+confirmed stop, with the original `before`, cause, reason, `requested` and request id. The role's next
+launched run completes it as `replaced` when its routing is recorded: in the same tick, after a reviewer
+infrastructure retry, or when a pending launch is adopted. A terminal effect of the round completes it
+as `stopped`. Until one of these happens nothing is written. A freeze and the escalation of a second
+stall write `stopped` at once.
 
 The request id is the stopped run's (`dispatcher-<attempt>-head-change-<ref>-<role>-<run_id>`): a replay
 commits nothing new and never rewrites recorded facts, and the next run's stop is a record of its own.

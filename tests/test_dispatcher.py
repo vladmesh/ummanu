@@ -117,6 +117,8 @@ from ummanu.projects.contract import (
 )
 from ummanu.runtime import role_env
 from ummanu.runtime.codex_preflight import ensure_codex_update_modal_dismissed
+from ummanu.web.page_card import _timeline
+from ummanu.webproto.journal import CommittedAudit
 
 GITHUB_FAILED_LOG_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "github_actions_failed_logs"
 from tests.dispatcher_fixtures import (
@@ -127,6 +129,7 @@ from tests.dispatcher_fixtures import (
     SupervisedBackend,
     clear_env as _clear_env,
     ensure_attempt,
+    settle_stopped_reviewers,
     write_heartbeat,
 )
 from tests.fakes.dispatcher import (
@@ -3002,6 +3005,41 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(replaced["before"]["run_id"], dead)
         self.assertEqual(replaced["after"]["run_id"], self._record_of().review_head_run["run_id"])
         self.assertEqual(replaced["after"]["profile"], "codex-reviewer")
+
+    def test_a_reviewer_replaced_after_an_infrastructure_retry_is_one_head_change(self) -> None:
+        settled = settle_stopped_reviewers(self.host)
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        dead = self._kill_recorded_head("review")
+        self.host.fail_review_error = HostError("orca terminal split failed: terminal_exited")
+
+        held = self.tick()
+
+        self.assertEqual(held["action"], "review-infrastructure-retry", held)
+        self.assertEqual(settled, [dead])
+        self.assertEqual(self._head_changes(), [], "no successor exists yet")
+        self.assertEqual(self._record_of().head_changes_owed["review"]["before"]["run_id"], dead)
+
+        self.host.fail_review_error = None
+        self.host.head_pid = os.getpid()
+        self.assertEqual(self.tick()["action"], "review-restarted")
+        self.host.review_status_result = None
+        self.tick()
+        self.tick()
+
+        successor = str(self._record_of().review_head_run["run_id"])
+        [replaced] = self._head_changes()
+        self.assertEqual((replaced["role"], replaced["change"], replaced["cause"]), ("reviewer", "replaced", "head_exit"))
+        self.assertEqual((replaced["before"]["run_id"], replaced["after"]["run_id"]), (dead, successor))
+        self.assertEqual((replaced["before"]["profile"], replaced["after"]["profile"]), ("codex-reviewer",) * 2)
+        self.assertEqual(self._record_of().head_changes_owed, {})
+        output = io.StringIO()
+        with mock.patch("ummanu.task_commands.card_client", return_value=self.board), contextlib.redirect_stdout(output):
+            self.assertEqual(task_main(["task", "show", "--ref", "ummanu-510", "--instance", str(self.data_dir)]), 0)
+        self.assertEqual(json.loads(output.getvalue())["head_changes"], [replaced])
+        page = CommittedAudit(self.writer.audit).page("ummanu-510", cursor=None, limit=500, now=0.0)
+        self.assertIn("head exited: codex-reviewer → codex-reviewer (same profile, new run)", _timeline(list(page.items)))
 
     def test_an_unconfirmed_stop_is_no_head_change(self) -> None:
         self.start_dispatcher()

@@ -14,7 +14,12 @@ from ummanu.board.head_changes import (
     head_change_payload,
     head_changes,
 )
-from ummanu.dispatch.head_changes import record_head_change
+from ummanu.dispatch.head_changes import (
+    owe_head_change,
+    record_head_stop,
+    settle_head_change,
+    settle_unreplaced,
+)
 from ummanu.dispatch.state import DispatcherRecord
 from ummanu.runtime.head import HeadRun, HeadSpec, StopInitiator, TaskRef
 from ummanu.web.page_card import _timeline
@@ -85,25 +90,24 @@ class RecordHeadChangeTests(unittest.TestCase):
             claimed_at=0.0,
         )
 
-    def change(
-        self, before: HeadRun, *, successor: HeadRun | None, cause: str = CAUSE_STALL, **extra: Any
-    ) -> None:
-        if successor is not None:
-            self.record.worker_head_run = successor.to_json()  # type: ignore[assignment]
-        record_head_change(
-            self.runtime,
-            REF,
+    def owe(self, before: HeadRun, *, cause: str = CAUSE_STALL, **extra: Any) -> None:
+        owe_head_change(
             self.record,
+            REF,
             kind="worker",
             cause=cause,
             reason="no terminal output for 1900s",
             before=before.to_json(),
-            successor=successor is not None,
             **extra,
         )
 
+    def launch(self, successor: HeadRun) -> None:
+        self.record.worker_head_run = successor.to_json()  # type: ignore[assignment]
+        settle_head_change(self.runtime, REF, self.record, kind="worker", successor=True)
+
     def test_a_replacement_on_the_same_profile_names_both_runs(self) -> None:
-        self.change(run("run-a"), successor=run("run-b"))
+        self.owe(run("run-a"))
+        self.launch(run("run-b"))
 
         [change] = head_changes(self.journal.events(REF))
         self.assertEqual((change["role"], change["change"], change["cause"]), ("worker", "replaced", "stall"))
@@ -112,62 +116,99 @@ class RecordHeadChangeTests(unittest.TestCase):
             (change["before"]["profile"], change["after"]["profile"]), ("codex-high", "codex-high")
         )
         self.assertEqual(change["at"], "2026-01-01T00:00:00Z")
+        self.assertEqual(self.record.head_changes_owed, {})
 
-    def test_a_stop_without_successor_has_no_after(self) -> None:
-        self.change(run("run-a"), successor=None, cause=CAUSE_OPERATOR_STOP)
+    def test_the_owed_change_survives_a_record_restart_until_the_successor_launches(self) -> None:
+        self.owe(run("run-a"), cause=CAUSE_PROVIDER_FAILOVER, requested="codex-high")
+        # A deferred launch ends the tick: the run on the record is still the stopped one, settled.
+        self.record.worker_head_run = (
+            run("run-a").finishing(StopInitiator("provider-failure")).exited().to_json()
+        )  # type: ignore[assignment]
+        settle_head_change(self.runtime, REF, self.record, kind="worker", successor=True)
+        self.record = DispatcherRecord.from_json(self.record.to_json())
 
-        [change] = head_changes(self.journal.events(REF))
-        self.assertEqual((change["change"], change["after"]), ("stopped", None))
-
-    def test_a_failover_keeps_the_requested_profile_apart_from_the_run_that_worked(self) -> None:
-        self.change(
-            run("run-a", "claude-fallback"),
-            successor=run("run-b", "codex-next"),
-            cause=CAUSE_PROVIDER_FAILOVER,
-            requested="codex-high",
-        )
+        self.assertEqual(self.journal.writes, [])
+        self.launch(run("run-b", "claude-fallback"))
 
         [change] = head_changes(self.journal.events(REF))
         self.assertEqual(
-            (change["requested"], change["before"]["profile"], change["after"]["profile"]),
-            ("codex-high", "claude-fallback", "codex-next"),
+            (change["cause"], change["requested"], change["before"]["run_id"], change["after"]["profile"]),
+            ("provider_failover", "codex-high", "run-a", "claude-fallback"),
+        )
+        self.assertNotIn("head_changes_owed", self.record.to_json())
+
+    def test_a_round_that_ends_without_a_successor_writes_a_stop(self) -> None:
+        self.owe(run("run-a"))
+
+        settle_unreplaced(self.runtime, REF, self.record)
+
+        [change] = head_changes(self.journal.events(REF))
+        self.assertEqual((change["change"], change["after"]), ("stopped", None))
+        self.assertEqual(self.record.head_changes_owed, {})
+
+    def test_an_immediate_stop_has_no_after(self) -> None:
+        record_head_stop(
+            self.runtime,
+            REF,
+            self.record,
+            kind="review",
+            cause=CAUSE_OPERATOR_STOP,
+            reason="pipeline freeze by operator: maintenance",
+            before=run("run-r", role="reviewer").to_json(),
         )
 
-    def test_heads_that_are_not_this_cards_role_write_nothing(self) -> None:
+        [change] = head_changes(self.journal.events(REF))
+        self.assertEqual((change["role"], change["change"], change["after"]), ("reviewer", "stopped", None))
+
+    def test_heads_that_are_not_this_cards_role_owe_nothing(self) -> None:
         for before in (
             run("run-o", task=TaskRef.sprint("sprint:9"), role="observer"),
             run("run-s", task=TaskRef.standing("po"), role="po"),
             run("run-x", task=TaskRef.card("proj-8")),
             run("run-r", role="reviewer"),
+            run("run-a").finishing(StopInitiator("review-freeze")).exited(),
         ):
             with self.subTest(before=before.run_id):
-                self.change(before, successor=None)
-        self.change(run("run-own"), successor=None)
-        self.assertEqual([write["before"]["run_id"] for write in self.journal.writes], ["run-own"])
-
-    def test_a_run_already_ended_before_the_operation_was_not_stopped_by_it(self) -> None:
-        settled = run("run-a").finishing(StopInitiator("review-freeze")).exited()
-
-        self.change(settled, successor=None, cause=CAUSE_OPERATOR_STOP)
-
+                self.owe(before)
+                self.assertEqual(self.record.head_changes_owed, {})
+        settle_unreplaced(self.runtime, REF, self.record)
         self.assertEqual(self.journal.writes, [])
 
-    def test_a_relaunch_that_left_the_stopped_run_on_the_record_is_refused(self) -> None:
-        with self.assertRaisesRegex(ValueError, "without a run of its own"):
-            self.change(run("run-a"), successor=run("run-a"))
+    def test_a_launch_of_no_distinct_card_run_leaves_the_change_owed(self) -> None:
+        self.owe(run("run-a"))
+
+        self.launch(run("run-a"))
+        self.launch(run("run-x", task=TaskRef.card("proj-8")))
+
         self.assertEqual(self.journal.writes, [])
+        self.assertEqual(self.record.head_changes_owed["worker"]["before"]["run_id"], "run-a")
 
     def test_a_replay_keeps_the_first_facts_and_the_next_run_gets_its_own_record(self) -> None:
-        self.change(run("run-a"), successor=run("run-b"))
-        self.change(run("run-a"), successor=run("run-c", "codex-other"))
-        self.change(run("run-b"), successor=run("run-c"))
+        self.owe(run("run-a"))
+        self.owe(run("run-a"), cause=CAUSE_OPERATOR_STOP)
+        self.launch(run("run-b"))
+        settle_head_change(self.runtime, REF, self.record, kind="worker", successor=True)
+        self.owe(run("run-b"))
+        self.launch(run("run-c"))
 
         changes = head_changes(self.journal.events(REF))
         self.assertEqual(
-            [(change["before"]["run_id"], change["after"]["run_id"]) for change in changes],
-            [("run-a", "run-b"), ("run-b", "run-c")],
+            [(change["cause"], change["before"]["run_id"], change["after"]["run_id"]) for change in changes],
+            [("stall", "run-a", "run-b"), ("stall", "run-b", "run-c")],
         )
         self.assertEqual(len({change["request_id"] for change in changes}), 2)
+
+    def test_a_committed_change_is_not_written_again(self) -> None:
+        self.owe(run("run-a"))
+        owed = dict(self.record.head_changes_owed)
+        self.launch(run("run-b"))
+        self.record.head_changes_owed = owed
+
+        self.launch(run("run-c"))
+
+        [change] = head_changes(self.journal.events(REF))
+        self.assertEqual(change["after"]["run_id"], "run-b")
+        self.assertEqual(self.record.head_changes_owed, {})
 
 
 class HeadChangePayloadTests(unittest.TestCase):

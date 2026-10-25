@@ -16,7 +16,7 @@ from typing import Any
 
 from ummanu.board.head_changes import CAUSE_HEAD_EXIT, CAUSE_STALL
 from ummanu.dispatch import attempt_accounting
-from ummanu.dispatch.head_changes import record_head_change, role_run
+from ummanu.dispatch.head_changes import owe_head_change, record_head_stop, role_run
 from ummanu.dispatch.head_vitality import (
     snapshots_from_status as _snapshots_from_status,
     status_has_vitality_observation,
@@ -1357,13 +1357,15 @@ def _respawn_wait_bring_up(
         )
         if unconfirmed is not None:
             return unconfirmed
+        owe_head_change(
+            record, ref, kind=kind, cause=cause, reason=trigger, before=stopped, attempt_id=attempt_id
+        )
         # One bring-up path for the reviewer, shared with the normal launch and the recovery path.
         outcome = _start_review(
             runtime, task, records, record, attempt_id, action="review-respawned", payload=payload
         )
         if outcome.get("status") != "ok":
             runtime.save_records(payload, records)
-            _record_unreplaced(runtime, ref, record, outcome, kind=kind, cause=cause, reason=trigger, before=stopped)
             return outcome
     else:
         step = "advance"
@@ -1371,6 +1373,9 @@ def _respawn_wait_bring_up(
         unconfirmed = runtime._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
         if unconfirmed is not None:
             return unconfirmed
+        owe_head_change(
+            record, ref, kind=kind, cause=cause, reason=trigger, before=stopped, attempt_id=attempt_id
+        )
         failure = _write_worker_relaunch_intent(
             runtime, payload, records, ref, record, action="worker-respawn", task=task
         )
@@ -1396,7 +1401,6 @@ def _respawn_wait_bring_up(
         )
         if launched is None:
             assert failed is not None
-            _record_unreplaced(runtime, ref, record, failed, kind=kind, cause=cause, reason=trigger, before=stopped)
             return failed
         record.state = "claimed"
         # The replacement head never saw the bounced report, so it owes no answer for it.
@@ -1416,17 +1420,6 @@ def _respawn_wait_bring_up(
     setattr(record, f"{kind}_respawns", respawns)
     records[ref] = record
     runtime.save_records(payload, records)
-    record_head_change(
-        runtime,
-        ref,
-        record,
-        kind=kind,
-        cause=cause,
-        reason=trigger,
-        before=stopped,
-        successor=True,
-        attempt_id=attempt_id,
-    )
     # Leave a trace, or the operator cannot tell a first stall from an already-restarted head.
     runtime.writer.comment(
         role="dispatcher",
@@ -1460,28 +1453,6 @@ def _respawn_wait_bring_up(
         step=step,
         action=f"{kind}-respawned",
         **({"reason": trigger} if degraded else {}),
-    )
-
-
-def _record_unreplaced(
-    runtime: Any,
-    ref: str,
-    record: DispatcherRecord,
-    outcome: dict[str, Any],
-    *,
-    kind: str,
-    cause: str,
-    reason: str,
-    before: dict[str, Any],
-) -> None:
-    """A respawn whose successor bring-up blocked the card is a stop without a successor.
-
-    Any other refusal may still leave a launched head for recovery to adopt, so it records nothing.
-    """
-    if outcome.get("status") != "blocked":
-        return
-    record_head_change(
-        runtime, ref, record, kind=kind, cause=cause, reason=reason, before=before, successor=False
     )
 
 
@@ -1522,7 +1493,7 @@ def _escalate_wait(
         unconfirmed = runtime._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
     if unconfirmed is not None:
         return unconfirmed
-    record_head_change(
+    record_head_stop(
         runtime,
         ref,
         record,
@@ -1530,7 +1501,6 @@ def _escalate_wait(
         cause=cause,
         reason=f"{trigger} after respawn",
         before=stopped,
-        successor=False,
         attempt_id=attempt_id,
     )
     request_id = _attempt_request_id(

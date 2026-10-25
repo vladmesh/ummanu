@@ -37,7 +37,7 @@ from typing import Any
 
 from ummanu.board.head_changes import CAUSE_PROVIDER_FAILOVER
 from ummanu.dispatch.card_roles import card_kind, head_role
-from ummanu.dispatch.head_changes import record_head_change, role_run
+from ummanu.dispatch.head_changes import owe_head_change, role_run
 from ummanu.dispatch.helpers import safe_one_line
 from ummanu.dispatch.launch import (
     STAGE_RESPAWN,
@@ -322,29 +322,23 @@ def _fall_back(
         # The walk can only land here when the head's resource could not be named or recorded, so
         # no resource verdict stands between it and the provider that refused it.
         choice = HeadChoice(choice.preferred, "", choice.readiness, choice.rejected)
+    owe_head_change(
+        record,
+        ref,
+        kind=kind,
+        cause=CAUSE_PROVIDER_FAILOVER,
+        reason=f"provider error from {resource or 'its provider'}: {summary}",
+        before=stopped,
+        requested=choice.preferred,
+        attempt_id=attempt_id,
+    )
     if not choice.resolved:
-        outcome = _empty_chain(
+        return _empty_chain(
             runtime, task, record, records, payload, attempt_id, kind=kind, evidence=evidence, choice=choice
         )
-    elif review:
-        outcome = _relaunch_reviewer(runtime, task, record, records, payload, attempt_id, choice, evidence)
-    else:
-        outcome = _relaunch_worker(runtime, task, record, records, payload, attempt_id, choice, evidence)
-    replaced = outcome.get("status") == "ok" and outcome.get("action") == f"{kind}-provider-fallback"
-    if replaced or outcome.get("status") == "blocked":
-        record_head_change(
-            runtime,
-            ref,
-            record,
-            kind=kind,
-            cause=CAUSE_PROVIDER_FAILOVER,
-            reason=f"provider error from {resource or 'its provider'}: {summary}",
-            before=stopped,
-            successor=replaced,
-            requested=choice.preferred,
-            attempt_id=attempt_id,
-        )
-    return outcome
+    if review:
+        return _relaunch_reviewer(runtime, task, record, records, payload, attempt_id, choice, evidence)
+    return _relaunch_worker(runtime, task, record, records, payload, attempt_id, choice, evidence)
 
 
 def _comment(

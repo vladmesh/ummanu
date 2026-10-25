@@ -974,6 +974,9 @@ class DispatcherRecord:
     )
     # A decision/operation card's hand-over to its sprint's PO session; empty for a headed card.
     po_submission: PoSubmission = field(default_factory=PoSubmission)
+    # Per card kind, a confirmed head stop whose `head_changed` record waits for its successor's
+    # launch or the round's terminal effect (`dispatch.head_changes`); empty otherwise.
+    head_changes_owed: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def __setattr__(self, name: str, value: Any) -> None:
         # All producers, including legacy host/dispatcher code that still assigns JSON dictionaries,
@@ -1115,6 +1118,8 @@ class DispatcherRecord:
                 if self.worker_stale_round.generation
                 else {}
             ),
+            # Only while a stopped head's change is owed, so other records keep their released shape.
+            **({"head_changes_owed": copy.deepcopy(self.head_changes_owed)} if self.head_changes_owed else {}),
         }
 
     @classmethod
@@ -1276,6 +1281,11 @@ class DispatcherRecord:
             paused_reviewer_at=float(payload.get("paused_reviewer_at") or 0.0),
             workspace_settled=bool(payload.get("workspace_settled", False)),
             po_submission=PoSubmission.from_json(payload.get("po_submission")),
+            head_changes_owed=(
+                copy.deepcopy(payload["head_changes_owed"])
+                if isinstance(payload.get("head_changes_owed"), dict)
+                else {}
+            ),
         )
 
 

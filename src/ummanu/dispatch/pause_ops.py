@@ -29,7 +29,7 @@ from typing import Any
 
 from ummanu._fsutil import file_lock
 from ummanu.board.head_changes import CAUSE_OPERATOR_STOP
-from ummanu.dispatch.head_changes import record_head_change, role_run
+from ummanu.dispatch.head_changes import record_head_stop, role_run
 from ummanu.dispatch.helpers import WORKER_REPORT_MARKERS, _last_marker
 from ummanu.dispatch.launch import (
     REVIEW_ROLE,
@@ -246,9 +246,7 @@ def _record_operator_stops(
     warnings: list[str] = []
     for ref, record, kind, run in stops:
         try:
-            record_head_change(
-                runtime, ref, record, kind=kind, cause=CAUSE_OPERATOR_STOP, reason=reason, before=run, successor=False
-            )
+            record_head_stop(runtime, ref, record, kind=kind, cause=CAUSE_OPERATOR_STOP, reason=reason, before=run)
         except TaskError as exc:
             warnings.append(f"the {kind} stop of {ref} was not written to its history: {exc.message}")
     return warnings

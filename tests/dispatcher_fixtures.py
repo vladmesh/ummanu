@@ -28,7 +28,7 @@ from ummanu.dispatch.heartbeat import heartbeat_identity
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.runtime import DispatcherRuntime
 from ummanu.dispatch.state import attempt_request_id, new_attempt_id, now_rfc3339, record_attempt
-from ummanu.dispatch.types import HostError
+from ummanu.dispatch.types import STOPPED_BY_DISPATCHER, HostError
 from ummanu.dispatch.watchdog import idle_stall_seconds
 from ummanu.dispatch.worker_lifecycle import head_run_binding
 from ummanu.runtime.head import (
@@ -91,6 +91,26 @@ def ensure_attempt(payload: dict[str, Any], reference: str, actor: str, owner: s
     payload["attempt_id"] = attempt_id
     record_attempt(payload, attempt_id, reference, actor, owner)
     return attempt_id
+
+
+def settle_stopped_reviewers(host: FakeHost) -> list[str]:
+    """Make the fake leave a confirmed reviewer stop's run exited on the record, as the real host
+    does, and hand back the run ids it settled."""
+    settled: list[str] = []
+    stop_review = host.stop_review
+
+    def stop(record, initiator: str = STOPPED_BY_DISPATCHER) -> None:
+        owned = bool(record.review_handle or record.review_leaf or record.review_pid_file)
+        stop_review(record, initiator)
+        if not owned or not record.review_head_run.get("run_id"):
+            return
+        run = head_ops.HeadRun.from_json(dict(record.review_head_run))
+        if not run.settled:
+            record.review_head_run = run.finishing(head_ops.StopInitiator(initiator)).exited().to_json()
+            settled.append(run.run_id)
+
+    host.stop_review = stop  # type: ignore[method-assign]
+    return settled
 
 
 def card_audit(test: unittest.TestCase):

@@ -26,6 +26,7 @@ from ummanu.dispatch.attempt_usage import (
     provider_usage_source as _provider_usage_source,
 )
 from ummanu.dispatch.gate_receipt import AcceptedGreenGate
+from ummanu.dispatch.head_changes import settle_unreplaced
 from ummanu.dispatch.helpers import _round_report_ids
 from ummanu.dispatch.state import (
     DispatcherRecord,
@@ -574,6 +575,8 @@ def terminal_effect(
             and existing.target_state == target
         ):
             reason = existing.reason
+    # A stopped head still owed here gets no successor in this round; its change precedes the move.
+    settle_unreplaced(runtime, task["ref"], record)
     effect = runtime.writer.move(
         role="dispatcher",
         actor=runtime.owner,
