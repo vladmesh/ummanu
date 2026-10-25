@@ -51,10 +51,12 @@ as actor is refused on every verb (`role_masquerade`) and writes nothing.
   (`docs/PROTOCOLS.md`, Cards outside a sprint).
 - The goal, DoD, out of scope and stop conditions are a contract, not a plan: do not change them.
 - Do not promote existing Issues to Ready: a card is always fresh, cut from current understanding.
-- No reinstalling, wiping or restoring the live system, no production deployment inside a sprint, no
-  force-push or rewriting published history.
+- No reinstalling, wiping or restoring the live system, no force-push or rewriting published history.
+- No production deployment or upgrade inside a sprint unless its goal or DoD explicitly allows that
+  production; then only the allowed one, through its standard upgrade, and no other production.
 - An action that could cut off your session, shell, session manager or control channel goes into a
-  sprint entry as an external runbook, and you stop.
+  sprint entry as an external runbook or an `operation` card, and you stop, even when the contract
+  allows that production.
 
 ## Channel: the board only
 
@@ -86,10 +88,11 @@ access, a key, a production step), naming the production it touches or `none`.
 ```bash
 python3 -P -m ummanu task create --role observer --actor observer \
   --project <repo> --type decision --title "<the question>" \
-  --state ready --sprint <sprint-ref> --body-file <question.md>
+  --state ready --sprint <sprint-ref> --dod-item <item-id> --body-file <question.md>
 python3 -P -m ummanu task create --role observer --actor observer \
   --project <repo> --type operation --title "<the action>" \
-  --state ready --sprint <sprint-ref> --touches-production <project>|none --body-file <action.md>
+  --state ready --sprint <sprint-ref> --dod-item <item-id> \
+  --touches-production <project>|none --body-file <action.md>
 ```
 
 No head, review, live-impact, seed or base flags (`docs/PROTOCOLS.md`, Decision and operation cards).
@@ -159,11 +162,15 @@ Always first, on launch and after a restart:
 Before each new card, check the DoD from structured evidence and merged state; if reached, close. The DoD
 is not decomposed into phases or tick-boxes; the path is rewritten at every step.
 
-With addressable items, mark an item met as soon as merged evidence proves it, naming that evidence, and
-reopen it with a reason if the evidence turns out wrong:
+With addressable items, prove each item live as soon as the cards that complete it are merged, before
+the next cut: run the check its own text names against the system it names, within the production
+scope the contract allows (an allowed production upgrade first, item by item). Then `sprint dod meet`
+at once with that concrete evidence (command, page or event, observed result). A merge, a green CI run
+or a review verdict is not live proof. Never defer met items to one final run that proves them all
+together. Reopen an item with a reason if its evidence turns out wrong:
 ```bash
 python3 -P -m ummanu sprint dod meet --ref <sprint-ref> --role observer --actor observer \
-  --item d2 --evidence "<card, PR or sprint comment>"
+  --item d2 --evidence "<live check: command, page or event and its observed result>"
 python3 -P -m ummanu sprint dod reopen --ref <sprint-ref> --role observer --actor observer \
   --item d2 --reason "<why the evidence does not hold>"
 ```
@@ -176,8 +183,9 @@ Judge each DoD item by the evidence that closes it. Before adding a path, ask wh
 to produce that evidence. Apply proportionality before the priority order below:
 
 - Work breadth first: no third card on one item while another has none, unless that card unblocks them.
-- Choose the cheapest mechanism that meets the closing evidence. Before a new external mechanism or
-  production configuration the item does not name, use the cheaper mechanism or cut a PO decision card.
+- Choose the cheapest mechanism that meets the closing evidence. Prove acceptance with an existing
+  mechanism (CLI, page, audit event, log) when one suffices; add no external service or production
+  configuration the item does not name. When none suffices, cut a PO decision card first.
 - When the cards spent on an item exceed its weight, record a resume decision before investing further:
   explain the remaining closing evidence and why to continue, change approach or work another item.
 
@@ -250,11 +258,16 @@ typed task with persistence and the admission exemption; (c) planning; (d) the e
 ```bash
 python3 -P -m ummanu task create --role observer --actor observer \
   --project <repo> --type code --title "<short title>" \
-  --state ready --sprint <sprint-ref> \
+  --state ready --sprint <sprint-ref> --dod-item <item-id> \
   --head <worker-profile> --review-head <reviewer-profile> \
   --slug <2-4-words> --estimate-minutes <N> --body-file <spec.md>
 python3 -P -m ummanu sprint current-task --ref <sprint-ref> --role observer --actor observer --task <card-ref>
 ```
+
+In a structured sprint every fresh card names exactly one `--dod-item`, the item its evidence serves.
+A card without a saved item is unlinked: nothing infers one from its text, title or `current_task`.
+Link an existing unlinked card once with `task bind-dod --ref <card-ref> --sprint <sprint-ref>
+--dod-item <item-id> --role observer --actor observer --request-id <id>`.
 
 The reviewer is from the other family (`claude-*` ↔ `codex-*`); if unavailable, wait or take another of
 its profiles, and only if that blocks the sprint long, a same-family reviewer on another profile,
@@ -296,7 +309,8 @@ A reslice successor inherits the predecessor's content as a seed, never its bran
 ```bash
 python3 -P -m ummanu task create --role observer --actor observer \
   --project <project> --type code --title '<title>' --body-file <spec.md> --sprint <sprint-ref> \
-  --seed-ref <predecessor candidate full 40-character sha> --supersedes <predecessor card ref>
+  --dod-item <item-id> --seed-ref <predecessor candidate full 40-character sha> \
+  --supersedes <predecessor card ref>
 ```
 
 A stale-round wake names a live card and its round facts. Record exactly one `task comment` on it that
@@ -395,7 +409,9 @@ show`/`status`; green cards and research are free.
 
 ## 11. Close the sprint
 
-When the DoD is confirmed against the default branch and the live system:
+When the DoD is met, each addressable item by its own live proof, confirm against the default branch
+and the live system that those proofs still hold. This final check proves no item for the first time;
+an item whose proof broke is reopened:
 
 1. No active cards remain, all analysed; every Assessment card settled by `task decide` and carried out.
    With addressable items, every item is met: your close is refused while one is open. Only the PO
