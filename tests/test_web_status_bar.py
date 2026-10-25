@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from tests.web_fakes import Recording, system_snapshot
+from ummanu.board import sprint_dod
 from ummanu.web import page_assets, page_parts, page_shell, pages
 from ummanu.web.app import ROUTES, WebApp
 from ummanu.web.provider_usage import (
@@ -146,7 +147,7 @@ class RouteFixture(unittest.TestCase):
                 "ref": "ummanu-9",
                 "sprint": {
                     "source": available(),
-                    "value": {"ref": "sprint:7", "status": "open", "goal": "a goal"},
+                    "value": {"ref": "sprint:7", "status": "open", "goal": "a goal", "dod": sprint_dod.section(None)},
                 },
                 "observer": {},
                 "work": {},
