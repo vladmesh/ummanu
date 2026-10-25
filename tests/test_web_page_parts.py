@@ -6,6 +6,7 @@ than through a transport: what a reader sees on a page is exactly what these ret
 
 from __future__ import annotations
 
+import re
 import unittest
 
 from ummanu.board import sprint_dod
@@ -162,6 +163,17 @@ class BudgetLineTests(unittest.TestCase):
             page_parts._budget_line({"total": 30, "thresholds": {"signal": 12, "hard": 30}, "hard_reached": True}),
         )
 
+    def test_the_compact_line_shows_only_spent_over_hard_beside_its_track(self) -> None:
+        drawn = page_parts._budget_line(
+            {"total": 3, "thresholds": {"signal": 12, "hard": 30}, "by_type": {"red_ci": 3}}, compact=True
+        )
+        visible = re.sub(r'title="[^"]*"', "", drawn)
+
+        self.assertIn('<span class="mono">3 / 30</span>', drawn)
+        self.assertNotIn('class="mark"', drawn)
+        self.assertNotIn("signal", visible)
+        self.assertNotIn("red_ci", visible)
+
 
 class DodScaleTests(unittest.TestCase):
     @staticmethod
@@ -180,6 +192,18 @@ class DodScaleTests(unittest.TestCase):
         self.assertIn('class="seg met" style="flex:0.2500 1 0"', drawn)
         self.assertIn("1 of 2 items met · 25%", drawn)
         self.assertNotIn("not estimated", drawn)
+
+    def test_the_compact_scale_counts_met_over_in_scope_and_draws_no_zeros_without_a_structure(self) -> None:
+        items = sprint_dod.met(self.items(3, 1), "d2", "PR 5", {"role": "po", "actor": "po", "at": "now"})
+
+        drawn = page_parts._dod_scale(sprint_dod.section(items), compact=True)
+        unstructured = page_parts._dod_scale(sprint_dod.section(None), compact=True)
+
+        self.assertIn('<span class="track">', drawn)
+        self.assertIn('<span class="mono">1 / 2</span>', drawn)
+        self.assertNotIn("%</span>", drawn)
+        self.assertIn(">no scale</span>", unstructured)
+        self.assertNotIn("0 / 0", unstructured)
 
     def test_the_scale_and_the_sprint_page_show_a_descoped_item_apart_from_met_and_open(self) -> None:
         from ummanu.web.page_sprint import _sprint_tabs
