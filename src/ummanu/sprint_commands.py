@@ -533,7 +533,7 @@ def run_list(args: argparse.Namespace) -> int:
 def run_show(args: argparse.Namespace) -> int:
     return _read(
         args,
-        lambda reader: _public_show(reader.show(args.ref)),
+        lambda reader: _public_show(reader.show(args.ref, include_delivery=True)),
         thresholds=_thresholds(args),
     )
 

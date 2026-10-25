@@ -462,10 +462,12 @@ class SprintReader:
         reference: str,
         *,
         include_cards: bool = True,
+        include_delivery: bool = False,
         include_comments: bool = False,
         include_resume_freshness: bool = True,
         audit: _AuditOnce | None = None,
     ) -> dict[str, Any]:
+        """Delivery requires included cards and an explicit opt-in; ordinary reads use the tick snapshot."""
         board_id = _sprint_board(self.client, create=False)
         if board_id is None:
             raise TaskError("not_found", "sprint was not found", 2)
@@ -490,16 +492,16 @@ class SprintReader:
         sprint = self._normalize(
             raw,
             _sprint_metadata(self.client.call("getTaskMetadata", task_id=task_id)),
-            comments=comments,
-            include_resume_freshness=False,
+            comments=comments, include_resume_freshness=False,
         )
         if include_cards:
             reader = TaskReader(self.client)
-            cards = (reader.list(sprint=reference, include_archived=True) if sprint["dod"]["structured"]
+            cards = (reader.list(sprint=reference, include_archived=True) if include_delivery and sprint["dod"]["structured"]
                      else select_cards(reader, sprint=reference))
             sprint["cards"] = [card for card in cards if not card.get("closed")]
-            audit = audit if audit is not None else _AuditOnce(audit=self.audit)
-            self.project_dod([sprint], {reference: cards}, audit=audit)
+            if include_delivery:
+                audit = audit if audit is not None else _AuditOnce(audit=self.audit)
+                self.project_dod([sprint], {reference: cards}, audit=audit)
         if include_resume_freshness:
             sprint["resume_freshness"] = self._resume_freshness(sprint, sprint.get("resume"), audit=audit)
         return sprint
@@ -585,17 +587,15 @@ class SprintReader:
             return
         events = None
         if linked is not None and unavailable is None:
-            refs = {sprint["ref"] for sprint in structured} | {
-                card["ref"] for sprint in structured for card in linked.get(sprint["ref"], [])
-            }
+            refs = {sprint["ref"] for sprint in structured}
+            refs.update(card["ref"] for sprint in structured for card in linked.get(sprint["ref"], []))
             try:
                 events = audit.events(refs)
             except (TaskError, OSError, ValueError) as exc:
                 unavailable = f"committed audit unavailable: {exc}"
         for sprint in structured:
             sprint["dod"] = sprint_dod.section(
-                sprint_dod.items_of(sprint["dod"]),
-                cards=None if linked is None else linked.get(sprint["ref"], []),
+                sprint_dod.items_of(sprint["dod"]), cards=None if linked is None else linked.get(sprint["ref"], []),
                 events=events, unavailable=unavailable,
             )
 
@@ -649,7 +649,7 @@ class SprintReader:
         headless: dict[str, dict[str, Any]] | None = None,
         audit: _AuditOnce | None = None,
     ) -> dict[str, Any]:
-        return self._status(self.show(reference, audit=audit), observer, headless or {})
+        return self._status(self.show(reference, include_delivery=True, audit=audit), observer, headless or {})
 
     def _status(
         self,

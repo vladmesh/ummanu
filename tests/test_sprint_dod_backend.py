@@ -65,7 +65,7 @@ class SprintDodTests(SprintFixture):
         self.assertEqual(self.writer.mark_dod_in_main(**fields)["event_id"], first["event_id"])
         self.assertEqual(self._history(ref, "dod_item_in_main"),
                          [{"item": "d1", "evidence": "main checked by operator"}])
-        dod = self.sprint(ref, include_cards=True)["dod"]
+        dod = self.sprint(ref, include_cards=True, include_delivery=True)["dod"]
         self.assertEqual((dod["in_main"], dod["met"]), (1, 0))
         self.assertEqual(dod["items"][0]["delivery"]["by"]["actor"], "observer")
         with self.assertRaises(TaskError):
@@ -78,7 +78,7 @@ class SprintDodTests(SprintFixture):
               self.assertRaises(TaskError)):
             self.writer.mark_dod_in_main(**{**fields, "item": "d2", "request_id": "lost-main"})
         self.assertIsNone(self.writer.audit.committed_event("lost-main"))
-        self.assertEqual(self.sprint(ref, include_cards=True)["dod"]["in_main"], 1)
+        self.assertEqual(self.sprint(ref, include_cards=True, include_delivery=True)["dod"]["in_main"], 1)
 
     def test_a_free_text_dod_takes_no_weight_until_the_po_adds_items(self) -> None:
         ref = self._open()
@@ -279,18 +279,18 @@ class CardDodStorageTests(SprintFixture):
                   "item": "d1", "evidence": "bypass", "request_id": "refused-main"}
         with self.assertRaises(TaskError):
             self.writer.mark_dod_in_main(**fields)
-        self.assertEqual(self.sprint(self.ref, include_cards=True)["dod"]["in_main"], 0)
+        self.assertEqual(self.sprint(self.ref, include_cards=True, include_delivery=True)["dod"]["in_main"], 0)
         for index, ref in enumerate(refs):
             for target in ("in_progress", "validate", "assessment"):
                 self.cards.move(role="dispatcher", actor="dispatcher", reference=ref, target=target, reason=target)
             self.cards.decide(role="observer", actor="observer", reference=ref, kind="accept", body="reviewed")
             self.cards.move(role="dispatcher", actor="dispatcher", reference=ref, target="done", reason="merged",
                             decision="accept", release_merge={"base": "main", "merge_sha": "a" * 40, "path": "pr"})
-            self.assertEqual(self.sprint(self.ref, include_cards=True)["dod"]["in_main"], index)
+            self.assertEqual(self.sprint(self.ref, include_cards=True, include_delivery=True)["dod"]["in_main"], index)
         self.cards.archive(role="po", actor="operator", reference=refs[0], reason="retained merge")
-        self.assertEqual(self.sprint(self.ref, include_cards=True)["dod"]["in_main"], 1)
+        self.assertEqual(self.sprint(self.ref, include_cards=True, include_delivery=True)["dod"]["in_main"], 1)
         self.create_card()
-        self.assertEqual(self.sprint(self.ref, include_cards=True)["dod"]["in_main"], 0)
+        self.assertEqual(self.sprint(self.ref, include_cards=True, include_delivery=True)["dod"]["in_main"], 0)
 
     def test_metadata_failure_rolls_back_the_card_and_its_request(self):
         before = self.persisted_record_count(self.client)

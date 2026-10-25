@@ -316,8 +316,10 @@ class SprintFixture(SprintBackendFixture, unittest.TestCase):
     def sprint_reader(self) -> SprintReader:
         return SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
 
-    def sprint(self, reference: str, *, include_cards: bool = False) -> dict[str, Any]:
-        return self.sprint_reader().show(reference, include_cards=include_cards)
+    def sprint(
+        self, reference: str, *, include_cards: bool = False, include_delivery: bool = False,
+    ) -> dict[str, Any]:
+        return self.sprint_reader().show(reference, include_cards=include_cards, include_delivery=include_delivery)
 
     def sprints(self) -> list[dict[str, Any]]:
         return self.sprint_reader().list()

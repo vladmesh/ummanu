@@ -93,7 +93,7 @@ class TaskDodLinkTests(unittest.TestCase):
         first = writer.mark_dod_in_main(**fields)
         again = writer.mark_dod_in_main(**fields)
         self.assertEqual(first["event_id"], again["event_id"])
-        dod = writer.reader.show(SPRINT)["dod"]
+        dod = writer.reader.show(SPRINT, include_delivery=True)["dod"]
         self.assertEqual((dod["in_main"], dod["met"]), (1, 0))
         by = dod["items"][1]["delivery"]["by"]
         self.assertEqual((by["role"], by["actor"]), ("observer", "observer"))
@@ -105,27 +105,27 @@ class TaskDodLinkTests(unittest.TestCase):
         with self.assertRaises(TaskError):
             writer.mark_dod_in_main(**{**fields, "role": "po", "actor": "operator"})
         writer.meet_dod_item(role="observer", actor="observer", reference=SPRINT, item="d2", evidence="live")
-        self.assertEqual(writer.reader.show(SPRINT)["dod"]["met"], 1)
+        self.assertEqual(writer.reader.show(SPRINT, include_delivery=True)["dod"]["met"], 1)
         writer.reopen_dod_item(role="observer", actor="observer", reference=SPRINT, item="d2", reason="check again")
-        self.assertEqual(writer.reader.show(SPRINT)["dod"]["in_main"], 1)
+        self.assertEqual(writer.reader.show(SPRINT, include_delivery=True)["dod"]["in_main"], 1)
         self.create(dod_item="d2")
-        self.assertEqual(writer.reader.show(SPRINT)["dod"]["in_main"], 0)
+        self.assertEqual(writer.reader.show(SPRINT, include_delivery=True)["dod"]["in_main"], 0)
         self.assertEqual(writer.mark_dod_in_main(**fields)["event_id"], first["event_id"])
-        self.assertEqual(writer.reader.show(SPRINT)["dod"]["in_main"], 0)
+        self.assertEqual(writer.reader.show(SPRINT, include_delivery=True)["dod"]["in_main"], 0)
 
     def test_metadata_only_read_leaves_delivery_unknown_until_cards_and_audit_are_loaded(self):
         writer = SprintWriter(self.store, data_dir=self.root)
         writer.mark_dod_in_main(role="observer", actor="observer", reference=SPRINT,
                                 item="d2", evidence="operator proof")
         metadata = writer.reader.show(SPRINT, include_cards=False)["dod"]
-        loaded = writer.reader.show(SPRINT, include_cards=True)["dod"]
+        loaded = writer.reader.show(SPRINT, include_delivery=True)["dod"]
         self.assertIsNone(metadata["in_main"])
         self.assertEqual(metadata["items"][1]["delivery"]["state"], "unknown")
         self.assertIn("not loaded", metadata["items"][1]["delivery"]["reason"])
         self.assertEqual((loaded["in_main"], loaded["met"]), (1, 0))
         self.create(dod_item="d2")
         self.assertIsNone(writer.reader.show(SPRINT, include_cards=False)["dod"]["in_main"])
-        self.assertEqual(writer.reader.show(SPRINT, include_cards=True)["dod"]["in_main"], 0)
+        self.assertEqual(writer.reader.show(SPRINT, include_delivery=True)["dod"]["in_main"], 0)
 
     def test_manual_delivery_cli_refuses_cards_blank_evidence_and_foreign_or_terminal_sprint(self):
         writer = SprintWriter(self.store, data_dir=self.root)
@@ -136,8 +136,10 @@ class TaskDodLinkTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(TaskError):
                 writer.mark_dod_in_main(**{**fields, **changes})
         self.store.rows[1]["is_active"] = 0
-        with self.assertRaises(TaskError):
-            writer.mark_dod_in_main(**fields)
+        with tick_snapshot(self.reader) as snapshot:
+            snapshot.load()
+            with self.assertRaises(TaskError):
+                writer.mark_dod_in_main(**fields)
         self.assertIsNone(self.store.audit.committed_event("manual"))
         with as_observer("sprint:2"), self.assertRaises(TaskError):
             writer.mark_dod_in_main(**{**fields, "item": "d2"})
@@ -147,7 +149,8 @@ class TaskDodLinkTests(unittest.TestCase):
                 "--instance", str(self.root)]
         with mock.patch("ummanu.sprint_commands.board_client", return_value=self.store), contextlib.redirect_stdout(output):
             self.assertEqual(main(args), 0)
-        self.assertEqual(json.loads(output.getvalue())["sprint"]["dod"]["in_main"], 1)
+        self.assertIsNone(json.loads(output.getvalue())["sprint"]["dod"]["in_main"])
+        self.assertEqual(writer.reader.show(SPRINT, include_delivery=True)["dod"]["in_main"], 1)
         self.sprint_meta["sprint_status"] = "closed"
         with self.assertRaises(TaskError) as refused:
             writer.mark_dod_in_main(**{**fields, "item": "d2", "request_id": "closed"})
@@ -163,12 +166,21 @@ class TaskDodLinkTests(unittest.TestCase):
         }
         reader = SprintReader(self.store, data_dir=self.root)
         reads = SprintReadLayer(self.root, data_dir=self.root, board_client=self.store)
-        shown = reader.show(SPRINT)["dod"]
-        with tick_snapshot(self.reader):
-            self.assertEqual(reader.show(SPRINT)["dod"], shown)
+        shown = reader.show(SPRINT, include_delivery=True)["dod"]
+        with tick_snapshot(self.reader) as snapshot:
+            snapshot.load()
+            self.assertIsNone(reader.show(SPRINT)["dod"]["in_main"])
+            self.assertEqual(reader.show(SPRINT, include_delivery=True)["dod"], shown)
             self.assertEqual(reader.statuses()[0]["dod"], shown)
         document = reads.sprint_state(SPRINT)
         self.assertEqual(shown, document["sprint"]["value"]["dod"])
+        output = io.StringIO()
+        with (mock.patch("ummanu.sprint_commands.board_client", return_value=self.store),
+              contextlib.redirect_stdout(output)):
+            code = main(["sprint", "show", "--ref", SPRINT, "--instance", str(self.root),
+                         "--data-dir", str(self.root)])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue())["dod"], shown)
         self.assertEqual(shown, reader.status(SPRINT)["dod"])
         listing = reads.sprint_list()["sprints"]["items"]
         self.assertEqual(shown, next(row for row in listing if row["ref"] == SPRINT)["dod"])

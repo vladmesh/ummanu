@@ -2476,9 +2476,12 @@ cards. It uses the usual sprint/identity guards and request replay, with a `dod_
 event and optional `in_main_manual` evidence/role/actor/at in the existing item metadata. Any later
 card makes that manual evidence ineffective. Delivery never meets or reopens an item and never
 relaxes sprint close. A missing card or audit source yields `delivery.state: unknown` with its
-reason and `dod.in_main: null`, preserving met, weights and evidence. Metadata-only reads likewise
-leave delivery unknown. Sprint show/status/list and the web use this projection; the sprint page
-shows both counts and each item's delivery basis beside its live evidence.
+reason and `dod.in_main: null`, preserving met, weights and evidence. Default `SprintReader.show`
+uses snapshot-backed card selections and leaves delivery unknown without loading archive or delivery
+audit facts; metadata-only reads also leave it unknown. Display readers explicitly request
+`show(..., include_delivery=True)` with cards, or the shared batched `project_dod` for status/list
+and web reads. CLI sprint show/status/list and the sprint page expose both counts and each item's
+delivery basis beside its live evidence.
 
 The goal and the items are the owner's contract, so two more verbs are PO only and need an open sprint.
 `sprint dod edit --item dN --text <wording> --reason <why>` rewords an open or met item; its id, weight,
