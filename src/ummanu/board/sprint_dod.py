@@ -110,6 +110,27 @@ def find(items: list[dict[str, Any]], item_id: str) -> dict[str, Any]:
     raise ValueError(f"this sprint has no Definition of Done item {item_id!r}")
 
 
+def card_item(sprint: Mapping[str, Any] | None, item_id: str, *, required: bool = True) -> str:
+    """Validate one card's explicit item against its sprint; never infer a link."""
+    if not isinstance(item_id, str) or (item_id and not _ID.fullmatch(item_id)):
+        raise ValueError("a card links exactly one Definition of Done item, as d<N>")
+    if sprint is None:
+        if item_id:
+            raise ValueError("--dod-item requires --sprint")
+        return item_id
+    dod = sprint["dod"]
+    if not dod["structured"]:
+        if item_id:
+            raise ValueError(UNSTRUCTURED)
+        return item_id
+    if not item_id:
+        if required:
+            raise ValueError("a new card of a structured sprint requires --dod-item d<N>")
+        return item_id
+    _in_scope(dod["items"], item_id)
+    return item_id
+
+
 def _in_scope(items: list[dict[str, Any]], item_id: str) -> dict[str, Any]:
     item = find(items, item_id)
     if item["state"] == DESCOPED:

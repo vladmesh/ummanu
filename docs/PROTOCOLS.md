@@ -2863,6 +2863,26 @@ expose it as `sprint`, and `task list --sprint` filters by it. `sprint show` der
 card metadata. New links are refused after a sprint is closed. `current-task` requires that the card
 already carries this sprint reference.
 
+`task create --sprint sprint:N --dod-item dN` links every fresh card of a structured sprint to
+exactly one stored, non-descoped DoD item. The item is required for all card types in such a sprint;
+unknown items, multiple items, a link without a sprint or a link to a free-text DoD are refused
+before a card is created. An unsprinted card or a card of a free-text sprint needs no item. The link
+is saved atomically with creation and participates in request-id identity. `task show` and every
+task reader/list expose `dod_item` as the saved id or `null` for an unlinked card. Readers never
+infer a link from prose, position or `current_task`; existing cards remain unlinked until assigned.
+Dispatcher follow-up cards carry the source card's explicit saved item when they use its sprint;
+an unlinked source supplies no inferred item and still requires an operator's assignment.
+
+`task bind-dod --ref PROJECT-N --sprint sprint:N --dod-item dN --role observer --request-id ID`
+assigns an existing unlinked card, including a Done or archived card, to an item of its own open
+structured sprint. The observer must be bound to that sprint. The PO may use the same handle with
+`--role po` and the ordinary `--sprint-override --sprint-override-reason-file FILE` when its project
+is reserved. Stored membership, sprint status and item scope are checked; reassignment to another
+item is refused. Repeating the same link is safe; the same request id replays only the same payload.
+The `dod_item_bound` audit event names the card in `ref`, and the sprint and item in `payload.sprint`
+and `payload.dod_item`. Ordinary edit, report, rework and release paths preserve the saved link.
+The link uses `tasks.extensions.extra.dod_item` through the board metadata seam, with no migration.
+
 An open sprint holds every project in its `reservations`: only its observer may create a card of the
 sprint there, and only with `--sprint` naming that sprint. Observer and dispatcher may move and edit
 linked cards. The PO may create a card linked to the holding sprint, and move or edit a card linked to

@@ -463,7 +463,8 @@ class CreateRepairMetadataTests(unittest.TestCase):
             (self.root / "projects" / f"{project}.yaml").write_text(f"id: {project}\n", encoding="utf-8")
         self.store = CountingStore(self.root)
         self.enterContext(mock.patch("ummanu.board.sql_audit.SqlTaskAudit", return_value=self.store.audit))
-        sprint = {"ref": SPRINT, "status": "open", "repositories": ["demo"], "reservations": ["demo"]}
+        sprint = {"ref": SPRINT, "status": "open", "repositories": ["demo"], "reservations": ["demo"],
+                  "dod": {"structured": False}}
         self.enterContext(mock.patch("ummanu.sprints.SprintReader.show", return_value=sprint))
         self.writer = GuardedWriter(self.store, self.root)
 

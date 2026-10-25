@@ -752,6 +752,7 @@ def _create_metadata(
     codex_launch_mode: str,
     sprint: str,
     steward_report: bool,
+    dod_item: str = "",
 ) -> dict[str, str]:
     """The one metadata write of a create, shared by a fresh create and a pending-create repair."""
     values = {
@@ -792,6 +793,7 @@ def _create_metadata(
         ("supersedes", supersedes),
         ("codex_launch_mode", codex_launch_mode),
         ("sprint_ref", sprint),
+        ("dod_item", dod_item),
     ):
         if value:
             values[metadata_key] = value
@@ -837,6 +839,7 @@ def _create_metadata_values(payload: dict[str, Any]) -> dict[str, str]:
         supersedes=_text(payload.get("supersedes")),
         codex_launch_mode=_text(payload.get("codex_launch_mode")),
         sprint=_text(payload.get("sprint")),
+        dod_item=_text(payload.get("dod_item")),
         steward_report=payload.get("steward_report") is True,
     )
 

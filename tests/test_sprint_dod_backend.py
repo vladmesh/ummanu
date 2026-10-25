@@ -6,11 +6,12 @@ from __future__ import annotations
 import contextlib
 import io
 import unittest
+from unittest import mock
 
 from tests.fakes.sprints import KEEP_THE_ISSUE_OPEN, SprintFixture
 from ummanu.board import sprint_dod
 from ummanu.cli import main
-from ummanu.tasks import TaskError
+from ummanu.tasks import TaskError, TaskReader, TaskWriter
 
 
 class SprintDodTests(SprintFixture):
@@ -220,6 +221,74 @@ class SprintDodEditAndDescopeTests(SprintFixture):
 
         self.assertEqual(self.sprint(ref)["dod"]["items"], before)
         self.assertEqual(self._history(ref, "dod_item_edited") + self._history(ref, "dod_item_descoped"), [])
+
+
+class CardDodStorageTests(SprintFixture):
+    def setUp(self):
+        super().setUp()
+        self.ref = self._create(goal="ship the change", dod_items=["shipped", "accepted"])["sprint"]["ref"]
+        self.cards = TaskWriter(self.client, data_dir=self.tmp.name)
+
+    def create_card(self, **fields):
+        return self.cards.create(**{
+            "role": "observer", "actor": "observer", "project": "ummanu", "task_type": "code",
+            "title": "Ship the change", "sprint": self.ref, "dod_item": "d1", **fields,
+        })
+
+    def test_card_and_link_commit_together_and_reader_export_preserves_the_link(self):
+        card = self.create_card(request_id="create-card")["task"]
+        fresh_reader = TaskReader(self.client)
+        self.assertEqual(fresh_reader.show(card["ref"])["dod_item"], "d1")
+        self.assertEqual(next(row for row in fresh_reader.list(sprint=self.ref)
+                              if row["ref"] == card["ref"])["dod_item"], "d1")
+        exported = next(row for row in fresh_reader.export() if row["reference"] == card["ref"])
+        self.assertEqual(exported["metadata"]["dod_item"], "d1")
+        self.assertTrue(self.create_card(request_id="create-card")["replayed"])
+        with self.assertRaises(TaskError):
+            self.create_card(request_id="create-card", dod_item="d2")
+        self.assertIsNone(fresh_reader.show("ummanu-12")["dod_item"])
+
+    def test_metadata_failure_rolls_back_the_card_and_its_request(self):
+        before = self.persisted_record_count(self.client)
+        with (mock.patch.object(self.client, "_rpc_saveTaskMetadata", side_effect=OSError("lost metadata")),
+              self.assertRaises(TaskError)):
+            self.create_card(request_id="failed-create")
+        self.assertEqual(self.persisted_record_count(self.client), before)
+        self.assertIsNone(self.cards.audit.committed_event("failed-create"))
+        self.assertIsNone(self.cards.audit.pending_event("failed-create"))
+
+    def test_bootstrap_binding_is_atomic_when_audit_publication_fails(self):
+        self.client.save_metadata(12, sprint_ref=self.ref)
+        self.assertIsNone(self.cards.reader.show("ummanu-12")["dod_item"])
+        fields = {"role": "observer", "actor": "observer", "reference": "ummanu-12",
+                  "sprint": self.ref, "dod_item": "d1", "request_id": "bind-bootstrap"}
+        with (mock.patch.object(self.cards.audit, "append", side_effect=OSError("lost audit")),
+              self.assertRaises(TaskError)):
+            self.cards.bind_dod(**fields)
+        self.assertIsNone(self.cards.reader.show("ummanu-12")["dod_item"])
+        self.assertIsNone(self.cards.audit.pending_event("bind-bootstrap"))
+        self.cards.bind_dod(**fields)
+        self.assertTrue(self.cards.bind_dod(**fields)["replayed"])
+        self.assertEqual(self.cards.reader.show("ummanu-12")["dod_item"], "d1")
+
+    def test_edit_report_rework_and_release_preserve_the_link(self):
+        card = self.create_card()["task"]["ref"]
+        self.cards.edit(role="observer", actor="observer", reference=card, title="Revised change")
+        self.cards.move(role="dispatcher", actor="dispatcher", reference=card, target="in_progress", reason="claimed")
+        self.cards.report(role="worker", actor="worker", reference=card, kind="blocked", body="A fixture blocker",
+                          classification="external_fact")
+        self.cards.move(role="dispatcher", actor="dispatcher", reference=card, target="validate", reason="ready")
+        self.cards.move(role="dispatcher", actor="dispatcher", reference=card, target="assessment", reason="reviewed")
+        self.cards.decide(role="observer", actor="observer", reference=card, kind="rework", body="repair it")
+        self.cards.move(role="dispatcher", actor="dispatcher", reference=card, target="in_progress", reason="rework",
+                        decision="rework")
+        self.assertEqual(self.cards.reader.show(card)["dod_item"], "d1")
+        self.cards.move(role="dispatcher", actor="dispatcher", reference=card, target="validate", reason="repaired")
+        self.cards.move(role="dispatcher", actor="dispatcher", reference=card, target="assessment", reason="reviewed")
+        self.cards.decide(role="observer", actor="observer", reference=card, kind="accept", body="accepted")
+        self.cards.move(role="dispatcher", actor="dispatcher", reference=card, target="done", reason="merged",
+                        decision="accept")
+        self.assertEqual(self.cards.reader.show(card)["dod_item"], "d1")
 
 
 if __name__ == "__main__":

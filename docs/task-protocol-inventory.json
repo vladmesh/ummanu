@@ -13,16 +13,23 @@
     "src/ummanu/board/task_protocol/sprint_guard.py"
   ],
   "ast_deltas": {
+    "TaskWriter._write": "67e7d46f816dfe8bcd943558386571c71af0ef927554cb24d38c8152d1c12694",
+    "_create_metadata_values": "1ca17d325b80b5b2dab60a56c7464b3463e2d326f54ef05c7c9229ce3e23d8a7",
+    "_create_metadata": "38006bd976c5eadf38fce2b101d47b9d4c59f015d97a43b01343d6f51ed4068e",
+    "TaskWriter._create_backend": "a2dcd6364661c3be93c6d307cff8efbf9cf02ab30a8be6dd404beb278aa8a93e",
+    "TaskWriter._create": "07051df267a0df6933178a6c7b2d58fe44e577db95fbb756f6c4ec5a3b3f4a22",
+    "TaskWriter.create": "223b3f863814a958e4baa198873585918d0ddddfdd4fb60b8baf23eac7beeaf3",
     "TaskWriter.decide": "8fc8ce7f9f5a721ff9567f1516943ba344ec74668181ec344511a2b9befe7496",
     "TaskWriter.edit": "0884b37e01f84af601f487977be4c5f4e788f30de409692a1c4a7ae8b314391c",
     "TaskWriter.cancel": "58efc23eb9f6aa756d49ef46e807e4b58012076be71442bd399815e0f53e813b",
-    "TaskWriter._finish_pending_cleanup": "816340855b32e1771b7925893de20d0018284139c0e1392cd592e5dfff358633",
+    "TaskWriter._finish_pending_cleanup": "88b50521a055baa4f083d457bfc5d1c7e17084198cf89e25c45d88373ddb4ade",
     "TaskWriter._check_archivable": "0f7ab8f86444ad64dffff6b1bc1bbfe451c383eef202a2045387b1dc71e0139f",
     "TaskWriter._check_dispatcher_archivable": "3171143899321f345337102adbe15ec2937bef876e9d01270685354a028da05e",
     "TaskWriter.move": "7330186461d99f9883417a5736ccb61708ed1565d785ecd4cc670a7e50b9c93d",
     "TaskWriter._check_decision": "332298d336bdc5762a6c5039f1cf3e2974681e96dd2e82662b497364b28d1207"
   },
   "definitions": {
+    "TaskWriter.bind_dod": {"owner": "src/ummanu/board/task_protocol/sprint_guard.py", "line": 30, "baseline_ast_sha256": "4bb6e7b64a1f11f1b97fece88f16b5b120f50977c52928c230314b44fa44ee78"},
     "MASQUERADE": {"old_owner": "src/ummanu/tasks.py", "old_line": 148, "owner": "src/ummanu/board/task_protocol/rows.py", "line": 39, "baseline_ast_sha256": "b63627f81c5ab1f58911aac0beb27e14dbd386a6aa28a19c44305cb5e33f8f60", "signature": null, "returns": null, "decorators": [], "old_globals": {"Role": "ummanu.board.roles.Role"}, "owning_globals": {"Role": "ummanu.board.roles.Role"}, "lexical_imports": [], "consumers": ["src/ummanu/board/task_protocol/rows.py:46:global"]},
     "admit_role": {"old_owner": "src/ummanu/tasks.py", "old_line": 151, "owner": "src/ummanu/board/task_protocol/rows.py", "line": 42, "baseline_ast_sha256": "835619910aa7679ede8e10680cf6e7b9985b4c560c00853926afe5b06766f710", "signature": "role: Role | str, actor: str, allowed: Collection[Role | str]", "returns": "Role", "decorators": [], "old_globals": {"Collection": "collections.abc.Collection", "MASQUERADE": "local:MASQUERADE", "Role": "ummanu.board.roles.Role", "TaskError": "ummanu.kernel.errors.TaskError"}, "owning_globals": {"Collection": "collections.abc.Collection", "MASQUERADE": "local:MASQUERADE", "Role": "ummanu.board.roles.Role", "TaskError": "ummanu.kernel.errors.TaskError"}, "lexical_imports": [], "consumers": ["src/ummanu/board/reference_repair.py:19:owner-import", "src/ummanu/board/task_protocol/recovery.py:974:global", "src/ummanu/product_issues.py:21:import", "src/ummanu/sprint_commands.py:42:import", "src/ummanu/sprints.py:60:owner-import", "tests/po_fake_store.py:47:import", "tests/test_kernel_import_boundary.py:173:import", "tests/test_observer_voice.py:29:import", "tests/test_po_production_rights.py:55:import"]},
     "ArtifactOwnershipTaskError": {"old_owner": "src/ummanu/tasks.py", "old_line": 170, "owner": "src/ummanu/board/task_protocol/rows.py", "line": 61, "baseline_ast_sha256": "097004f27b9390cacd9d3f9de8a52bc96c23896c18032686a16340411ef727fb", "signature": null, "returns": null, "decorators": [], "old_globals": {"ArtifactOwnershipViolation": "ummanu.board.protocol_artifacts.ArtifactOwnershipViolation", "TaskError": "ummanu.kernel.errors.TaskError"}, "owning_globals": {"ArtifactOwnershipViolation": "ummanu.board.protocol_artifacts.ArtifactOwnershipViolation", "TaskError": "ummanu.kernel.errors.TaskError"}, "lexical_imports": [], "consumers": ["src/ummanu/board/task_protocol/sprint_guard.py:482:global", "tests/test_kernel_import_boundary.py:173:import", "tests/test_tasks.py:47:import"]},
