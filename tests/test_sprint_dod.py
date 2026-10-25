@@ -9,12 +9,91 @@ from pathlib import Path
 
 from ummanu import restore
 from ummanu.board import sprint_dod
+from ummanu.board.audit_contract import PROTOCOL_EVENT_RECORD_TYPE
 from ummanu.data import normalize_sprint_entity
 from ummanu.dispatch.observer_prompt import render_observer_prompt
 from ummanu.sprint_close import closeout_document
 
 BY = {"role": "observer", "actor": "observer", "at": "2026-10-15T00:00:00Z"}
 PO = {"role": "po", "actor": "operator", "at": "2026-10-16T00:00:00Z"}
+
+
+def release(ref: str, *, base: str = "main", sha: str = "a" * 40) -> dict:
+    return {"ref": ref, "event_id": "merge-" + ref, "record_type": PROTOCOL_EVENT_RECORD_TYPE,
+            "actor": {"role": "dispatcher"}, "transition": {"source": "assessment", "target": "done"},
+            "data": {"release_merge": {"base": base, "merge_sha": sha, "path": "pr"}}}
+
+
+class DeliveryTests(unittest.TestCase):
+    def test_every_linked_card_needs_a_release_and_a_new_card_takes_delivery_back(self):
+        items = sprint_dod.new_items(["ship", "verify"])
+        cards = [{"ref": "demo-1", "dod_item": "d1", "state": "done"}]
+        events = [release("demo-1")]
+        self.assertEqual(sprint_dod.section(items, cards=cards, events=events)["in_main"], 1)
+        for state in ("ready", "in_progress", "assessment", "done"):
+            with self.subTest(state=state):
+                pair = cards + [{"ref": "demo-2", "dod_item": "d1", "state": state}]
+                partial = sprint_dod.section(items, cards=pair, events=events)
+                self.assertEqual(partial["in_main"], 0)
+                complete = sprint_dod.section(items, cards=pair, events=events + [release("demo-2")])
+                self.assertEqual((complete["in_main"], complete["met"]), (1, 0))
+                self.assertEqual(len(complete["items"][0]["delivery"]["merged"]), 2)
+
+    def test_only_dispatcher_main_release_facts_prove_delivery(self):
+        items = sprint_dod.new_items(["ship"])
+        cards = [{"ref": "demo-1", "dod_item": "d1", "state": "done"}]
+        wrong = [release("demo-1", base="topic"), release("demo-1", sha=""),
+                 {**release("demo-1"), "actor": {"role": "worker"}},
+                 {**release("demo-1"), "transition": {"target": "assessment"}},
+                 {"ref": "demo-1", "kind": "reported", "outcome": "success", "payload": {"kind": "done"}}]
+        for fact in wrong:
+            with self.subTest(fact=fact):
+                self.assertEqual(sprint_dod.section(items, cards=cards, events=[fact])["in_main"], 0)
+
+    def test_empty_and_unlinked_cards_never_prove_an_item(self):
+        items = sprint_dod.new_items(["ship"])
+        for cards in ([], [{"ref": "demo-1", "dod_item": None}]):
+            self.assertEqual(sprint_dod.section(items, cards=cards, events=[release("demo-1")])["in_main"], 0)
+
+    def test_manual_evidence_survives_storage_met_and_reopen_but_cannot_replace_a_card(self):
+        items = sprint_dod.marked_in_main(sprint_dod.new_items(["ship"]), "d1", "operator evidence", BY)
+        items = sprint_dod.stored_items(sprint_dod.encode(items))
+        view = sprint_dod.section(items, cards=[], events=[])
+        self.assertEqual((view["in_main"], view["met"]), (1, 0))
+        self.assertEqual(view["items"][0]["delivery"]["by"], BY)
+        met = sprint_dod.met(items, "d1", "live proof", PO)
+        self.assertEqual(sprint_dod.section(met, cards=[], events=[])["met"], 1)
+        reopened = sprint_dod.reopened(met, "d1")
+        self.assertEqual(sprint_dod.section(reopened, cards=[], events=[])["in_main"], 1)
+        added = sprint_dod.section(reopened, cards=[{"ref": "demo-2", "dod_item": "d1"}], events=[])
+        self.assertEqual((added["in_main"], added["met"]), (0, 0))
+        with self.assertRaises(ValueError):
+            sprint_dod.marked_in_main(items, "d1", " ", BY)
+        with self.assertRaises(ValueError):
+            sprint_dod.stored_items([{**items[0], "in_main_manual": {"evidence": "unattributed"}}])
+
+    def test_withdrawals_need_successful_authorized_audit_and_never_give_vacuous_delivery(self):
+        items = sprint_dod.new_items(["ship"])
+        cards = [{"ref": "demo-1", "dod_item": "d1", "closed": True},
+                 {"ref": "demo-2", "dod_item": "d1", "closed": True}]
+        for kind in ("cancelled", "superseded", "wait_cancelled"):
+            withdrawn = {"ref": "demo-2", "event_id": "withdraw-2", "kind": kind,
+                         "outcome": "success", "actor": {"role": "observer"}}
+            delivered = sprint_dod.section(items, cards=cards, events=[release("demo-1"), withdrawn])
+            self.assertEqual(delivered["in_main"], 1)
+            self.assertEqual(delivered["items"][0]["delivery"]["excluded"][0]["kind"], kind)
+            self.assertEqual(sprint_dod.section(items, cards=cards[1:], events=[withdrawn])["in_main"], 0)
+            for bad in ({**withdrawn, "outcome": "refused"}, {**withdrawn, "actor": {"role": "worker"}}):
+                self.assertEqual(sprint_dod.section(items, cards=cards, events=[release("demo-1"), bad])["in_main"], 0)
+
+    def test_unavailable_sources_preserve_met_and_descope_without_claiming_zero_delivery(self):
+        items = sprint_dod.met(sprint_dod.new_items(["ship", "dropped"]), "d1", "live proof", BY)
+        items = sprint_dod.descoped(items, "d2", "out of scope", PO)
+        for cards, events in ((None, []), ([], None)):
+            view = sprint_dod.section(items, cards=cards, events=events, unavailable="source refused")
+            self.assertEqual((view["in_main"], view["met"], view["total"]), (None, 1, 1))
+            self.assertEqual(view["items"][0]["delivery"]["reason"], "source refused")
+            self.assertEqual(view["items"][1]["delivery"]["state"], "descoped")
 
 
 def weighed(*weights: int) -> list[dict]:

@@ -1332,17 +1332,8 @@ class SprintReadLayer(ProtocolBoundary):
         listing: frozenset[str] | None = None,
         sprint: str | None = None,
     ) -> SourceSet:
-        """Every source a sprint document is built from, read once each, never once per sprint.
-
-        Sources fail apart and each failure marks only the sections it feeds. The journal is read here,
-        not inside `status_views`, so an unreadable `board/events.ndjson` cannot fail the sprint board.
-
-        `listing` is the listing's status filter; with it the journal is read as a slice covering only
-        kept non-terminal sprints (`_journal_references`). `sprint` keeps that one sprint's row and
-        its slice. Other documents read the whole journal, since comment delivery is placed by
-        position in the whole stream.
-
-        Uses `SprintReader.list(create=False)`, never `show` (which creates the board).
+        """Read each source once, preserving independent failures of cards, rows and audit.
+        Scope journal reads to selected sprints' current work and structured delivery facts.
         """
         client = self._client()
         liveness = self._production(data_dir, now=now)
@@ -1372,6 +1363,17 @@ class SprintReadLayer(ProtocolBoundary):
         try:
             if rows is None:
                 raise refused or LookupError("the sprint board answered nothing")
+            reader.project_dod(
+                rows, linked if cards.answered else None,
+                audit=audit_traversal(journal.value if journal.answered else []),
+                unavailable=(
+                    cards.source.reason if not cards.answered
+                    else journal.source.reason if not journal.answered else None
+                ),
+            )
+            linked = {ref: [card for card in items if not card.get("closed")] for ref, items in linked.items()}
+            if cards.answered:
+                cards = Reading(SOURCE_CARDS, cards.source, linked)
             # Status-view rules stay in `SprintReader`; it gets the journal handed in, so it cannot
             # fail for the journal's reasons.
             views = reader.status_views(
@@ -1474,7 +1476,7 @@ class SprintReadLayer(ProtocolBoundary):
     def _linked_cards(self, reader: SprintReader, data_dir: Path, *, now: float) -> Reading:
         """Every sprint's cards, in one Pipeline listing, or the reason there are none to show."""
         try:
-            linked = reader.linked_cards()
+            linked = reader.linked_cards(include_archived=True)
         except Exception as exc:  # noqa: BLE001 -- confined to this source read
             return Reading(
                 SOURCE_CARDS,
@@ -1694,13 +1696,10 @@ def _said(settled: tuple[str, str], card: str | None) -> dict[str, Any]:
 def _journal_references(
     rows: list[dict[str, Any]], linked: dict[str, list[dict[str, Any]]]
 ) -> set[str]:
-    """The refs a non-terminal sprint's sections consult: its own, its current card's, its linked cards'.
-
-    Closed and stopped sprints are judged on their own record and add nothing.
-    """
+    """Scope audit to current work and structured DoD facts, including archived linked cards."""
     references: set[str] = set()
     for row in rows:
-        if str(row.get("status") or "") in SPRINT_TERMINAL_STATUSES:
+        if str(row.get("status") or "") in SPRINT_TERMINAL_STATUSES and not row["dod"]["structured"]:
             continue
         reference = str(row.get("ref") or "")
         references.add(reference)

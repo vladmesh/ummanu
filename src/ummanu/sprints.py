@@ -334,11 +334,7 @@ def _sprint_board(client: SqlCardClient, *, create: bool) -> int | None:
 
 
 class _AuditOnce:
-    """Share committed audit traversal supplied as `events` or owned by the provided
-    card client (`audit`). Never open an unrelated data-dir journal: SQL and file
-    backends have different audit owners. With neither source, return an empty
-    traversal.
-    """
+    """Share supplied audit events or cache slices from the card client's audit owner."""
 
     def __init__(
         self,
@@ -348,13 +344,11 @@ class _AuditOnce:
     ) -> None:
         self._events: list[dict[str, Any]] | None = events
         self._audit = audit
+        self._loaded_refs: set[str] = set()
+        self._loaded_events: list[dict[str, Any]] = []
 
     def events(self, references: set[str] | None = None) -> list[dict[str, Any]]:
-        """The committed records of these refs; an audit owner is never read whole from
-        here. A walked audit is narrowed here; an audit owner is asked for the slice
-        itself, so a summary of one sprint reads that sprint's records and not the
-        history.
-        """
+        """Read only missing reference slices; reuse supplied or cached committed events."""
         if self._events is not None:
             if references is None:
                 return self._events
@@ -362,16 +356,16 @@ class _AuditOnce:
         if self._audit is not None:
             if references is None:
                 raise TypeError("an audit owner is read by the refs of a sprint, never whole")
-            return self._audit.events(references=references)
+            missing = references - self._loaded_refs
+            if missing or not self._loaded_refs:
+                self._loaded_events.extend(self._audit.events(references=missing))
+                self._loaded_refs.update(references)
+            return [event for event in self._loaded_events if event.get("ref") in references]
         return []
 
 
 def audit_traversal(events: list[dict[str, Any]]) -> _AuditOnce:
-    """A traversal over a committed audit somebody has already walked. The journal is a
-    source of its own, and a caller that has to be able to say *the journal* refused --
-    rather than the board it is read beside -- walks it itself and passes the result to
-    `status_views`, which then opens nothing.
-    """
+    """Traverse supplied committed events without opening another audit source."""
     return _AuditOnce(events=events)
 
 
@@ -432,8 +426,6 @@ class SprintReader:
                 comments=None,
                 include_resume_freshness=False,
             )
-            # Without live cards this value would claim freshness based on incomplete data.  `show`
-            # and `status` populate it after reading the linked cards instead.
             sprint.pop("resume_freshness", None)
             if statuses and sprint["status"] not in statuses:
                 continue
@@ -461,7 +453,6 @@ class SprintReader:
                 comments=comments,
                 include_resume_freshness=False,
             )
-            # Freshness needs the linked cards this view deliberately does not read.
             sprint.pop("resume_freshness", None)
             result.append(sprint)
         return sorted(result, key=lambda sprint: (sprint["ref"], sprint["id"]))
@@ -496,7 +487,6 @@ class SprintReader:
                 for comment in comments_raw
                 if isinstance(comment, dict)
             ]
-        # Freshness requires linked cards, loaded after normalization.
         sprint = self._normalize(
             raw,
             _sprint_metadata(self.client.call("getTaskMetadata", task_id=task_id)),
@@ -504,7 +494,12 @@ class SprintReader:
             include_resume_freshness=False,
         )
         if include_cards:
-            sprint["cards"] = select_cards(TaskReader(self.client), sprint=reference)
+            reader = TaskReader(self.client)
+            cards = (reader.list(sprint=reference, include_archived=True) if sprint["dod"]["structured"]
+                     else select_cards(reader, sprint=reference))
+            sprint["cards"] = [card for card in cards if not card.get("closed")]
+            audit = audit if audit is not None else _AuditOnce(audit=self.audit)
+            self.project_dod([sprint], {reference: cards}, audit=audit)
         if include_resume_freshness:
             sprint["resume_freshness"] = self._resume_freshness(sprint, sprint.get("resume"), audit=audit)
         return sprint
@@ -545,14 +540,10 @@ class SprintReader:
             "repositories": repositories,
             **_ownership(meta),
             **_observer(meta),
-            # Always both roles, always a state: "the owner pinned nobody" is an answer this
-            # reader gives, never a key it leaves out for the caller to interpret.
             "executors": stored_executors(meta),
-            # Null and empty for a sprint opened before either was recorded, never inferred.
             "po_session": meta.get(PO_SESSION_FIELD) or None,
             "allowed_productions": owner_decisions.productions(_json_list(meta.get(ALLOWED_PRODUCTIONS_FIELD)), decisions),
             "local_run_exceptions": local_run_exceptions,
-            # The e2e run budget (0023): `e2e: <used> of <budget>`, and the cards that spent the runs.
             "e2e": sprint_e2e.sprint_budget(meta),
             "status": read.state.value,
             "budget": budget,
@@ -561,9 +552,6 @@ class SprintReader:
                 "created_at": _rfc3339(raw.get("date_creation")),
                 "updated_at": _rfc3339(raw.get("date_modification")),
                 "backend": {"kind": BOARD_STORE_KIND, "store_ref": _text(raw.get("reference"))},
-                # A restored sprint sits on a fresh board row, so its own dates
-                # describe the recovery, not the sprint. The dates it was restored
-                # from stay readable here.
                 "source": read.source_audit.to_document() if read.source_audit is not None else None,
             },
         }
@@ -578,17 +566,38 @@ class SprintReader:
             result["e2e"]["summary"] += f"; no more e2e (standing decision {result['ref']}/{refusal['id']})"
         return result
 
-    def linked_cards(self) -> dict[str, list[dict[str, Any]]]:
-        """Every Pipeline card grouped by the sprint it is linked to, in one listing.
-        One pass for the whole installation, not one per sprint: `TaskReader.list`
-        already reads the board once and batches the metadata of every row, so a caller
-        that needs the cards of many sprints asks for this once and indexes it, exactly
-        as `statuses` does.
-        """
+    def linked_cards(self, *, include_archived: bool = False) -> dict[str, list[dict[str, Any]]]:
+        """Group Pipeline cards by explicit sprint in one listing with batched metadata."""
         linked: dict[str, list[dict[str, Any]]] = {}
-        for card in select_cards(TaskReader(self.client)):
+        reader = TaskReader(self.client)
+        cards = reader.list(include_archived=True) if include_archived else select_cards(reader)
+        for card in cards:
             linked.setdefault(str(card.get("sprint") or ""), []).append(card)
         return linked
+
+    def project_dod(
+        self, sprints: list[dict[str, Any]], linked: dict[str, list[dict[str, Any]]] | None,
+        *, audit: _AuditOnce, unavailable: str | None = None,
+    ) -> None:
+        """Project delivery over one batch of complete card rows and committed audit facts."""
+        structured = [sprint for sprint in sprints if sprint["dod"]["structured"]]
+        if not structured:
+            return
+        events = None
+        if linked is not None and unavailable is None:
+            refs = {sprint["ref"] for sprint in structured} | {
+                card["ref"] for sprint in structured for card in linked.get(sprint["ref"], [])
+            }
+            try:
+                events = audit.events(refs)
+            except (TaskError, OSError, ValueError) as exc:
+                unavailable = f"committed audit unavailable: {exc}"
+        for sprint in structured:
+            sprint["dod"] = sprint_dod.section(
+                sprint_dod.items_of(sprint["dod"]),
+                cards=None if linked is None else linked.get(sprint["ref"], []),
+                events=events, unavailable=unavailable,
+            )
 
     def status_views(
         self,
@@ -599,10 +608,7 @@ class SprintReader:
         headless: dict[str, dict[str, Any]] | None = None,
         audit: _AuditOnce | None = None,
     ) -> list[dict[str, Any]]:
-        """Assemble statuses from preloaded sprint rows and cards without new board
-        reads. Consume committed audit at most once: use a supplied traversal when
-        provided, otherwise read it lazily.
-        """
+        """Assemble statuses from preloaded rows and cards, sharing one audit traversal."""
         audit = audit if audit is not None else _AuditOnce(audit=self.audit)
         result = []
         for listed in sprints:
@@ -622,14 +628,17 @@ class SprintReader:
         headless: dict[str, dict[str, Any]] | None = None,
         create: bool = False,
     ) -> list[dict[str, Any]]:
-        """Read sprint metadata, Pipeline cards and committed audit once per status
-        batch, then assemble each sprint's view without repeating these backend reads.
-        """
+        """Read one batch of metadata, cards and audit for every sprint's status."""
+        rows = select_sprints(self, create=create)
+        linked = self.linked_cards(include_archived=True)
+        audit = _AuditOnce(audit=self.audit)
+        self.project_dod(rows, linked, audit=audit)
         return self.status_views(
-            select_sprints(self, create=create),
-            self.linked_cards(),
+            rows,
+            {ref: [card for card in cards if not card.get("closed")] for ref, cards in linked.items()},
             observers=observers,
             headless=headless,
+            audit=audit,
         )
 
     def status(
@@ -662,27 +671,17 @@ class SprintReader:
             "current_task": sprint["current_task"],
             "cards": {key: sorted(value) for key, value in sorted(states.items())},
             "budget": sprint["budget"],
-            # The last observer decision itself, beside the freshness verdict on it. Reading one
-            # without the other is what made "what is this sprint doing" a second read: the entry
-            # is already on the row every caller of this view has just read.
+            "dod": sprint["dod"],
             "resume": sprint.get("resume"),
             "resume_freshness": sprint["resume_freshness"],
             "stop_reason": "budget_hard_limit" if sprint["status"] == "stopped" else None,
             "observer": observer or {"state": "unknown"},
-            # The declared executor context, beside the live observer state: which profiles this
-            # sprint's cards are pinned to, and where the observer is free to choose.
             "executors": sprint.get("executors") or stored_executors({}),
-            # The PO session this sprint answers to and the productions it may touch.
             "po_session": sprint.get("po_session"),
             "allowed_productions": list(sprint.get("allowed_productions") or []),
             "owner_decisions": list(sprint.get("owner_decisions") or []),
             "local_run_exceptions": sprint.get("local_run_exceptions", []),
-            # The e2e run budget: runs used of the budget, and the cards that spent them.
             "e2e": sprint.get("e2e") or sprint_e2e.sprint_budget({}),
-            # This sprint's own cards that owe a worker no dispatcher record can name
-            # (secretary-1544). Any column of this sprint, not only In progress: the column is what
-            # cannot say it, and a sprint whose only visible signal is "3 in progress" reads as
-            # moving while nothing is.
             "degraded_cards": {
                 reference: detail
                 for reference, detail in sorted((headless or {}).items())
@@ -697,11 +696,7 @@ class SprintReader:
         *,
         audit: _AuditOnce | None = None,
     ) -> dict[str, Any]:
-        """The freshness of a sprint's resume, read here and nowhere else. An open
-        sprint is judged against the significant linked-card events of the committed
-        audit; a closed or stopped sprint against its own record and nothing else,
-        since that record is frozen at the terminal transition.
-        """
+        """Judge open resumes against committed events and terminal ones against their frozen record."""
         if not resume:
             return {
                 "fresh": False,
@@ -980,10 +975,8 @@ class SprintWriter(SprintLifecycleMixin):
         standing_decisions: list[dict[str, Any]] | None = None,
         dod_items: list[str] | None = None,
     ) -> SprintCreateIntent:
-        """Normalize and stage a replayable sprint request. Refuse identical request
-        ids with different intent before side effects; preserve declared observer and
-        reservations. Canonicalize roots at admission, never during recovery;
-        unresolved roots fail before writes.
+        """Normalize replayable sprint intent, preserving observers and reservations.
+        Canonicalize repository roots at admission and reject unresolved roots.
         """
         goal = goal.strip()
         reference = reference.strip()
@@ -2099,9 +2092,7 @@ class SprintWriter(SprintLifecycleMixin):
         self, *, role: str, actor: str, reference: str, texts: list[str], reason: str,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Append open items to the sprint's DoD: the PO's audited change, also how a free-text
-        DoD becomes addressable.
-        """
+        """Append open items as the PO, making a free-text DoD addressable."""
         self._role(role, {"po"}, actor=actor)
         texts = [str(text).strip() for text in texts]
         if not texts:
@@ -2133,6 +2124,18 @@ class SprintWriter(SprintLifecycleMixin):
         return self._dod_write(
             "dod_item_met", role, actor, reference, request_id, payload,
             lambda items, by: sprint_dod.met(_structured(items), item, payload["evidence"], by),
+        )
+
+    def mark_dod_in_main(
+        self, *, role: str, actor: str, reference: str, item: str, evidence: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Mark delivery with evidence only for an item without any linked cards."""
+        self._role(role, {"po", "observer"}, actor=actor)
+        payload = {"item": item, "evidence": _required(evidence, "an item in main needs its --evidence")}
+        return self._dod_write(
+            "dod_item_in_main", role, actor, reference, request_id, payload,
+            lambda items, by: sprint_dod.marked_in_main(_structured(items), item, payload["evidence"], by),
         )
 
     def reopen_dod_item(
@@ -2192,13 +2195,17 @@ class SprintWriter(SprintLifecycleMixin):
         self.client._execute("SELECT ref FROM sprints WHERE ref = %s FOR UPDATE", (reference,))
         known = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
         if known is not None:
-            # A replay is matched on what the caller asked; `recorded` facts were read at the first write.
             asked = {key: (known.get("payload") or {}).get(key) for key in payload}
             if (known.get("kind"), known.get("ref"), asked) != (kind, reference, payload):
                 raise TaskError("validation", "request id already belongs to another sprint write", 2)
+            if kind == "dod_item_in_main" and known["actor"] != {"role": role, "id": actor}:
+                raise TaskError("validation", "request id belongs to another author", 2)
             return self._write(kind, role, actor, reference, request_id, payload, lambda _: None)
         items = sprint_dod.items_of(self.reader.show(reference, include_cards=False)["dod"])
-        # Refuse a change the items cannot take before anything is staged.
+        if kind == "dod_item_in_main":
+            cards = TaskReader(self.client).list(sprint=reference, include_archived=True)
+            if any(card.get("dod_item") == payload["item"] for card in cards):
+                raise TaskError("validation", "manual in-main evidence is forbidden for an item with linked cards", 2)
         try:
             change(items, {"role": role, "actor": actor, "at": _now()})
             if recorded is not None:
@@ -2210,11 +2217,12 @@ class SprintWriter(SprintLifecycleMixin):
             event = self.audit.pending_event(request_id)
             assert event is not None
             by = {"role": role, "actor": actor, "at": str(event["occurred_at"])}
-            self.client.call(
+            if not self.client.call(
                 "saveTaskMetadata",
                 task_id=_sprint_number(snapshot),
                 values={sprint_dod.FIELD: sprint_dod.encode(change(items, by))},
-            )
+            ):
+                raise TaskError("backend_error", "board store rejected the DoD metadata write", 1)
 
         return self._write(kind, role, actor, reference, request_id, payload, mutation)
 
@@ -2771,6 +2779,7 @@ class SprintWriter(SprintLifecycleMixin):
             "dod_items_added",
             "dod_item_weighed",
             "dod_item_met",
+            "dod_item_in_main",
             "dod_item_reopened",
             "dod_item_edited", "dod_item_descoped",
         }:
@@ -2855,10 +2864,7 @@ def _sprint_number(sprint: SprintWriteSnapshot | dict[str, Any] | None) -> int:
 
 
 def _is_sprint_row(raw: Any) -> bool:
-    """A row on the sprint board becomes a sprint when it carries a sprint reference. A
-    create writes the reference after the fields the sprint was admitted with, so a row
-    still without one is an unfinished create its own staged transaction repairs.
-    """
+    """Only a sprint reference identifies a completed sprint-board row."""
     return isinstance(raw, dict) and str(raw.get("reference") or "").startswith(SPRINT_REFERENCE_PREFIX)
 
 
@@ -2955,9 +2961,7 @@ def _timestamp(value: str) -> datetime | None:
 
 
 def _ownership(meta: dict[str, str]) -> dict[str, Any]:
-    """The sprint's product, issues and reservations, only where the row has them. A
-    sprint created before ownership existed carries none of the three keys.
-    """
+    """Expose ownership only where the stored row declares it."""
     result: dict[str, Any] = {}
     if "sprint_product" in meta:
         result["product"] = meta["sprint_product"]
@@ -2969,10 +2973,7 @@ def _ownership(meta: dict[str, str]) -> dict[str, Any]:
 
 
 def _observer(meta: dict[str, str]) -> dict[str, Any]:
-    """The sprint's declared observer, only where the row carries the field. Three
-    states stay apart, because their repairs differ: the key is missing, the key holds
-    one of the four tagged forms, or the key holds something else.
-    """
+    """Keep absent, valid and malformed stored observer declarations distinct."""
     if OBSERVER_FIELD not in meta:
         return {}
     return {"observer": parse_observer(meta[OBSERVER_FIELD])}

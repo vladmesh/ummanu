@@ -382,6 +382,7 @@ def _sprint_now(work: dict[str, Any], observer: dict[str, Any]) -> str:
     if heads:
         parts.append(heads)
     if "dod" in work:
+        parts.append(_dod_counts(work["dod"]))
         parts.append(_dod_scale(work["dod"]))
     budget = _mapping(work.get("budget"))
     if budget:
@@ -485,25 +486,64 @@ CALL_FIELDS = {"selected_step", "selected_why", "rejected_alternatives", "next_s
 DOD_STATE_TONES = {"met": "ok", "descoped": "warn"}
 
 
+def _dod_counts(progress: dict[str, Any]) -> str:
+    if not progress["structured"]:
+        return ""
+    delivered = progress["in_main"]
+    return '<p class="dod-counts">' + escape(
+        f"в main {delivered if delivered is not None else 'unknown'} / {progress['total']} · "
+        f"проверено {progress['met']} / {progress['total']}"
+    ) + "</p>"
+
+
 def _dod_items_table(items: list[dict[str, Any]]) -> str:
-    """Each addressable item with its state, weight and the evidence that met it or the reason it was descoped."""
+    """Show each item's delivery, live verification, weight and evidence from the shared projection."""
     rows = [
         [
             f'<span class="mono">{escape(str(item.get("id") or ""))}</span>',
             _chip(str(item.get("state") or ""), DOD_STATE_TONES.get(str(item.get("state")), "")),
+            _dod_delivery(item),
             escape(str(item.get("weight") if item.get("weight") is not None else "not weighed")),
             _long(item.get("text"), chars=200),
             _dod_item_basis(item),
         ]
         for item in items
     ]
-    return _rows(["item", "state", "weight", "", "evidence"], rows)
+    return _rows(["item", "проверено", "в main", "weight", "", "evidence"], rows)
+
+
+def _dod_delivery(item: dict[str, Any]) -> str:
+    delivery = item["delivery"]
+    state = delivery["state"]
+    label = {"in_main": "в main", "pending": "ожидает merge", "unknown": "unknown",
+             "descoped": "descoped"}[state]
+    drawn = _chip(label, "ok" if state == "in_main" else "")
+    if state == "in_main" and item["state"] == "open":
+        drawn += " " + escape("ожидает живой проверки")
+    return drawn
 
 
 def _dod_item_basis(item: dict[str, Any]) -> str:
     if item.get("state") == "descoped":
         return "descoped: " + _long(_mapping(item.get("descoped")).get("reason"))
-    return _long(item.get("evidence")) if item.get("evidence") else ""
+    delivery = item["delivery"]
+    parts = [_long(item["evidence"])] if item["evidence"] else []
+    if item["met_by"]:
+        parts.append(_long("met: " + ", ".join(item["met_by"].values())))
+    if delivery["source"]:
+        parts.append(escape(delivery["source"]))
+    if delivery["evidence"]:
+        parts.append(_long(delivery["evidence"]))
+        parts.append(_long(", ".join(delivery["by"].values())))
+    parts.extend(_long(f"{fact['ref']}: {fact['base']} {fact['merge_sha']} ({fact['event_id']})")
+                 for fact in delivery["merged"])
+    parts.extend(_long(f"{fact['ref']}: {fact['kind']} ({fact['event_id']})")
+                 for fact in delivery["excluded"])
+    if delivery["reason"]:
+        parts.append(_long(delivery["reason"]))
+    if delivery["cards"]:
+        parts.append(_long(", ".join(delivery["cards"])))
+    return "<br>".join(parts)
 
 
 def _sprint_tabs(ref: str, value: dict[str, Any] | None, work: dict[str, Any]) -> str:
@@ -524,9 +564,10 @@ def _sprint_tabs(ref: str, value: dict[str, Any] | None, work: dict[str, Any]) -
         else '<p class="empty">the observer has cut no card for this sprint yet.</p>'
     )
     dod = str(value.get("definition_of_done") or "")
-    items = _entries(_mapping(value.get("dod")).get("items"))
+    progress = value["dod"]
+    items = _entries(progress["items"])
     dod_body = (
-        (_dod_items_table(items) if items else "")
+        _dod_counts(progress) + (_dod_items_table(items) if items else "")
         + (f'<div class="doc">{markdown.render(dod)}</div>' if dod.strip() else "")
     ) or '<p class="empty">this sprint has no Definition of Done.</p>'
     resume = _mapping(value.get("resume"))
@@ -646,4 +687,3 @@ def _executor_rows(executors: dict[str, Any]) -> list[list[str]]:
             said = escape(EXECUTOR_CHOICE)
         rows.append([escape(role), said])
     return rows
-

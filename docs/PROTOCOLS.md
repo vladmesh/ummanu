@@ -2460,6 +2460,26 @@ repeat re-estimates it, and each call is its own `dod_item_weighed` history even
 `--evidence`; `sprint dod reopen` takes a met item back with a reason. `sprint dod add` (PO only) appends
 items with a reason, which is also how a free-text sprint becomes addressable.
 
+Delivery and live verification are independent: `dod.in_main` counts items in main, while
+`dod.met` counts verified items over the same `dod.total` (excluding descoped items). Each item's
+`delivery` names its state, source, linked cards, merge facts and excluded cards. Automatic delivery
+requires at least one counted card and a committed dispatcher Done transition with `release_merge`
+(`base: main`, nonempty `merge_sha`) for every counted card. The set comes from explicit `sprint`
+and `dod_item` metadata on all active and archived cards. Only successful PO/observer `cancelled`,
+`superseded` or `wait_cancelled` audit records withdraw a card; archives alone and seed `supersedes`
+relationships do not withdraw work. A new unmerged linked card removes automatic delivery.
+Unlinked cards, ordinary Done, reports, review, CI and observer resume text prove no merge.
+
+`sprint dod in-main --ref sprint:N --item dN --role observer --evidence <proof> --request-id ID`
+(also PO) records delivery only for an item with no linked cards, including archived or withdrawn
+cards. It uses the usual sprint/identity guards and request replay, with a `dod_item_in_main` audit
+event and optional `in_main_manual` evidence/role/actor/at in the existing item metadata. Any later
+card makes that manual evidence ineffective. Delivery never meets or reopens an item and never
+relaxes sprint close. A missing card or audit source yields `delivery.state: unknown` with its
+reason and `dod.in_main: null`, preserving met, weights and evidence. Metadata-only reads likewise
+leave delivery unknown. Sprint show/status/list and the web use this projection; the sprint page
+shows both counts and each item's delivery basis beside its live evidence.
+
 The goal and the items are the owner's contract, so two more verbs are PO only and need an open sprint.
 `sprint dod edit --item dN --text <wording> --reason <why>` rewords an open or met item; its id, weight,
 state and evidence stay, and its `dod_item_edited` event records the new `text`, the `previous_text` and
@@ -2493,6 +2513,7 @@ What `SprintWriter._write` answers for every sprint write it handles when the sp
 | `dod_item_descoped` | `refused` — `closed`, exit status `3` |
 | `dod_item_edited` | `refused` — `closed`, exit status `3` |
 | `dod_item_met` | `refused` — `closed`, exit status `3` |
+| `dod_item_in_main` | `refused`, `closed`, exit status `3` |
 | `dod_item_reopened` | `refused` — `closed`, exit status `3` |
 | `dod_item_weighed` | `refused` — `closed`, exit status `3` |
 | `dod_items_added` | `refused` — `closed`, exit status `3` |

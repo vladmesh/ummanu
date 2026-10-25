@@ -1,9 +1,6 @@
-"""Addressable Definition of Done items of a sprint, their weights and the progress they give.
-
-A sprint carries either an ordered item list (structured) or only its free-text DoD
-(unstructured); the list is never derived from the text. An item is open, met or descoped: a met
-item names its evidence, a descoped one who took it out and why. Progress is the met share of the
-summed weights of the items still in scope.
+"""Structured DoD items retain independent delivery and live-verification evidence.
+Met progress uses in-scope weights; main delivery uses explicit links and durable facts.
+Free-text DoD never supplies inferred items or links.
 """
 
 from __future__ import annotations
@@ -12,6 +9,9 @@ import json
 import re
 from collections.abc import Mapping
 from typing import Any
+
+from ummanu.board.audit_contract import card_transition_of
+from ummanu.board.task_protocol.rows import RELEASE_MERGE_KEY, is_merged_release
 
 FIELD = "sprint_dod_items"
 WEIGHTS = (1, 2, 3, 5, 8, 13)
@@ -29,6 +29,8 @@ _MET_BY = frozenset({"role", "actor", "at"})
 #: Present on a descoped item only, so an item stored before descoping existed reads unchanged.
 _DESCOPED_KEY = "descoped"
 _DESCOPED_BY = frozenset({*_MET_BY, "reason"})
+_MAIN_KEY = "in_main_manual"
+_MAIN_BY = frozenset({*_MET_BY, "evidence"})
 
 
 def new_items(texts: list[str], *, existing: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -63,7 +65,7 @@ def stored_items(raw: Any) -> list[dict[str, Any]] | None:
         raise TypeError("stored Definition of Done items must be a list")
     seen: set[str] = set()
     for item in items:
-        if not isinstance(item, dict) or set(item) - {_DESCOPED_KEY} != _KEYS:
+        if not isinstance(item, dict) or set(item) - {_DESCOPED_KEY, _MAIN_KEY} != _KEYS:
             raise ValueError("a stored Definition of Done item has exactly " + ", ".join(sorted(_KEYS)))
         identifier = item["id"]
         if not isinstance(identifier, str) or not _ID.fullmatch(identifier) or identifier in seen:
@@ -88,6 +90,8 @@ def stored_items(raw: Any) -> list[dict[str, Any]] | None:
             raise ValueError(f"Definition of Done item {identifier} is met without evidence and author")
         if descoped and not _valid_record(item[_DESCOPED_KEY], _DESCOPED_BY):
             raise ValueError(f"Definition of Done item {identifier} is descoped without author and reason")
+        if _MAIN_KEY in item and not _valid_record(item[_MAIN_KEY], _MAIN_BY):
+            raise ValueError(f"Definition of Done item {identifier} is in main without evidence and author")
     return items
 
 
@@ -174,6 +178,19 @@ def reopened(items: list[dict[str, Any]], item_id: str) -> list[dict[str, Any]]:
     ]
 
 
+def marked_in_main(
+    items: list[dict[str, Any]], item_id: str, evidence: str, by: Mapping[str, str]
+) -> list[dict[str, Any]]:
+    """Record manual delivery independently of met; the writer must rule out linked cards."""
+    if not evidence.strip():
+        raise ValueError("an item in main needs its evidence")
+    _in_scope(items, item_id)
+    return [
+        {**item, _MAIN_KEY: {**by, "evidence": evidence.strip()}} if item["id"] == item_id else item
+        for item in items
+    ]
+
+
 def reworded(items: list[dict[str, Any]], item_id: str, text: str) -> list[dict[str, Any]]:
     """The items with one open or met item's wording replaced; its state, weight and evidence stay."""
     wording = text.strip()
@@ -205,7 +222,7 @@ def items_of(view: Mapping[str, Any]) -> list[dict[str, Any]] | None:
     if not view["structured"]:
         return None
     return [
-        {key: value for key, value in item.items() if key in _KEYS or key == _DESCOPED_KEY}
+        {key: value for key, value in item.items() if key in _KEYS or key in {_DESCOPED_KEY, _MAIN_KEY}}
         for item in view["items"]
     ]
 
@@ -214,11 +231,12 @@ def unmet(items: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     return [item for item in items or [] if item["state"] == OPEN]
 
 
-def section(items: list[dict[str, Any]] | None) -> dict[str, Any]:
-    """What every reader shows: the items with their scale share, and the progress they give.
-
-    Until every item in scope is weighed, every item counts as weight 1. A descoped item
-    has no share and is left out of `total` and `progress`.
+def section(
+    items: list[dict[str, Any]] | None, *, cards: list[dict[str, Any]] | None = None,
+    events: list[dict[str, Any]] | None = None, unavailable: str | None = None,
+) -> dict[str, Any]:
+    """Project met shares and delivery independently, excluding descoped items from both counts.
+    Until every in-scope item is weighed, each counts as weight 1.
     """
     if items is None:
         return {
@@ -229,21 +247,70 @@ def section(items: list[dict[str, Any]] | None) -> dict[str, Any]:
             "met": 0,
             "total": 0,
             "progress": None,
+            "in_main": None,
         }
     counted = [item for item in items if item["state"] != DESCOPED]
     estimated = bool(counted) and all(item["weight"] is not None for item in counted)
     weights = [0 if item["state"] == DESCOPED else item["weight"] if estimated else 1 for item in items]
     whole = sum(weights)
     done = sum(weight for weight, item in zip(weights, items, strict=True) if item["state"] == MET)
+    deliveries = [_delivery(item, cards, events, unavailable) for item in items]
     return {
         "structured": True,
         "reason": None if estimated else UNESTIMATED,
         "items": [
-            {**item, "share": weight / whole if whole else 0.0}
-            for weight, item in zip(weights, items, strict=True)
+            {**item, "share": weight / whole if whole else 0.0, "delivery": delivery}
+            for weight, item, delivery in zip(weights, items, deliveries, strict=True)
         ],
         "estimated": estimated,
         "met": sum(1 for item in items if item["state"] == MET),
         "total": len(counted),
         "progress": done / whole if whole else None,
+        "in_main": (
+            None if any(delivery["state"] == "unknown" for delivery in deliveries)
+            else sum(delivery["state"] == "in_main" for delivery in deliveries)
+        ),
     }
+
+
+def _delivery(
+    item: dict[str, Any], cards: list[dict[str, Any]] | None,
+    events: list[dict[str, Any]] | None, unavailable: str | None,
+) -> dict[str, Any]:
+    """Only explicit links and committed release or withdrawal facts decide delivery."""
+    basis: dict[str, Any] = {
+        "state": "pending", "source": None, "reason": None, "cards": None,
+        "merged": [], "excluded": [], "evidence": None, "by": None,
+    }
+    if item["state"] == DESCOPED:
+        return {**basis, "state": DESCOPED, "cards": []}
+    if unavailable or cards is None or events is None:
+        return {**basis, "state": "unknown", "reason": unavailable or "cards and committed audit were not loaded"}
+    linked = [card for card in cards if card.get("dod_item") == item["id"]]
+    basis["cards"] = sorted(card["ref"] for card in linked)
+    if not linked:
+        manual = item.get(_MAIN_KEY)
+        if manual is not None:
+            return {**basis, "state": "in_main", "source": "manual", "evidence": manual["evidence"],
+                    "by": {key: manual[key] for key in _MET_BY}}
+        return {**basis, "reason": "no linked cards or manual evidence"}
+    releases: dict[str, dict[str, Any]] = {}
+    withdrawn: dict[str, dict[str, Any]] = {}
+    for event in events:
+        ref = event.get("ref")
+        if ref not in basis["cards"]:
+            continue
+        if is_merged_release(event) and (card_transition_of(event) or (None, None))[1] == "done":
+            fact = event["data"][RELEASE_MERGE_KEY]
+            if fact.get("merge_sha") and fact.get("base") == "main":
+                releases[ref] = {"ref": ref, "event_id": event["event_id"], **fact}
+        if (event.get("kind") in {"cancelled", "superseded", "wait_cancelled"}
+                and event.get("outcome") == "success"
+                and event.get("actor", {}).get("role") in {"po", "observer"}):
+            withdrawn[ref] = {"ref": ref, "event_id": event["event_id"], "kind": event["kind"]}
+    considered = [card["ref"] for card in linked if card["ref"] not in withdrawn]
+    basis.update(source="release_merge", merged=[releases[ref] for ref in sorted(considered) if ref in releases],
+                 excluded=[withdrawn[ref] for ref in sorted(withdrawn)])
+    if considered and all(ref in releases for ref in considered):
+        return {**basis, "state": "in_main"}
+    return {**basis, "reason": "waiting for release merge facts" if considered else "all linked cards withdrawn"}

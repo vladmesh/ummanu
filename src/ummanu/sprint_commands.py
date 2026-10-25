@@ -295,6 +295,8 @@ def _add_dod_subcommands(commands) -> None:
         ("set-weight", run_dod_set_weight, ("po", "observer"),
          "weigh one item 1, 2, 3, 5, 8 or 13 by its expected difficulty; repeat to re-estimate"),
         ("meet", run_dod_meet, ("po", "observer"), "mark one item met, naming its evidence"),
+        ("in-main", run_dod_in_main, ("po", "observer"),
+         "record in-main evidence for an item without cards; linked cards require automatic release merge facts"),
         ("reopen", run_dod_reopen, ("po", "observer"), "take back a met item whose evidence did not hold"),
         ("edit", run_dod_edit, ("po",), "PO only: reword an open or met item; its id, weight and evidence stay"),
         ("descope", run_dod_descope, ("po",),
@@ -314,7 +316,7 @@ def _add_dod_subcommands(commands) -> None:
             command.add_argument("--text", required=True, help="the item's new wording")
         if name == "set-weight":
             command.add_argument("--weight", type=int, required=True, choices=WEIGHTS)
-        if name == "meet":
+        if name in {"meet", "in-main"}:
             command.add_argument("--evidence", required=True, help="the card, PR or sprint comment that shows it")
         else:
             command.add_argument("--reason", required=True)
@@ -832,6 +834,13 @@ def run_dod_reopen(args: argparse.Namespace) -> int:
     return _write(args, lambda writer: writer.reopen_dod_item(
         role=args.role, actor=args.actor or args.role, reference=args.ref,
         item=args.item, reason=args.reason, request_id=args.request_id,
+    ))
+
+
+def run_dod_in_main(args: argparse.Namespace) -> int:
+    return _write(args, lambda writer: writer.mark_dod_in_main(
+        role=args.role, actor=args.actor or args.role, reference=args.ref,
+        item=args.item, evidence=args.evidence, request_id=args.request_id,
     ))
 
 
