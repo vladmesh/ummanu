@@ -39,7 +39,7 @@ class CountingStore(SqlCardClient):
         self.before_point = None
         self.audit = MemoryAudit(root)
         self.add(1, "in_progress", project="alpha")
-        self.add(2, "validate", project="beta")
+        self.add(2, "ci", project="beta")
         self.add(3, "ready", kind="wait")
         self.add(4, "done", project="pending", e2e=E2eState(after_merge=AfterMergeMark(SHA, "pending")))
         run = E2eRun("run-archived", SHA, "org/repo", "main", "e2e.yml", "2026-10-07T00:00:00Z",

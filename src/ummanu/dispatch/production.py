@@ -1171,9 +1171,12 @@ def _reconcile_production(
 
     from ummanu.dispatch.stage_migration import reconcile_validation
 
-    for ref in sorted(active_refs):
+    for candidate in _production_tasks(runtime, {"validate"}):
+        ref = str(candidate["ref"])
+        if ref not in active_refs or candidate.get("type") != "code":
+            continue
         task = card(ref)
-        if task is not None and not fenced(ref) and task["state"] == "validate" and task.get("type") == "code":
+        if task is not None and not fenced(ref) and task["state"] == "validate":
             record = records.get(ref)
             if record is not None and task.get("claim", {}).get("worker") not in (None, record.worker):
                 continue

@@ -747,6 +747,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0037_stage_budget_candidates",
                 "0036_card_ci_review",
                 "0035_issue_reopened",
                 "0034_po_restore_sequence",
