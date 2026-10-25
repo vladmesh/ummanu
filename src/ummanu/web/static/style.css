@@ -120,6 +120,10 @@ details.drain[open] > summary { display: none; }
 .dod-scale .seg.met { background: var(--ok); box-shadow: none; }
 .dod-scale .mono { font-size: .75rem; white-space: nowrap; }
 .dod-scale.none .muted { font-size: .75rem; }
+.dod-scale.compact, .budget-line.compact { flex-wrap: wrap; row-gap: .15rem; font-size: .75rem; }
+.dod-scale.compact .label, .budget-line.compact .label { flex: none; width: 3.2rem; }
+.dod-scale.compact .track, .budget-line.compact .track { flex: 1 0 5rem; min-width: 5rem; }
+td .budget-line.compact { margin-top: .3rem; }
 .po-feed { list-style:none; padding:0; margin:0; display:grid; gap:.6rem; min-width:0; max-width:100%; }
 .po-entry { border-left: 3px solid var(--line-strong); padding:.35rem .7rem; min-width:0; max-width:100%; }
 .po-entry.po-agent { border-left-color: var(--accent); background: var(--raised); }

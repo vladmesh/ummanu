@@ -264,8 +264,8 @@ def _compact_sprint_card(item: dict[str, Any]) -> str:
             _current_card_box(item),
             _waiting_line(item),
             f'<div class="heads-line">{heads}</div>' if heads else "",
-            _dod_scale(item["dod"]) if "dod" in item else "",
-            _budget_line(budget) if budget else "",
+            _dod_scale(item["dod"], compact=True) if "dod" in item else "",
+            _budget_line(budget, compact=True) if budget else "",
             "</article>",
         ]
     )
@@ -389,9 +389,17 @@ def _short(text: Any, chars: int) -> str:
     return value if len(value) <= chars else value[: chars - 1].rstrip() + "…"
 
 
-def _dod_scale(dod: dict[str, Any]) -> str:
-    """The sprint's progress: one segment per DoD item in scope, as wide as the reader's share, met ones filled."""
+def _dod_scale(dod: dict[str, Any], *, compact: bool = False) -> str:
+    """The sprint's progress: one segment per DoD item in scope, as wide as the reader's share, met ones filled.
+
+    Compact keeps the scale and met / in-scope; the other words move to the hover title.
+    """
     if not dod.get("structured"):
+        if compact:
+            return (
+                '<div class="dod-scale compact none"><span class="label">DoD</span>'
+                f'<span class="muted" title="{escape(str(dod.get("reason") or ""))}">no scale</span></div>'
+            )
         return (
             '<div class="dod-scale none"><span class="label">progress</span>'
             f'<span class="muted">no scale: {escape(str(dod.get("reason") or ""))}</span></div>'
@@ -417,6 +425,13 @@ def _dod_scale(dod: dict[str, Any]) -> str:
         + (f" · {float(progress) * 100:.0f}%" if progress is not None else "")
         + (f" · {descoped} descoped" if descoped else "")
     )
+    if compact:
+        said = words + ("" if dod.get("estimated") else " · not estimated")
+        return (
+            f'<div class="dod-scale compact" title="{escape(said)}"><span class="label">DoD</span>'
+            f'<span class="track">{"".join(segments)}</span>'
+            f'<span class="mono">{dod.get("met")} / {dod.get("total")}</span></div>'
+        )
     unweighed = "" if dod.get("estimated") else _chip("not estimated")
     return (
         '<div class="dod-scale"><span class="label">progress</span>'
@@ -425,8 +440,11 @@ def _dod_scale(dod: dict[str, Any]) -> str:
     )
 
 
-def _budget_line(budget: dict[str, Any]) -> str:
-    """The card budget as a thin, quiet line: a spend, not progress."""
+def _budget_line(budget: dict[str, Any], *, compact: bool = False) -> str:
+    """The card budget as a thin, quiet line: a spend, not progress.
+
+    Compact keeps the line and spent / hard; the signal and the breakdown move to the hover title.
+    """
     total = int(budget.get("total") or 0)
     thresholds = budget.get("thresholds") or {}
     hard = int(thresholds.get("hard") or 0)
@@ -439,6 +457,13 @@ def _budget_line(budget: dict[str, Any]) -> str:
         f"{escape(str(kind))} {escape(str(count))}" for kind, count in sorted(by_type.items()) if count
     )
     words = f"{total} / {hard} cards · signal {signal}" + (f" · {spent}" if spent else "")
+    if compact:
+        return (
+            f'<div class="budget-line compact {colour}" title="card budget: {words}">'
+            '<span class="label">budget</span>'
+            f'<span class="track"><i class="fill" style="width:{ratio * 100:.1f}%"></i></span>'
+            f'<span class="mono">{total} / {hard if hard else "no hard limit"}</span></div>'
+        )
     return (
         f'<div class="budget-line {colour}" title="card budget: a spend, not progress">'
         '<span class="label">budget</span>'

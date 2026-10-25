@@ -509,7 +509,8 @@ def sprints_page(
                     if launch
                     else "—"
                 ),
-                (_dod_scale(item["dod"]) if "dod" in item else "") + (_budget_line(budget) if budget else ""),
+                (_dod_scale(item["dod"], compact=True) if "dod" in item else "")
+                + (_budget_line(budget, compact=True) if budget else ""),
             ]
         )
     table = _section(
