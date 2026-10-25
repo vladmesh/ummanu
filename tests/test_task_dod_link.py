@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes.tasks import open_sprint
 from tests.fakes.tick_board import SPRINT, CountingStore
 from tests.observer_identity import as_observer, unbound_observer
 from tests.po_handover_fakes import MemoryAudit
@@ -102,6 +103,11 @@ class TaskDodLinkTests(unittest.TestCase):
         self.assertIsNone(card["dod_item"])
         unsprinted = self.create(role="po", actor="operator", sprint="", dod_item="")["task"]
         self.assertEqual((unsprinted["sprint"], unsprinted["dod_item"]), (None, None))
+
+    def test_shared_free_text_sprint_fixture_supports_unlinked_creation(self):
+        with open_sprint(SPRINT, "demo"):
+            card = self.create(dod_item="")["task"]
+        self.assertEqual((card["sprint"], card["dod_item"]), (SPRINT, None))
 
     def test_create_replays_and_item_is_part_of_request_identity(self):
         first = self.create(request_id="create")

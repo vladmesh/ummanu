@@ -48,6 +48,7 @@ from ummanu.host_apply import (
     resolve_packaged,
     resolve_systemd_layout,
 )
+from ummanu.infra.host_space_policy import ROOT_FREE_MIN_BYTES
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # The units this checkout ships. A plan or a doctor run reads the checkout its host is configured
@@ -1534,6 +1535,7 @@ class LiveSourceErrorTests(unittest.TestCase):
 
 class DoctorHostCliTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.enterContext(unittest.mock.patch("ummanu.status.disk_free_bytes", return_value=ROOT_FREE_MIN_BYTES))
         # Doctor reports an installation, and an installation runs a checkout. These fixtures are
         # hosts configured with this one; without the name, doctor would have no units to compare.
         env = unittest.mock.patch.dict(os.environ, {"UMMANU_REPO": str(REPO_ROOT)})
