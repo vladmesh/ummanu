@@ -232,5 +232,3 @@ class GuardedWriter(TaskWriter):
 
     def _card_superseded(self, reference):
         return False
-
-

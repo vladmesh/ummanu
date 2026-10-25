@@ -18,6 +18,7 @@ from ummanu.infra.checkpoint_run import run_checkpoint
 from ummanu.sprints import SprintReader
 from ummanu.tasks import TaskError, TaskReader
 
+
 class TickBoardSnapshotTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
