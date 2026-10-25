@@ -69,7 +69,7 @@ class RoleVocabularyTests(unittest.TestCase):
 
 
 class DispatcherStageTests(unittest.TestCase):
-    STAGES = frozenset({CardState.IN_PROGRESS, CardState.VALIDATE, CardState.ASSESSMENT})
+    STAGES = frozenset({CardState.IN_PROGRESS, CardState.VALIDATE, CardState.CI, CardState.REVIEW, CardState.ASSESSMENT})
 
     @staticmethod
     def holds(role: Role, source: CardState, target: CardState) -> bool:
@@ -83,7 +83,7 @@ class DispatcherStageTests(unittest.TestCase):
         emergency_sources = {
             Role.PO: set(CardState) - {CardState.BLOCKED, CardState.DONE},
             Role.OBSERVER: set(CardState) - {CardState.BLOCKED, CardState.DONE, CardState.ASSESSMENT},
-            Role.STEWARD: {CardState.READY, CardState.IN_PROGRESS, CardState.VALIDATE, CardState.ASSESSMENT},
+            Role.STEWARD: {CardState.READY, CardState.IN_PROGRESS, CardState.VALIDATE, CardState.CI, CardState.REVIEW, CardState.ASSESSMENT},
         }
         for role, source, target in product(Role, CardState, CardState):
             with self.subTest(role=role.value, source=source.value, target=target.value):
@@ -109,6 +109,29 @@ class DispatcherStageTests(unittest.TestCase):
                 for handle in expected:
                     self.assertIn(handle, message)
 
+    def test_ci_review_chains_and_recovery_require_declared_role_authority(self) -> None:
+        for source, target in (
+            (CardState.IN_PROGRESS, CardState.CI),
+            (CardState.CI, CardState.REVIEW),
+            (CardState.CI, CardState.ASSESSMENT),
+            (CardState.REVIEW, CardState.ASSESSMENT),
+        ):
+            for role in Role:
+                with self.subTest(role=role, source=source, target=target):
+                    if role is Role.DISPATCHER:
+                        edge = card_transition(role, source, target)
+                        self.assertEqual((edge.source, edge.target), (source, target))
+                    else:
+                        with self.assertRaises(CardTransitionForbidden):
+                            card_transition(role, source, target)
+        for source in (CardState.CI, CardState.REVIEW):
+            for target in (CardState.IN_PROGRESS, CardState.READY, CardState.BLOCKED):
+                edge = card_transition(Role.DISPATCHER, source, target)
+                self.assertEqual((edge.source, edge.target), (source, target))
+            for role in Role:
+                with self.subTest(role=role, source=source), self.assertRaises(CardTransitionForbidden):
+                    card_transition(role, source, CardState.DONE)
+
     def test_the_steward_stops_a_card_under_review_only_with_a_reason(self) -> None:
         def facts(reason: str) -> CardMoveFacts:
             return CardMoveFacts(
@@ -119,10 +142,12 @@ class DispatcherStageTests(unittest.TestCase):
                 after_merge_hotfix=lambda: False,
             )
 
-        with self.assertRaises(CardMoveReasonRequired):
-            admit_card_move(Role.STEWARD, CardState.VALIDATE, CardState.BLOCKED, facts("  "))
-        declaration = admit_card_move(Role.STEWARD, CardState.VALIDATE, CardState.BLOCKED, facts("head silent"))
-        self.assertEqual((declaration.source, declaration.target), (CardState.VALIDATE, CardState.BLOCKED))
+        for source in (CardState.VALIDATE, CardState.CI, CardState.REVIEW):
+            with self.subTest(source=source):
+                with self.assertRaises(CardMoveReasonRequired):
+                    admit_card_move(Role.STEWARD, source, CardState.BLOCKED, facts("  "))
+                declaration = admit_card_move(Role.STEWARD, source, CardState.BLOCKED, facts("head silent"))
+                self.assertEqual((declaration.source, declaration.target), (source, CardState.BLOCKED))
 
 
 if __name__ == "__main__":

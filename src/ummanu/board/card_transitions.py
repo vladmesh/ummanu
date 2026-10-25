@@ -13,7 +13,7 @@ from typing import TypeAlias
 from ummanu.board import wait_card
 from ummanu.board.models import CardState, EntityKind
 from ummanu.board.roles import Role
-from ummanu.board.transitions import BoardProtocolError, Transition, transition_for
+from ummanu.board.transitions import TRANSITIONS, BoardProtocolError, Transition, transition_for
 
 CardTransitionKey: TypeAlias = tuple[CardState, CardState]
 
@@ -30,7 +30,7 @@ _CARD_STATES = tuple(CardState)
 
 #: The stages of a round. Only the dispatcher moves a card into one.
 DISPATCHER_STAGES: frozenset[CardState] = frozenset(
-    {CardState.IN_PROGRESS, CardState.VALIDATE, CardState.ASSESSMENT}
+    {CardState.IN_PROGRESS, CardState.VALIDATE, CardState.CI, CardState.REVIEW, CardState.ASSESSMENT}
 )
 
 #: Roles whose exits out of Assessment require a recorded decision.
@@ -42,7 +42,7 @@ CARD_TRANSITIONS: dict[Role, frozenset[CardTransitionKey]] = {
         (source, target)
         for source in _CARD_STATES
         for target in _CARD_STATES
-        if source != target and target not in DISPATCHER_STAGES
+        if (source, target) in TRANSITIONS[EntityKind.CARD] and target not in DISPATCHER_STAGES
     ),
     Role.DISPATCHER: frozenset(
         {
@@ -50,6 +50,16 @@ CARD_TRANSITIONS: dict[Role, frozenset[CardTransitionKey]] = {
             (CardState.IN_PROGRESS, CardState.DONE),
             (CardState.READY, CardState.BLOCKED),
             (CardState.IN_PROGRESS, CardState.VALIDATE),
+            (CardState.IN_PROGRESS, CardState.CI),
+            (CardState.CI, CardState.REVIEW),
+            (CardState.CI, CardState.ASSESSMENT),
+            (CardState.REVIEW, CardState.ASSESSMENT),
+            (CardState.CI, CardState.IN_PROGRESS),
+            (CardState.REVIEW, CardState.IN_PROGRESS),
+            (CardState.CI, CardState.READY),
+            (CardState.REVIEW, CardState.READY),
+            (CardState.CI, CardState.BLOCKED),
+            (CardState.REVIEW, CardState.BLOCKED),
             (CardState.IN_PROGRESS, CardState.BLOCKED),
             (CardState.IN_PROGRESS, CardState.READY),
             (CardState.IN_PROGRESS, CardState.ASSESSMENT),
@@ -67,7 +77,9 @@ CARD_TRANSITIONS: dict[Role, frozenset[CardTransitionKey]] = {
         (source, target)
         for source in _CARD_STATES
         for target in _CARD_STATES
-        if source != target and source is not CardState.ASSESSMENT and target not in DISPATCHER_STAGES
+        if (source, target) in TRANSITIONS[EntityKind.CARD]
+        and source is not CardState.ASSESSMENT
+        and target not in DISPATCHER_STAGES
     ),
     Role.WORKER: frozenset(),
     Role.REVIEWER: frozenset(),
@@ -80,6 +92,8 @@ CARD_TRANSITIONS: dict[Role, frozenset[CardTransitionKey]] = {
             (CardState.READY, CardState.BLOCKED),
             (CardState.IN_PROGRESS, CardState.BLOCKED),
             (CardState.VALIDATE, CardState.BLOCKED),
+            (CardState.CI, CardState.BLOCKED),
+            (CardState.REVIEW, CardState.BLOCKED),
             (CardState.ASSESSMENT, CardState.BLOCKED),
         }
     ),
@@ -160,7 +174,7 @@ def forbidden_move_message(role: str, source: str, target: str) -> str:
         return f"{edge}: the card is parked; record a decision with `task decide` and the dispatcher performs it"
     if target not in {stage.value for stage in DISPATCHER_STAGES}:
         return edge
-    only = f"{edge}: only the dispatcher moves a card into In progress, Validate or Assessment"
+    only = f"{edge}: only the dispatcher moves a card into In progress, Validate, CI, Review or Assessment"
     if source == CardState.BLOCKED.value:
         return (
             f"{only}; return the card to Ready and its round continues at the stage it stopped, "

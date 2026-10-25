@@ -38,12 +38,14 @@ def open_sprint(ref: str = "sprint:test", project: str = "ummanu"):
 # The sprint the assessment fixture's card belongs to.
 SPRINT = "sprint:1031"
 
-#: The seven columns, in the numbering the seed rows below use.
+#: The columns, in the numbering the seed rows below use.
 SEED_COLUMNS = [
     {"id": 1, "title": "Issues"},
     {"id": 2, "title": "Ready"},
     {"id": 3, "title": "In progress"},
     {"id": 4, "title": "Validate"},
+    {"id": 8, "title": "CI"},
+    {"id": 9, "title": "Review"},
     {"id": 7, "title": "Assessment"},
     {"id": 5, "title": "Blocked"},
     {"id": 6, "title": "Done"},
@@ -54,6 +56,8 @@ SEED_COLUMN = {
     "ready": 2,
     "in_progress": 3,
     "validate": 4,
+    "ci": 8,
+    "review": 9,
     "assessment": 7,
     "blocked": 5,
     "done": 6,

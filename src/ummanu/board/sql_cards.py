@@ -14,9 +14,8 @@ classes above it does not change; where their data comes from and where it lands
 
 Three mappings do the whole job:
 
-* **state ↔ column.**  The store keeps `tasks.state`; the board keeps a column id.  §3.5's seven
-  states and `_STATE_BY_COLUMN`'s seven column titles are the same seven, so the virtual board
-  below numbers them once and both directions read that one table.
+* **state ↔ column.**  The store keeps `tasks.state`; the board keeps a column id.
+  The virtual board gives each state a stable id and a column title.
 * **metadata bag ↔ columns.**  §8.1: the keys the model names are columns, and the keys it does
   not are `tasks.extensions.extra` (§8.2).  `saveTaskMetadata` writes columns for the former
   and the bag for the latter, so a key nobody modelled is still readable rather than dropped.
@@ -62,13 +61,15 @@ from ummanu.board.store import BoardStoreCredentials
 from ummanu.board.task_routing import live_impact_flag
 from ummanu.kernel.errors import TaskError
 
-#: The seven columns of the Pipeline board, in board order.  Their ids are this module's own:
+#: The columns of the Pipeline board, in board order.  Their ids are this module's own:
 #: nothing outside the client may depend on the number, only on the title.
 BOARD_COLUMNS = (
     (1, "Issues"),
     (2, "Ready"),
     (3, "In progress"),
     (4, "Validate"),
+    (8, "CI"),
+    (9, "Review"),
     (5, "Assessment"),
     (6, "Blocked"),
     (7, "Done"),
@@ -80,6 +81,8 @@ _COLUMN_ID_BY_STATE = {
     "ready": 2,
     "in_progress": 3,
     "validate": 4,
+    "ci": 8,
+    "review": 9,
     "assessment": 5,
     "blocked": 6,
     "done": 7,

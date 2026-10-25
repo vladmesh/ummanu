@@ -590,7 +590,7 @@ def _close_form(ref: str) -> str:
 
 
 #: The states a move may name, in the layer's spelling.
-MOVE_TARGETS = ("ready", "in_progress", "done", "blocked", "issues", "validate", "assessment")
+MOVE_TARGETS = ("ready", "in_progress", "done", "blocked", "issues", "validate", "ci", "review", "assessment")
 
 
 def _entries(value: Any) -> list[dict[str, Any]]:

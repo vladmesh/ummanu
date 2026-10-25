@@ -684,6 +684,34 @@ class SchemaModelTests(unittest.TestCase):
 class MigrationScriptTests(unittest.TestCase):
     """Alembic's script directory as this product ships it — no server needed."""
 
+    def test_ci_review_revision_is_admitted_and_emits_only_constraint_widening(self) -> None:
+        import io
+
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+
+        from ummanu.board.release_migrations import admit_additive
+
+        script = migrate.script_directory()
+        revision = script.get_revision("0036_card_ci_review")
+        admit_additive(script, (revision.revision,))
+        output = io.StringIO()
+        context = MigrationContext.configure(
+            dialect_name="postgresql", opts={"as_sql": True, "output_buffer": output}
+        )
+        with Operations.context(context):
+            revision.module.upgrade()
+        self.assertEqual(
+            output.getvalue().strip().split(";\n\n"),
+            [
+                "ALTER TABLE tasks DROP CONSTRAINT tasks_state_check",
+                (
+                    "ALTER TABLE tasks ADD CONSTRAINT task_state_in_vocabulary CHECK "
+                    "(state IN ('issues','ready','in_progress','validate','assessment','blocked','done','ci','review'));"
+                ),
+            ],
+        )
+
     def test_the_po_request_vocabulary_is_one_list_in_code_schema_and_head_migration(self) -> None:
         """A `po_requests` operation the CHECK does not admit rolls back every write that records it.
 
@@ -719,6 +747,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0036_card_ci_review",
                 "0035_issue_reopened",
                 "0034_po_restore_sequence",
                 "0033_po_session_moved",

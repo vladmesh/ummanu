@@ -105,7 +105,7 @@ def text(markup: str) -> str:
 
 
 class ColumnTests(unittest.TestCase):
-    def test_seven_columns_in_board_order_with_counts_and_the_oldest_move_first(self) -> None:
+    def test_columns_in_board_order_with_counts_and_the_oldest_move_first(self) -> None:
         client = BoardClient(
             [
                 row("u-1", "ready", moved=Decimal(str(NOW - HOUR))),
@@ -114,6 +114,8 @@ class ColumnTests(unittest.TestCase):
                 row("u-4", "done"),
                 row("u-5", "issues"),
                 row("u-6", "assessment"),
+                row("u-7", "ci"),
+                row("u-8", "review"),
             ]
         )
         status, html = page(client)
@@ -126,6 +128,8 @@ class ColumnTests(unittest.TestCase):
                 ("Ready", "3"),
                 ("In progress", "0"),
                 ("Validate", "0"),
+                ("CI", "1"),
+                ("Review", "1"),
                 ("Assessment", "1"),
                 ("Blocked", "0"),
                 ("Done", "1"),
@@ -144,6 +148,8 @@ class ColumnTests(unittest.TestCase):
                 ("Ready", False),
                 ("In progress", True),
                 ("Validate", True),
+                ("CI", True),
+                ("Review", True),
                 ("Assessment", True),
                 ("Blocked", True),
                 ("Done", False),
@@ -417,7 +423,7 @@ class FilterTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual({count for _title, count, _tiles in columns(html)}, {"0"})
-        self.assertEqual(len(columns(html)), 7)
+        self.assertEqual(len(columns(html)), 9)
         form = self.form(html)
         self.assertIn("showing: project gone<b> · sprint sprint:404", text(form))
         self.assertNotIn("<b>", form)
