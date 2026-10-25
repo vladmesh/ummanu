@@ -194,18 +194,18 @@ class TaskDodLinkTests(unittest.TestCase):
 
     def test_binding_checks_stored_membership_and_open_structured_sprint(self):
         for change in ("foreign", "unsprinted", "stopped", "closed", "free-text"):
-            with self.subTest(change=change):
-                with mock.patch.dict(self.store.meta[1]), mock.patch.dict(self.sprint_meta):
-                    if change in {"foreign", "unsprinted"}:
-                        self.store.meta[1]["sprint_ref"] = "sprint:2" if change == "foreign" else ""
-                    elif change == "free-text":
-                        self.sprint_meta.pop(sprint_dod.FIELD)
-                    else:
-                        self.sprint_meta["sprint_status"] = change
-                    before = self.snapshot()
-                    with self.assertRaises(TaskError):
-                        self.bind()
-                    self.assertEqual(self.snapshot(), before)
+            with (self.subTest(change=change), mock.patch.dict(self.store.meta[1]),
+                  mock.patch.dict(self.sprint_meta)):
+                if change in {"foreign", "unsprinted"}:
+                    self.store.meta[1]["sprint_ref"] = "sprint:2" if change == "foreign" else ""
+                elif change == "free-text":
+                    self.sprint_meta.pop(sprint_dod.FIELD)
+                else:
+                    self.sprint_meta["sprint_status"] = change
+                before = self.snapshot()
+                with self.assertRaises(TaskError):
+                    self.bind()
+                self.assertEqual(self.snapshot(), before)
 
     def test_binding_checks_role_observer_identity_and_po_override(self):
         with self.assertRaises(TaskError) as caught:
