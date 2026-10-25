@@ -124,7 +124,10 @@ For an open sprint with an observer head, a substantive reviewer verdict, green 
 Assessment: the reviewer stops and the round's worker remains suspended with its workspace until a
 real observer decision. A worker's partial report parks from In progress without review. Green code
 without an observer passes through an audited Assessment transition and automatically continues
-the existing release on the same tick. A replay resumes that release from Assessment. The writer
+the existing release on the same tick. Its saved park reason and committed typed Assessment entry
+identify that automatic visit. Replay and lost-record adoption read this same entry; only the latest
+visit can authorize automatic continuation. A managed or unproven park still waits for a decision
+after its sprint stops or closes. Current routing cannot change the origin of an existing visit. The writer
 checks the actual code card, accepted report, green verdict or skipped review, accepted gate policy,
 and current sprint/observer context before merge or teardown and again at the terminal move.
 No sprint, a closed or stopped sprint, an absent observer declaration or explicit `observer none`

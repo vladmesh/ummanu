@@ -2820,18 +2820,21 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             )
 
     def _automatic_code_release(self, task: dict[str, Any], gate: AcceptedGreenGate | None) -> bool:
-        """The automatic Assessment exit requires green policy and current no-observer facts."""
-        from ummanu.board.observer_routing import observer_managed
+        """Automatic Assessment exit requires its own origin, green policy and no observer."""
+        from ummanu.board.observer_routing import automatic_assessment_origin, observer_managed
         from ummanu.dispatch.gate_receipt import AcceptedGreenGate
         from ummanu.sprints import SprintReader
 
         if not isinstance(gate, AcceptedGreenGate) or not gate.policy_valid or task.get("type") != "code":
             return False
+        events = self.audit.events(task["ref"])
+        if not automatic_assessment_origin(events):
+            return False
         if observer_managed(task, lambda ref: SprintReader(self.client).show(ref, include_cards=False)):
             return False
         report = ""
         verdict = ""
-        for event in self.audit.events(task["ref"]):
+        for event in events:
             data = _event_payload(event)
             marker = str(data.get("marker") or "")
             actor = event.get("actor")

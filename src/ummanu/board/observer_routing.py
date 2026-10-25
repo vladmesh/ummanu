@@ -2,10 +2,36 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
+from ummanu.board.audit_contract import is_protocol_event
+from ummanu.board.task_protocol.rows import assessment_resolution
 from ummanu.kernel.errors import TaskError
+
+AUTOMATIC_ASSESSMENT_REASON = "green code completion; Assessment automatically releases without an observer"
+
+
+def automatic_assessment_origin(events: Iterable[dict[str, Any]]) -> bool:
+    """Only the current committed dispatcher Assessment entry can prove automatic origin."""
+    ordered = list(events)
+    visit, _decision = assessment_resolution(ordered)
+    if not visit:
+        return False
+    for event in reversed(ordered):
+        if event.get("event_id") != visit:
+            continue
+        actor = event.get("actor")
+        transition = event.get("transition")
+        return bool(
+            is_protocol_event(event) and event.get("kind") == "card.assessed"
+            and event.get("request_id")
+            and isinstance(actor, dict) and actor.get("role") == "dispatcher"
+            and isinstance(transition, dict) and transition.get("source") in {"ci", "review"}
+            and transition.get("target") == "assessment"
+            and event.get("reason") == AUTOMATIC_ASSESSMENT_REASON
+        )
+    return False
 
 
 def observer_managed(task: Mapping[str, Any], show: Callable[[str], dict[str, Any]]) -> bool:

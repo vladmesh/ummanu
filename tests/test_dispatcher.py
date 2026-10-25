@@ -4856,6 +4856,107 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual([stage for stage in stages if stage in {"ci", "review", "assessment", "done"}],
                          ["ci", "review", "assessment", "done"])
 
+    def _managed_park_keeps_decision_authority(self, *, reviewed: bool, status: str) -> None:
+        from ummanu.dispatch.gate_receipt import AcceptedGreenGate
+        from ummanu.tasks import assessment_resolution
+
+        self.start_dispatcher()
+        if reviewed:
+            self._drive_to_green_verdict()
+        else:
+            self.board.save_metadata(12, review="skipped")
+            self._run_worker_to_validate()
+        self.assertEqual(self.tick()["to"], "assessment")
+        visit, _decision = assessment_resolution(self.writer.audit.events("ummanu-510"))
+        self.sprints.rows["sprint:1031"]["status"] = status
+        self.board.add_sprint("sprint:1031", status=status)
+        gate = AcceptedGreenGate.accept({}, current_sha=self.host.commit, gate_mode="none", noop=False)
+        launches = self.host.calls.count("prepare_worker"), len(self.host.reviews)
+        for lost in (False, True):
+            with self.subTest(lost=lost):
+                if lost:
+                    self._drop_records_and_restart_attempt()
+                self.assertEqual(self.tick()["action"], "waiting-observer-decision")
+                self.assertEqual(self.reader.show("ummanu-510")["state"], "assessment")
+                self.assertEqual(assessment_resolution(self.writer.audit.events("ummanu-510")), (visit, None))
+                with self.assertRaises(TaskError) as refused:
+                    self.writer.admit_release(role="dispatcher", actor="dispatcher", reference="ummanu-510",
+                                              decision="", automatic_release=gate)
+                self.assertEqual(refused.exception.code, "decision_required")
+                with self.assertRaises(TaskError) as refused:
+                    self.writer.move(role="dispatcher", actor="dispatcher", reference="ummanu-510", target="done",
+                                     reason="automatic release", automatic_release=gate, request_id="unadmitted")
+                self.assertEqual(refused.exception.code, "decision_required")
+                self.assertEqual(self.host.completed, [])
+                self.assertEqual(self.host.torn_down, [])
+                self.assertEqual((self.host.calls.count("prepare_worker"), len(self.host.reviews)), launches)
+
+    def test_reviewed_managed_assessment_waits_after_sprint_stop_and_record_loss(self) -> None:
+        self._managed_park_keeps_decision_authority(reviewed=True, status="stopped")
+
+    def test_reviewed_managed_assessment_waits_after_sprint_close_and_record_loss(self) -> None:
+        self._managed_park_keeps_decision_authority(reviewed=True, status="closed")
+
+    def test_skipped_managed_assessment_waits_after_sprint_stop_and_record_loss(self) -> None:
+        self._managed_park_keeps_decision_authority(reviewed=False, status="stopped")
+
+    def test_skipped_managed_assessment_waits_after_sprint_close_and_record_loss(self) -> None:
+        self._managed_park_keeps_decision_authority(reviewed=False, status="closed")
+
+    def _automatic_park_recovery(self, *, reviewed: bool, landed: bool) -> None:
+        from ummanu.board.observer_routing import automatic_assessment_origin
+
+        self.start_dispatcher()
+        self.unobserved_card()
+        if reviewed:
+            self._drive_to_green_verdict()
+        else:
+            self.board.save_metadata(12, review="skipped")
+            self._run_worker_to_validate()
+        before = self._pilot_record()
+        launches = self.host.calls.count("prepare_worker"), len(self.host.reviews)
+        move = self.writer.move
+
+        def interrupted(**kwargs):
+            if kwargs["target"] == "assessment":
+                if landed:
+                    move(**kwargs)
+                raise OSError("park interrupted")
+            return move(**kwargs)
+
+        with mock.patch.object(self.writer, "move", side_effect=interrupted), self.assertRaises(OSError):
+            self.tick()
+        self.assertEqual(self.host.completed, [])
+        self.assertEqual(self.host.torn_down, [])
+        if landed:
+            self.assertTrue(automatic_assessment_origin(self.writer.audit.events("ummanu-510")))
+            self._drop_records_and_restart_attempt()
+        else:
+            self.assertEqual(self.tick()["to"], "assessment")
+            recovered = self._pilot_record()
+            self.assertEqual((recovered["attempt_id"], recovered["report_generation"]),
+                             (before["attempt_id"], before["report_generation"]))
+        with mock.patch.object(self.writer, "decide") as decide:
+            self.assertEqual(self.tick()["to"], "done")
+        decide.assert_not_called()
+        self.assertEqual(self.host.completed, ["ummanu-510"])
+        self.assertEqual((self.host.calls.count("prepare_worker"), len(self.host.reviews)), launches)
+        entries = [event for event in self.writer.audit.events("ummanu-510")
+                   if event.get("kind") == "card.assessed"]
+        self.assertEqual(len(entries), 1)
+
+    def test_reviewed_automatic_park_replays_before_its_board_move(self) -> None:
+        self._automatic_park_recovery(reviewed=True, landed=False)
+
+    def test_skipped_automatic_park_replays_before_its_board_move(self) -> None:
+        self._automatic_park_recovery(reviewed=False, landed=False)
+
+    def test_reviewed_automatic_entry_releases_after_record_loss(self) -> None:
+        self._automatic_park_recovery(reviewed=True, landed=True)
+
+    def test_skipped_automatic_entry_releases_after_record_loss(self) -> None:
+        self._automatic_park_recovery(reviewed=False, landed=True)
+
     def test_a_card_whose_sprint_declares_no_observer_reworks_on_the_verdict_tick(self) -> None:
         self.host.fail_resume_worker_reason = ""
         self.start_dispatcher()

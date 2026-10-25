@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ummanu.board.completion_evidence import has_candidate
-from ummanu.board.observer_routing import observer_managed
+from ummanu.board.observer_routing import AUTOMATIC_ASSESSMENT_REASON, observer_managed
 from ummanu.board.review_blockers import repeated_open_blockers
 from ummanu.dispatch import attempt_accounting, e2e_stage, release_lifecycle
 from ummanu.dispatch.assessment_park import begin_park, complete_park
@@ -212,7 +212,7 @@ def park_green_verdict(
                 runtime, task, record, records, payload, attempt_id,
                 verdict_outcome="green" if reviewed else "missing",
                 reviewed_commit=pinned,
-                move_reason="green code completion; Assessment automatically releases without an observer",
+                move_reason=AUTOMATIC_ASSESSMENT_REASON,
             )
             task = runtime.reader.show(ref)
         return release_lifecycle.release_effect(runtime,

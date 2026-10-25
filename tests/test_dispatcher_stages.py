@@ -16,10 +16,15 @@ from ummanu.board.backend import record_key
 from ummanu.board.budget_candidates import is_candidate
 from ummanu.board.host import TransitionRequest
 from ummanu.board.models import Actor, CardState, EntityKind
-from ummanu.board.observer_routing import observer_managed
+from ummanu.board.observer_routing import (
+    AUTOMATIC_ASSESSMENT_REASON,
+    automatic_assessment_origin,
+    observer_managed,
+)
 from ummanu.board.sql_host import SqlBoardHost
 from ummanu.dispatch import (
     assessment_decision,
+    assessment_park,
     gate_lifecycle,
     release_lifecycle,
     review_verdict,
@@ -153,8 +158,14 @@ class CodeStagesTests(unittest.TestCase):
         self.task.update(state="assessment", sprint="", comments=[
             {"marker": "report:done"}, {"marker": "review:green"},
         ])
-        self.record.worker_continuation.begin_park("review", 2, "green", "green")
+        self.record.worker_continuation.begin_park("review", 2, AUTOMATIC_ASSESSMENT_REASON, "green")
         self.record.worker_continuation.confirm_park()
+        self.runtime.audit.events.return_value = [{
+            "event_id": "visit", "request_id": "park", "record_type": "board.protocol_event",
+            "kind": "card.assessed", "actor": {"role": "dispatcher"},
+            "transition": {"source": "review", "target": "assessment"},
+            "reason": AUTOMATIC_ASSESSMENT_REASON,
+        }]
         with (
             mock.patch.object(assessment_decision, "recorded_decision", return_value=("", "", ())),
             mock.patch.object(release_lifecycle, "release_parked", return_value={"to": "done"}) as release,
@@ -166,6 +177,39 @@ class CodeStagesTests(unittest.TestCase):
         self.assertTrue(release.call_args.kwargs["automatic"])
         self.runtime.writer.decide.assert_not_called()
         self.runtime.host.start_review.assert_not_called()
+
+    def test_managed_and_unproven_parks_wait_after_sprint_stop_and_record_loss(self):
+        for choice in ("required", "skipped"):
+            for status in ("stopped", "closed"):
+                for lost in (False, True):
+                    for proven_managed in (False, True):
+                        with self.subTest(choice=choice, status=status, lost=lost, managed=proven_managed):
+                            self.task.update(state="assessment", sprint="sprint:1", review=choice,
+                                             comments=[{"marker": "report:done"}, {"marker": "review:green"}])
+                            self.runtime.sprints.show.return_value = {"status": status}
+                            self.runtime.audit.events.return_value = ([{
+                                "event_id": "visit", "request_id": "park", "record_type": "board.protocol_event",
+                                "kind": "card.assessed", "actor": {"role": "dispatcher"},
+                                "transition": {"source": "review" if choice == "required" else "ci",
+                                               "target": "assessment"},
+                                "reason": "wait for observer decision",
+                            }] if proven_managed else [])
+                            record = DispatcherRecord.from_json(self.record.to_json())
+                            record.worker_continuation.clear()
+                            record.worker_continuation.begin_park("review", 2, AUTOMATIC_ASSESSMENT_REASON, "green")
+                            record.worker_continuation.confirm_park()
+                            self.records.clear()
+                            self.runtime._adopt.return_value = DispatcherRecord.from_json({"state": "adopted"})
+                            if not lost:
+                                self.records[self.task["ref"]] = record
+                            with mock.patch.object(release_lifecycle, "release_parked") as release:
+                                outcome = assessment_decision.advance_assessment(
+                                    self.runtime, self.task, self.records, self.payload, "tick"
+                                )
+                            self.assertEqual(outcome["action"], "waiting-observer-decision")
+                            release.assert_not_called()
+        self.runtime.host.complete_green.assert_not_called()
+        self.runtime.host.teardown.assert_not_called()
 
     def test_live_validate_migration_preserves_the_round_and_is_idempotent(self):
         for state, green, launched, target in (
@@ -251,6 +295,9 @@ class ReleaseAdmissionTests(unittest.TestCase):
         self.events = [
             {"kind": "card.reported", "record_type": "board.protocol_event", "actor": {"role": "worker"}, "data": {"marker": "report:done"}},
             {"kind": "card.verdict", "record_type": "board.protocol_event", "actor": {"role": "reviewer"}, "data": {"marker": "review:green"}},
+            {"kind": "card.assessed", "record_type": "board.protocol_event", "actor": {"role": "dispatcher"},
+             "event_id": "visit", "request_id": "park", "reason": AUTOMATIC_ASSESSMENT_REASON,
+             "transition": {"source": "review", "target": "assessment"}},
         ]
         self.writer.audit.events.side_effect = lambda _: self.events
         self.gate = AcceptedGreenGate.accept({}, current_sha="a" * 40, gate_mode="none", noop=False)
@@ -264,7 +311,7 @@ class ReleaseAdmissionTests(unittest.TestCase):
         for gate in (None, AcceptedGreenGate(None, False), True):
             with self.subTest(gate=gate), self.assertRaises(TaskError):
                 self.admit(gate)
-        self.events.pop()
+        self.events.pop(1)
         with self.assertRaises(TaskError):
             self.admit(self.gate)
         self.task["review"] = "skipped"
@@ -330,6 +377,73 @@ class ReleaseAdmissionTests(unittest.TestCase):
         writer.admit_release(**admission)
         self.assertEqual(writer.reader.show("demo-1")["state"], "assessment")
         self.assertEqual(audit.events("demo-1")[-1]["data"]["decision"], "accept")
+
+    def test_managed_or_unproven_current_visit_refuses_admission_and_terminal_move(self):
+        self.task["sprint"] = "sprint:1"
+        automatic = copy.deepcopy(self.events[-1])
+        managed = {**automatic, "event_id": "managed", "request_id": "managed-park",
+                   "reason": "wait for observer decision"}
+        legacy = {"kind": "moved", "event_id": "legacy", "payload": {"to": "assessment"}}
+        with mock.patch("ummanu.sprints.SprintReader") as reader:
+            for status in ("stopped", "closed"):
+                reader.return_value.show.return_value = {"status": status}
+                for entries in ([], [managed], [automatic, managed], [automatic, legacy]):
+                    self.events[2:] = entries
+                    with self.subTest(status=status, entries=entries):
+                        with self.assertRaises(TaskError) as refused:
+                            self.admit(self.gate)
+                        self.assertEqual(refused.exception.code, "decision_required")
+                        with self.assertRaises(TaskError) as refused:
+                            self.writer._check_decision(self.task, "assessment", "done", "", "dispatcher",
+                                                        automatic_release=self.gate)
+                        self.assertEqual(refused.exception.code, "decision_required")
+
+    def test_real_automatic_park_intent_and_typed_entry_survive_interrupted_confirmation(self):
+        for reviewed in (False, True):
+            with self.subTest(reviewed=reviewed):
+                root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+                store = CountingStore(root)
+                store.meta[1].update(sprint_ref="", review="required" if reviewed else "skipped")
+                audit = MarkerAudit(root)
+                with mock.patch("ummanu.board.sql_audit.SqlTaskAudit", return_value=audit):
+                    writer = TaskWriter(store, data_dir=root)
+                for index, event in enumerate(self.events[:2]):
+                    request = f"marker-{index}"
+                    audit.append(request, {**event, "ref": "demo-1", "event_id": request, "request_id": request})
+                writer.move(role="dispatcher", actor="dispatcher", reference="demo-1", target="ci",
+                            reason="candidate ready", request_id="ci")
+                if reviewed:
+                    writer.move(role="dispatcher", actor="dispatcher", reference="demo-1", target="review",
+                                reason="gate green", request_id="review")
+                task = writer.reader.show("demo-1")
+                record = DispatcherRecord.from_json({"attempt_id": "held", "state": task["state"]})
+                runtime = mock.Mock(writer=writer, audit=audit, reader=writer.reader, owner="dispatcher")
+                snapshots = []
+
+                def save(payload, records, *, snapshots=snapshots, record=record):
+                    if snapshots:
+                        raise OSError("confirmation interrupted")
+                    snapshots.append(record.to_json())
+
+                runtime.save_records.side_effect = save
+                with self.assertRaisesRegex(OSError, "confirmation interrupted"):
+                    assessment_park.begin_park(
+                        runtime, task, record, {task["ref"]: record}, {}, "tick",
+                        verdict_outcome="green" if reviewed else "missing", move_reason=AUTOMATIC_ASSESSMENT_REASON,
+                    )
+                before = audit.events(task["ref"])
+                self.assertTrue(automatic_assessment_origin(before))
+                recovered = DispatcherRecord.from_json(snapshots[0])
+                self.assertTrue(recovered.worker_continuation.assessment_pending)
+                runtime.save_records.side_effect = None
+                assessment_park.complete_park(runtime, recovered, {task["ref"]: recovered}, {}, "next", ref=task["ref"])
+                self.assertEqual(audit.events(task["ref"]), before)
+                self.assertEqual(recovered.attempt_id, "held")
+                writer.admit_release(role="dispatcher", actor="dispatcher", reference=task["ref"], decision="",
+                                     automatic_release=self.gate)
+                writer.move(role="dispatcher", actor="dispatcher", reference=task["ref"], target="done",
+                            reason="automatic completion", automatic_release=self.gate, request_id="done")
+                self.assertEqual(writer.reader.show(task["ref"])["state"], "done")
 
     def test_refused_terminal_authority_precedes_merge_and_teardown(self):
         runtime = mock.Mock()
