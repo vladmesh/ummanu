@@ -158,6 +158,8 @@ class CardState(StrEnum):
     READY = "ready"
     IN_PROGRESS = "in_progress"
     VALIDATE = "validate"
+    CI = "ci"
+    REVIEW = "review"
     ASSESSMENT = "assessment"
     BLOCKED = "blocked"
     DONE = "done"

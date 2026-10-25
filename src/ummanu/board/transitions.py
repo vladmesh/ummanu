@@ -123,6 +123,36 @@ TRANSITIONS: dict[EntityKind, dict[TransitionKey, Transition]] = {
         (CardState.IN_PROGRESS, CardState.VALIDATE): Transition(
             CardState.IN_PROGRESS, CardState.VALIDATE, EventKind.CARD_SUBMITTED
         ),
+        (CardState.IN_PROGRESS, CardState.CI): Transition(
+            CardState.IN_PROGRESS, CardState.CI, EventKind.CARD_SUBMITTED
+        ),
+        (CardState.CI, CardState.REVIEW): Transition(
+            CardState.CI, CardState.REVIEW, EventKind.CARD_MOVED
+        ),
+        (CardState.CI, CardState.ASSESSMENT): Transition(
+            CardState.CI, CardState.ASSESSMENT, EventKind.CARD_ASSESSED
+        ),
+        (CardState.REVIEW, CardState.ASSESSMENT): Transition(
+            CardState.REVIEW, CardState.ASSESSMENT, EventKind.CARD_ASSESSED
+        ),
+        (CardState.CI, CardState.IN_PROGRESS): Transition(
+            CardState.CI, CardState.IN_PROGRESS, EventKind.CARD_RETURNED
+        ),
+        (CardState.REVIEW, CardState.IN_PROGRESS): Transition(
+            CardState.REVIEW, CardState.IN_PROGRESS, EventKind.CARD_RETURNED
+        ),
+        (CardState.CI, CardState.READY): Transition(
+            CardState.CI, CardState.READY, EventKind.CARD_RETURNED
+        ),
+        (CardState.REVIEW, CardState.READY): Transition(
+            CardState.REVIEW, CardState.READY, EventKind.CARD_RETURNED
+        ),
+        (CardState.CI, CardState.BLOCKED): Transition(
+            CardState.CI, CardState.BLOCKED, EventKind.CARD_BLOCKED
+        ),
+        (CardState.REVIEW, CardState.BLOCKED): Transition(
+            CardState.REVIEW, CardState.BLOCKED, EventKind.CARD_BLOCKED
+        ),
         (CardState.IN_PROGRESS, CardState.ASSESSMENT): Transition(
             CardState.IN_PROGRESS, CardState.ASSESSMENT, EventKind.CARD_MOVED
         ),

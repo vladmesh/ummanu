@@ -1211,7 +1211,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertEqual(self.rpc, [])
 
     def test_edit_refuses_every_state_outside_issues_ready_and_blocked(self) -> None:
-        for state in ("in_progress", "validate", "assessment", "done"):
+        for state in ("in_progress", "validate", "ci", "review", "assessment", "done"):
             with self.subTest(state=state):
                 self.place_card("ummanu-468", state)
                 before = self.board_snapshot()
@@ -2386,8 +2386,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertBoardUnchanged(before)
 
     def test_claim_counts_a_parked_card_as_an_active_code_task(self) -> None:
-        """A parked card holds a retained worker and its checkout: a second writer in the same
-        project is as wrong there as it is in Validate."""
+        """A card in an active stage holds its project's code slot."""
         self.clear_card_metadata("ummanu-468", "claim")
         self.add_card(
             reference="ummanu-999",
@@ -2395,18 +2394,18 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             state="assessment",
             metadata={"project": "ummanu", "task_type": "code", "claim": "other-worker"},
         )
-        before = self.board_snapshot()
-
-        with self.assertRaisesRegex(TaskError, "waiting for a code slot of project ummanu .*ummanu-999") as raised:
-            self.writer.claim(
-                role="dispatcher",
-                actor="d",
-                reference="ummanu-468",
-                worker="ummanu-468-runtime",
-            )
-
-        self.assertEqual(raised.exception.code, "capacity_reached")
-        self.assertBoardUnchanged(before)
+        for state in ("assessment", "ci", "review"):
+            with self.subTest(state=state):
+                self.place_card("ummanu-999", state)
+                before = self.board_snapshot()
+                with self.assertRaisesRegex(
+                    TaskError, "waiting for a code slot of project ummanu .*ummanu-999"
+                ) as raised:
+                    self.writer.claim(
+                        role="dispatcher", actor="d", reference="ummanu-468", worker="ummanu-468-runtime",
+                    )
+                self.assertEqual(raised.exception.code, "capacity_reached")
+                self.assertBoardUnchanged(before)
 
     def test_archive_refuses_a_parked_card(self) -> None:
         """Assessment is a wait, not a resting place: the worker and workspace are still owned."""
@@ -3390,8 +3389,52 @@ class AssessmentStateTests(CardStoreCase):
         self.assertEqual(_STATE_BY_COLUMN["Assessment"], "assessment")
         self.assertEqual(
             list(_STATE_BY_COLUMN),
-            ["Issues", "Ready", "In progress", "Validate", "Assessment", "Blocked", "Done"],
+            ["Issues", "Ready", "In progress", "Validate", "CI", "Review", "Assessment", "Blocked", "Done"],
         )
+
+    def test_ci_review_and_validate_round_trip_with_metadata_and_transition_history(self) -> None:
+        for stages in (("ci", "review", "assessment"), ("ci", "assessment"), ("validate", "assessment")):
+            with self.subTest(stages=stages):
+                self.client.move(12, "in_progress")
+                self.client.save_metadata(12, claim="worker", round_id="round-fixture")
+                reader = TaskReader(self.client)
+                before = reader.show("ummanu-468")
+                source = "in_progress"
+                for index, target in enumerate(stages):
+                    request = f"chain-{'-'.join(stages)}-{index}"
+                    moved = self.writer.move(
+                        role="dispatcher", actor="d", reference="ummanu-468", target=target,
+                        reason="stage completed", request_id=request,
+                    )
+                    shown = reader.show("ummanu-468")
+                    self.assertEqual(shown["state"], target)
+                    self.assertEqual(shown["id"], before["id"])
+                    self.assertEqual(shown["claim"], before["claim"])
+                    self.assertEqual(shown["extensions"], before["extensions"])
+                    self.assertEqual(shown["workspace"], before["workspace"])
+                    self.assertEqual(
+                        [card["ref"] for card in reader.list(states={target}, project="ummanu")],
+                        ["ummanu-468"],
+                    )
+                    self.assertEqual(moved["task"]["state"], target)
+                    self.assertEqual(recorded_card_transition(self.writer.audit.event(request)), (source, target))
+                    self.assertEqual(shown["comments"][:len(before["comments"])], before["comments"])
+                    source = target
+
+    def test_ci_review_recovery_uses_writer_cleanup_and_audit(self) -> None:
+        for source in ("ci", "review"):
+            for target in ("in_progress", "ready", "blocked"):
+                with self.subTest(source=source, target=target):
+                    self.client.move(12, source)
+                    self.client.save_metadata(12, claim="worker")
+                    request = f"recover-{source}-{target}"
+                    moved = self.writer.move(
+                        role="dispatcher", actor="d", reference="ummanu-468", target=target,
+                        reason="recover round", request_id=request,
+                    )
+                    self.assertEqual(moved["task"]["state"], target)
+                    self.assertEqual(moved["task"]["claim"]["worker"], None if target == "ready" else "worker")
+                    self.assertEqual(recorded_card_transition(self.writer.audit.event(request)), (source, target))
 
     def test_dispatcher_transitions_are_exact(self) -> None:
         """Pinned exactly: a later card must widen this table deliberately, not by accident."""
@@ -3405,6 +3448,16 @@ class AssessmentStateTests(CardStoreCase):
                 (CardState.IN_PROGRESS, CardState.DONE),
                 (CardState.READY, CardState.BLOCKED),
                 (CardState.IN_PROGRESS, CardState.VALIDATE),
+                (CardState.IN_PROGRESS, CardState.CI),
+                (CardState.CI, CardState.REVIEW),
+                (CardState.CI, CardState.ASSESSMENT),
+                (CardState.REVIEW, CardState.ASSESSMENT),
+                (CardState.CI, CardState.IN_PROGRESS),
+                (CardState.REVIEW, CardState.IN_PROGRESS),
+                (CardState.CI, CardState.READY),
+                (CardState.REVIEW, CardState.READY),
+                (CardState.CI, CardState.BLOCKED),
+                (CardState.REVIEW, CardState.BLOCKED),
                 (CardState.IN_PROGRESS, CardState.BLOCKED),
                 (CardState.IN_PROGRESS, CardState.READY),
                 # A worker's partial report parks the card for a decision.
@@ -3465,7 +3518,7 @@ class AssessmentStateTests(CardStoreCase):
         def authorized(role: str, source: str, target: str) -> bool:
             if source == target:
                 return False
-            if role in {"po", "observer"} and target in {"in_progress", "validate", "assessment"}:
+            if role in {"po", "observer"} and target in {"in_progress", "validate", "ci", "review", "assessment"}:
                 return False
             if role == "po":
                 return True

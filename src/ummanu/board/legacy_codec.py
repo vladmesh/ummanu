@@ -15,6 +15,8 @@ TASK_STATE_BY_COLUMN = {
     "Ready": "ready",
     "In progress": "in_progress",
     "Validate": "validate",
+    "CI": "ci",
+    "Review": "review",
     "Assessment": "assessment",
     "Blocked": "blocked",
     "Done": "done",

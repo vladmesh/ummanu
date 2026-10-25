@@ -33,7 +33,7 @@ SCHEMA_VERSION = 1
 
 #: The whole move vocabulary in `TaskWriter.move` spelling, so a client can offer it and a misspelling
 #: is refused before the board; which target a given card may take is the writer's decision.
-MOVE_TARGETS = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
+MOVE_TARGETS = ("issues", "ready", "in_progress", "validate", "ci", "review", "assessment", "blocked", "done")
 
 #: The writer's codes as typed failures. `transition_forbidden` refuses on card state, not request
 #: shape, hence `owner_conflict`.

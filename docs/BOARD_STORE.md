@@ -338,8 +338,8 @@ CREATE TABLE tasks (
     review         text CONSTRAINT task_review_is_a_known_choice_or_nothing
                      CHECK (review IS NULL OR review IN ('required','skipped')),  -- NULL reads as required
     live_impact    boolean NOT NULL DEFAULT false,    -- research only (task_live_impact_is_research_only)
-    state          text NOT NULL CHECK (state IN
-                     ('issues','ready','in_progress','validate','assessment','blocked','done')),
+    state          text NOT NULL CONSTRAINT task_state_in_vocabulary CHECK (state IN
+                     ('issues','ready','in_progress','validate','ci','review','assessment','blocked','done')),
     archived       boolean NOT NULL DEFAULT false,
     position       integer NOT NULL DEFAULT 0,
     sprint_ref     text REFERENCES sprints(ref) DEFERRABLE INITIALLY DEFERRED,
@@ -821,6 +821,7 @@ Revisions (`src/ummanu/board/migrations/versions/`):
 | `0033_po_session_moved` | additive: `po_session_moved` (notice) and `po_session_moved_account` (`needs_owner`) in `owner_event_kind_in_vocabulary` and `owner_event_class_follows_kind`, both restated; no column; the downgrade restores `0028`'s two constraints and fails while either kind exists |
 | `0034_po_restore_sequence` | app-role SELECT and UPDATE on `po_feed_entry_id_seq` so inert PO import can advance preserved feed identities; no other grants change; downgrade revokes those two privileges, retaining USAGE, rows and sequence position |
 | `0035_issue_reopened` | additive: `issue.reopened` in the `board_events.kind` CHECK, restated under the name `board_event_kind_in_vocabulary`; no column; the downgrade restores `0001`'s constraint and fails while an `issue.reopened` event exists |
+| `0036_card_ci_review` | additive: widens `tasks.state` to include `ci` and `review` under `task_state_in_vocabulary`; keeps Validate and all existing rows and round metadata; downgrade refuses while either new state exists |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column

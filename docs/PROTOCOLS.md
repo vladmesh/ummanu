@@ -100,7 +100,14 @@ Issues → ready → in_progress → validate → assessment → done
                          └───────────────────────────→ blocked
 ```
 
-Board columns, in order: `Issues, Ready, In progress, Validate, Assessment, Blocked, Done`.
+Board columns, in order: `Issues, Ready, In progress, Validate, CI, Review, Assessment, Blocked, Done`.
+
+The persisted Card contract and board transport support `ci` (CI) and `review` (Review) as
+active states. The dispatcher holds In progress → CI → Review → Assessment and CI → Assessment
+when review is skipped, with returns from either stage to In progress, Ready or Blocked. Neither
+stage has a direct Done edge. The production dispatcher still produces Validate and keeps its
+existing review, gate and recovery workflow. Switching the producer and migrating Validate rounds
+remain separate work; the persisted vocabulary alone does not complete the CI/Review workflow.
 
 `assessment` is a durable wait for a decision. A substantive reviewer verdict, green or red, parks
 the card there: the reviewer is stopped, the round's worker stays suspended with its workspace, and
@@ -115,13 +122,14 @@ Which role may move a card along which edge is one registry, `CARD_TRANSITIONS` 
 `board/card_transitions.py`, with the conditions some edges carry declared beside it. `task move`
 admits a move through its one entry point, `admit_card_move`.
 
-- Only the dispatcher moves a card into In progress, Validate or Assessment: a claim, a report, a
+- Only the dispatcher moves a card into In progress, Validate, CI, Review or Assessment: a claim, a report, a
   verdict, a gate outcome or a decision it performs. Its other edges are Blocked moves out of its
   stages, Validate or Assessment to Done, In progress to Ready, and the two
   [wait card](#wait-cards) edges.
-- The PO moves a card from any column to Issues, Ready, Blocked or Done.
+- The PO moves a card along declared lifecycle edges to Issues, Ready, Blocked or Done;
+  CI and Review allow Ready or Blocked.
 - The observer has the PO's edges except any out of Assessment. A move out of Blocked needs a reason.
-- The steward moves a card from Ready, In progress, Validate or Assessment to Blocked and from Blocked
+- The steward moves a card from Ready, In progress, Validate, CI, Review or Assessment to Blocked and from Blocked
   to Done, each with a reason, from Blocked to Ready, and its own report card from In progress to Done.
 - Workers, reviewers and retro move nothing.
 
@@ -4223,8 +4231,8 @@ of `system`, `task` or `task_events`, and `observed_at`. Identities are the pipe
 reference, a project its registered id.
 
 **`system_snapshot()`** — installation health (`collect_status`, as `ummanu status --json`), the
-registered projects from validated bindings, the cards in `ready`, `in_progress`, `validate`,
-`assessment` and `blocked`, and every head the dispatcher holds with its card and project.
+registered projects from validated bindings, the cards in `ready`, `in_progress`, `validate`, `ci`,
+`review`, `assessment` and `blocked`, and every head the dispatcher holds with its card and project.
 
 **`task_snapshot(ref)`** — the card as `ummanu task show` reads it, its project and whether that
 project is registered, what the dispatcher durably holds for it (attempt, round, gate state, workspace,
@@ -4246,7 +4254,7 @@ rows in one read) and nothing per card; `items` is null, never `[]`, with an una
 the board could not be read.
 
 **`board_view(project=None, sprint=None)`** — every work card (a task with a `task_type`) in its
-column (`issues`, `ready`, `in_progress`, `validate`, `assessment`, `blocked`, `done`, in that
+column (`issues`, `ready`, `in_progress`, `validate`, `ci`, `review`, `assessment`, `blocked`, `done`, in that
 order), each column with its `count` and its `cards`, the oldest `date_moved` first and an unknown
 one counted as oldest. One board store statement (`SqlCardClient.board_cards`) over `tasks`, their
 `task_comments` and `sprints`, whatever the filter and the card count; Product and Issue rows are

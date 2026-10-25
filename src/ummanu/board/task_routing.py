@@ -129,7 +129,7 @@ DECISION_VALUES: frozenset[str] = frozenset(member.value for member in TaskDecis
 
 EDITABLE_STATES: frozenset[CardState] = frozenset({CardState.ISSUES, CardState.READY, CardState.BLOCKED})
 ACTIVE_STATES: frozenset[CardState] = frozenset(
-    {CardState.IN_PROGRESS, CardState.VALIDATE, CardState.ASSESSMENT}
+    {CardState.IN_PROGRESS, CardState.VALIDATE, CardState.CI, CardState.REVIEW, CardState.ASSESSMENT}
 )
 DECIDED_TARGETS: frozenset[CardState] = frozenset({CardState.DONE, CardState.IN_PROGRESS})
 UNDECIDED_EXITS: frozenset[CardState] = frozenset({CardState.READY, CardState.VALIDATE, CardState.ISSUES})
