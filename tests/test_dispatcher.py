@@ -13557,6 +13557,8 @@ class ReviewBaseReconciliationTests(unittest.TestCase):
             bind_observer(self, "sprint:1")
             writer.decide(role="observer", actor="observer", reference=task["ref"],
                           kind="accept", body="release the reviewed candidate", request_id="accept")
+            setup_events = writer.audit.events(task["ref"])
+            setup_comments = reader.show(task["ref"])["comments"]
             runtime = SimpleNamespace(
                 host=host, writer=writer, reader=reader, audit=writer.audit,
                 owner="dispatcher", save_records=mock.Mock(),
@@ -13607,8 +13609,10 @@ class ReviewBaseReconciliationTests(unittest.TestCase):
             self.assertEqual(effect["context"]["review_reconciliation"], record.review_reconciliation)
             self.assertEqual(effect["body"], audit)
             events = writer.audit.events(task["ref"])
-            self.assertEqual(len(events), 1)
-            event = events[0]
+            self.assertEqual(events[:len(setup_events)], setup_events)
+            release_events = events[len(setup_events):]
+            self.assertEqual(len(release_events), 1)
+            event = release_events[0]
             self.assertEqual(writer.audit.committed_event(request_id), event)
             self.assertIsNone(writer.audit.pending_event(request_id))
             self.assertEqual(event["request_id"], request_id)
@@ -13619,9 +13623,11 @@ class ReviewBaseReconciliationTests(unittest.TestCase):
                 "marker": "dispatcher", "body_sha256": gate_attestation.digest(audit),
             })
             comments = reader.show(task["ref"])["comments"]
-            self.assertEqual(len(comments), 1)
-            self.assertEqual(comments[0]["marker"], "dispatcher")
-            self.assertEqual(comments[0]["body"], "[dispatcher]\n" + audit)
+            self.assertEqual(comments[:len(setup_comments)], setup_comments)
+            release_comments = comments[len(setup_comments):]
+            self.assertEqual(len(release_comments), 1)
+            self.assertEqual(release_comments[0]["marker"], "dispatcher")
+            self.assertEqual(release_comments[0]["body"], "[dispatcher]\n" + audit)
             with self.assertRaisesRegex(TaskError, "request id belongs to another operation or payload"):
                 writer.comment(
                     role="dispatcher", actor=runtime.owner, reference=task["ref"],

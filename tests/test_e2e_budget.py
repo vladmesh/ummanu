@@ -282,7 +282,7 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
         self.assertIn("joins this decision", joined)
         # The pilot is not Blocked: it waits where it is, with the mark on `task show`.
         card = self.card()
-        self.assertEqual(card["state"], "validate")
+        self.assertEqual(card["state"], "review")
         self.assertEqual(card["e2e"]["mark"], f"e2e: budget spent, waiting on {decision}")
         self.assertEqual(e2e_state(self.reader.show(OTHER)).budget_wait.decision, decision)
         # Re-checked each tick without reading the gate, and nothing is cut or dispatched again.
