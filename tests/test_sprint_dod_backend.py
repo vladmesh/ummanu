@@ -57,6 +57,29 @@ class SprintDodTests(SprintFixture):
                                       evidence="PR 8", request_id="meet")
         self.assertEqual(refused.exception.code, "validation")
 
+    def test_manual_main_evidence_commits_once_and_does_not_release_the_close_guard(self):
+        ref = self._open("ship", "accept")
+        fields = {"role": "observer", "actor": "observer", "reference": ref, "item": "d1",
+                  "evidence": "main checked by operator", "request_id": "main-proof"}
+        first = self.writer.mark_dod_in_main(**fields)
+        self.assertEqual(self.writer.mark_dod_in_main(**fields)["event_id"], first["event_id"])
+        self.assertEqual(self._history(ref, "dod_item_in_main"),
+                         [{"item": "d1", "evidence": "main checked by operator"}])
+        dod = self.sprint(ref, include_cards=True, include_delivery=True)["dod"]
+        self.assertEqual((dod["in_main"], dod["met"]), (1, 0))
+        self.assertEqual(dod["items"][0]["delivery"]["by"]["actor"], "observer")
+        with self.assertRaises(TaskError):
+            self.writer.mark_dod_in_main(**{**fields, "evidence": "other"})
+        with self.assertRaises(TaskError) as refused:
+            self.writer.close(role="observer", actor="observer", reference=ref, decisions=KEEP_THE_ISSUE_OPEN,
+                              reason="delivery only")
+        self.assertEqual(refused.exception.code, "close_plan_forbidden")
+        with (mock.patch.object(self.client, "_rpc_saveTaskMetadata", side_effect=OSError("lost write")),
+              self.assertRaises(TaskError)):
+            self.writer.mark_dod_in_main(**{**fields, "item": "d2", "request_id": "lost-main"})
+        self.assertIsNone(self.writer.audit.committed_event("lost-main"))
+        self.assertEqual(self.sprint(ref, include_cards=True, include_delivery=True)["dod"]["in_main"], 1)
+
     def test_a_free_text_dod_takes_no_weight_until_the_po_adds_items(self) -> None:
         ref = self._open()
         self.assertFalse(self.sprint(ref)["dod"]["structured"])
@@ -247,6 +270,27 @@ class CardDodStorageTests(SprintFixture):
         with self.assertRaises(TaskError):
             self.create_card(request_id="create-card", dod_item="d2")
         self.assertIsNone(fresh_reader.show("ummanu-12")["dod_item"])
+
+    def test_release_merge_facts_count_all_cards_and_invalidate_an_earlier_manual_marker(self):
+        self.writer.mark_dod_in_main(role="observer", actor="observer", reference=self.ref,
+                                     item="d1", evidence="operator proof")
+        refs = [self.create_card()["task"]["ref"] for _ in range(2)]
+        fields = {"role": "observer", "actor": "observer", "reference": self.ref,
+                  "item": "d1", "evidence": "bypass", "request_id": "refused-main"}
+        with self.assertRaises(TaskError):
+            self.writer.mark_dod_in_main(**fields)
+        self.assertEqual(self.sprint(self.ref, include_cards=True, include_delivery=True)["dod"]["in_main"], 0)
+        for index, ref in enumerate(refs):
+            for target in ("in_progress", "validate", "assessment"):
+                self.cards.move(role="dispatcher", actor="dispatcher", reference=ref, target=target, reason=target)
+            self.cards.decide(role="observer", actor="observer", reference=ref, kind="accept", body="reviewed")
+            self.cards.move(role="dispatcher", actor="dispatcher", reference=ref, target="done", reason="merged",
+                            decision="accept", release_merge={"base": "main", "merge_sha": "a" * 40, "path": "pr"})
+            self.assertEqual(self.sprint(self.ref, include_cards=True, include_delivery=True)["dod"]["in_main"], index)
+        self.cards.archive(role="po", actor="operator", reference=refs[0], reason="retained merge")
+        self.assertEqual(self.sprint(self.ref, include_cards=True, include_delivery=True)["dod"]["in_main"], 1)
+        self.create_card()
+        self.assertEqual(self.sprint(self.ref, include_cards=True, include_delivery=True)["dod"]["in_main"], 0)
 
     def test_metadata_failure_rolls_back_the_card_and_its_request(self):
         before = self.persisted_record_count(self.client)

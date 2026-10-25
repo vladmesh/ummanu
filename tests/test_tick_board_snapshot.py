@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from tests.fakes.tick_board import SHA, SPRINT, CountingStore, GuardedWriter
+from ummanu.board import sprint_dod
 from ummanu.board.backend import record_key
 from ummanu.board.e2e_record import AfterMergeMark, E2eState, e2e_state
 from ummanu.board.tick_snapshot import current_snapshot, select_cards, select_sprints, tick_snapshot
@@ -85,6 +87,36 @@ class TickBoardSnapshotTests(unittest.TestCase):
             self.run_tick()
         with self.assertRaisesRegex(AssertionError, "budget exceeded; callers:[\\s\\S]*regression"):
             self.assert_budget()
+
+    def test_default_sprint_reads_reuse_loaded_cards_without_delivery_reads(self):
+        second = "sprint:2"
+        first_key, second_key = record_key("sprint", SPRINT), record_key("sprint", second)
+        self.store.rows[second_key] = {**self.store.rows[first_key], "id": second_key, "reference": second}
+        items = sprint_dod.encode(sprint_dod.new_items(["ship", "verify"]))
+        self.store.meta[first_key][sprint_dod.FIELD] = items
+        self.store.meta[second_key] = dict(self.store.meta[first_key])
+        self.store.meta[2]["sprint_ref"] = second
+        self.store.meta[1]["dod_item"] = "d1"
+        expected = {SPRINT: {"demo-1", "demo-3", "demo-4"}, second: {"demo-2"}}
+        with tick_snapshot(self.reader) as snapshot:
+            snapshot.load()
+            with (mock.patch.object(self.store, "call", wraps=self.store.call) as calls,
+                  mock.patch.object(self.store.audit, "events", wraps=self.store.audit.events) as events):
+                for _ in range(3):
+                    for ref in (SPRINT, second):
+                        shown = self.runtime.sprints.show(ref)
+                        self.assertEqual({card["ref"] for card in shown["cards"]}, expected[ref])
+                        self.assertIsNone(shown["dod"]["in_main"])
+                        self.assertEqual(shown["dod"]["items"][0]["delivery"]["state"], "unknown")
+                for ref in (SPRINT, second):
+                    self.assertIsNone(self.runtime.sprints.show(ref, include_cards=False)["dod"]["in_main"])
+            enumerations = Counter(call.args[0] for call in calls.call_args_list
+                                   if call.args[0] in {"getAllTasks", "getBoardRows", "getArchivedAfterMergeTasks"})
+            metadata = Counter(call.kwargs["task_id"] for call in calls.call_args_list
+                               if call.args[0] == "getTaskMetadata")
+            self.assertEqual(enumerations, {})
+            self.assertEqual(metadata, {first_key: 4, second_key: 4})
+            events.assert_not_called()
 
     def test_independent_checkpoint_is_outside_the_tick_read_budget(self):
         exported = []

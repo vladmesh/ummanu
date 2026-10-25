@@ -20,6 +20,7 @@ from jsonschema import Draft202012Validator
 
 from tests.po_fake_store import FakePoStore
 from tests.web_fakes import Recording
+from ummanu.board import sprint_dod
 from ummanu.board.e2e_record import e2e_view
 from ummanu.web import page_assets, page_po, pages
 from ummanu.web.app import WebApp
@@ -497,7 +498,8 @@ class SprintPageTests(PageFixture):
         document = {
             "ref": "sprint:1469",
             "observed_at": "2026-09-28T00:00:00Z",
-            "sprint": {"source": AVAILABLE, "value": {"ref": "sprint:1469", "status": "open", "goal": "g"}},
+            "sprint": {"source": AVAILABLE, "value": {"ref": "sprint:1469", "status": "open", "goal": "g",
+                                                      "dod": sprint_dod.section(None)}},
             "observer": {},
             "work": {"waiting_on": waiting_on},
         }

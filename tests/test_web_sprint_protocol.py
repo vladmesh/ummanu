@@ -3361,6 +3361,7 @@ class TerminalSprintWriteTests(SprintProtocolFixture):
         "dod_item_descoped": REFUSED,
         "dod_item_edited": REFUSED,
         "dod_item_met": REFUSED,
+        "dod_item_in_main": REFUSED,
         "dod_item_reopened": REFUSED,
         "dod_item_weighed": REFUSED,
         "dod_items_added": REFUSED,

@@ -2343,7 +2343,8 @@
         "estimated",
         "met",
         "total",
-        "progress"
+        "progress",
+        "in_main"
       ],
       "properties": {
         "structured": {
@@ -2368,7 +2369,8 @@
               "weight_reason",
               "evidence",
               "met_by",
-              "share"
+              "share",
+              "delivery"
             ],
             "properties": {
               "id": {
@@ -2419,6 +2421,25 @@
                 "type": "object",
                 "description": "Present on a descoped item only: role, actor, at and reason of the descope."
               },
+              "in_main_manual": {
+                "type": "object",
+                "required": ["role", "actor", "at", "evidence"],
+                "description": "Optional stored manual delivery evidence, effective only without linked cards."
+              },
+              "delivery": {
+                "type": "object",
+                "required": ["state", "source", "reason", "cards", "merged", "excluded", "evidence", "by"],
+                "properties": {
+                  "state": {"enum": ["in_main", "pending", "unknown", "descoped"]},
+                  "source": {"enum": ["release_merge", "manual", null]},
+                  "reason": {"type": ["string", "null"]},
+                  "cards": {"type": ["array", "null"], "items": {"type": "string"}},
+                  "merged": {"type": "array", "items": {"type": "object"}},
+                  "excluded": {"type": "array", "items": {"type": "object"}},
+                  "evidence": {"type": ["string", "null"]},
+                  "by": {"type": ["object", "null"]}
+                }
+              },
               "share": {
                 "type": "number",
                 "description": "This item's part of the scale: its counted weight over the sum."
@@ -2432,6 +2453,11 @@
         "met": {
           "type": "integer",
           "minimum": 0
+        },
+        "in_main": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Count of in-scope delivered items; null when required card or audit sources are unavailable."
         },
         "total": {
           "type": "integer",

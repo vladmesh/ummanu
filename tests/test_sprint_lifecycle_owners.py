@@ -60,8 +60,8 @@ class SprintLifecycleOwnersTests(unittest.TestCase):
             self.assertEqual(owners.facade_dependencies(owner, sources[owner]), set())
         methods = [node for node in inventory["SprintLifecycleMixin"][1].body if isinstance(node, ast.FunctionDef)]
         self.assertEqual(len(methods), 29)
-        self.assertEqual(len([n for n in inventory["SprintWriter"][1].body if isinstance(n, ast.FunctionDef)]) + len(methods), 97)
-        self.assertEqual(len([n for n in inventory["SprintReader"][1].body if isinstance(n, ast.FunctionDef)]), 13)
+        self.assertEqual(len([n for n in inventory["SprintWriter"][1].body if isinstance(n, ast.FunctionDef)]) + len(methods), 98)
+        self.assertEqual(len([n for n in inventory["SprintReader"][1].body if isinstance(n, ast.FunctionDef)]), 14)
         self.assertEqual(len([n for n in inventory["_AuditOnce"][1].body if isinstance(n, ast.FunctionDef)]), 2)
         self.assertFalse(any(isinstance(n, ast.Name) and n.id in {"SprintWriter", "SprintReader", "super"}
                              for method in methods for n in ast.walk(method)))

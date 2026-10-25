@@ -19,6 +19,7 @@ from typing import Any
 
 from tests.support.instance import status_instance
 from tests.web_fakes import Recording, system_snapshot
+from ummanu.board import sprint_dod
 from ummanu.board.owner_handover import WAITING_OWNER, WAITING_OWNER_BY, WAITING_OWNER_REASON
 from ummanu.web.app import WebApp
 from ummanu.webproto.reads import ReadLayer
@@ -463,7 +464,8 @@ class LinkTests(unittest.TestCase):
     def test_the_sprint_page_links_the_board_filtered_to_that_sprint(self) -> None:
         sprint = {
             "ref": "sprint:7",
-            "sprint": {"source": {"state": "available"}, "value": {"ref": "sprint:7", "status": "open"}},
+            "sprint": {"source": {"state": "available"}, "value": {"ref": "sprint:7", "status": "open",
+                                                                      "dod": sprint_dod.section(None)}},
             "observer": {},
             "work": {},
         }
