@@ -133,7 +133,7 @@ def handle_worker_report(
                 role="dispatcher",
                 actor=runtime.owner,
                 reference=ref,
-                target="validate",
+                target="ci" if has_candidate(task) else "validate",
                 reason="worker report:done",
                 request_id=_attempt_request_id(
                     record.attempt_id or attempt_id,
@@ -142,14 +142,14 @@ def handle_worker_report(
                     str(record.report_generation),
                 ),
             )
-            record.state = "validate"
+            record.state = "ci" if has_candidate(task) else "validate"
             runtime.save_records(payload, records)
             return {
                 "status": "ok",
                 "step": "advance",
                 "pilot_ref": ref,
                 "attempt_id": attempt_id,
-                "to": "validate",
+                "to": record.state,
             }
         if has_candidate(task):
             current_sha = runtime.host.head_commit(record)
@@ -217,7 +217,7 @@ def handle_worker_report(
             role="dispatcher",
             actor=runtime.owner,
             reference=ref,
-            target="validate",
+            target="ci" if has_candidate(task) else "validate",
             reason="worker report:done",
             # Keyed on the generation the report closes, so this move and its replay after a
             # crash carry one id whatever the card's comment count has done since.
@@ -227,14 +227,14 @@ def handle_worker_report(
         )
         if continuation.validation_move_pending:
             continuation.confirm_validation_move()
-        record.state = "validate"
+        record.state = "ci" if has_candidate(task) else "validate"
         runtime.save_records(payload, records)
         return {
             "status": "ok",
             "step": "advance",
             "pilot_ref": ref,
             "attempt_id": attempt_id,
-            "to": "validate",
+            "to": record.state,
         }
     if marker == "report:blocked":
         # Before the stop, so the phase is accounted while its head is still described here.
@@ -458,7 +458,7 @@ def _accept_stale_infrastructure_done(
         role="dispatcher",
         actor=runtime.owner,
         reference=ref,
-        target="validate",
+        target="ci" if has_candidate(task) else "validate",
         reason=("worker report:done retries an infrastructure-classified mechanical gate on the same SHA"),
         request_id=_attempt_request_id(
             record.attempt_id or attempt_id,
@@ -467,14 +467,14 @@ def _accept_stale_infrastructure_done(
             str(record.report_generation),
         ),
     )
-    record.state = "validate"
+    record.state = "ci" if has_candidate(task) else "validate"
     runtime.save_records(payload, records)
     return {
         "status": "ok",
         "step": "advance",
         "pilot_ref": ref,
         "attempt_id": attempt_id,
-        "to": "validate",
+        "to": record.state,
         "action": "stale-done-infrastructure-retry",
     }
 

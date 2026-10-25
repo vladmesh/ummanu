@@ -819,7 +819,7 @@ class LaunchIntentTests(unittest.TestCase):
     def run_to_validate(self) -> None:
         self.tick()
         self.report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
 
     def age_intent(self, seconds: float) -> None:
         """Push a stored intent back in time, so its grace window has run out."""
@@ -889,7 +889,7 @@ class LaunchIntentTests(unittest.TestCase):
 
         # And the card carries on from the adopted head instead of being restarted around it.
         self.report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         self.assertEqual(self.host.prepared, [REF])
 
     def test_an_adopted_worker_keeps_the_run_its_bring_up_started(self) -> None:
@@ -1340,7 +1340,7 @@ class LaunchIntentTests(unittest.TestCase):
         real_move = self.writer.move
 
         def die_before_move(**kwargs):
-            if kwargs.get("target") == "validate":
+            if kwargs.get("target") == "ci":
                 raise OSError("dispatcher died before board move")
             return real_move(**kwargs)
 
@@ -1357,7 +1357,7 @@ class LaunchIntentTests(unittest.TestCase):
 
         recovered = self.tick()
 
-        self.assertEqual(recovered["to"], "validate")
+        self.assertEqual(recovered["to"], "ci")
         self.assertEqual(self.host.calls.count("retain_worker"), 1)
         self.assertEqual(self.host.calls.count("restart_worker"), 0)
 
@@ -1368,7 +1368,7 @@ class LaunchIntentTests(unittest.TestCase):
 
         def die_after_move(payload: dict) -> None:
             record = payload.get("records", {}).get(REF, {})
-            if record.get("state") == "validate":
+            if record.get("state") == "ci":
                 raise OSError("dispatcher died after board move")
             real_save(payload)
 
@@ -1376,7 +1376,7 @@ class LaunchIntentTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.tick()
 
-        self.assertEqual(self.reader.show(REF)["state"], "validate")
+        self.assertEqual(self.reader.show(REF)["state"], "ci")
         retained = self.record()
         assert retained is not None
         self.assertEqual(
@@ -1415,7 +1415,7 @@ class LaunchIntentTests(unittest.TestCase):
         gate opens one in Validate, a rework decision opens one over a card already parked in
         Assessment. Either way the transition is what the record owes and the board has not moved.
         """
-        self.assertIn(self.reader.show(REF)["state"], ("validate", "assessment"))
+        self.assertIn(self.reader.show(REF)["state"], ("review", "assessment"))
         stranded = self.record()
         assert stranded is not None
         self.assertEqual(stranded.worker_continuation.stage, WorkerContinuationStage.RED_TRANSITION_PENDING)
@@ -2119,7 +2119,7 @@ class LaunchIntentTests(unittest.TestCase):
 
         # And the verdict the round ends on carries that worker beside its reviewer.
         self.report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         self.assertEqual(self.tick()["action"], "review-started")
         self.verdict("green", "looks good", "verdict-green")
         self.assertEqual(self.release_after_green_verdict()["to"], "done")
@@ -2207,7 +2207,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.adopt_worker()
         self.report_done()
 
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         self.assertEqual(self.tick()["action"], "review-started")
 
         self.assertIn("stop_head:worker", self.host.calls)
@@ -2628,7 +2628,7 @@ class LaunchIntentTests(unittest.TestCase):
         outcome = self.tick()
 
         self.assertEqual(outcome["action"], "review-launch-aborted")
-        self.assertEqual(self.reader.show(REF)["state"], "validate", "the card is not blocked")
+        self.assertEqual(self.reader.show(REF)["state"], "review", "the card is not blocked")
         self.assertIsNotNone(self.record(), "the record is the only pointer to that reviewer")
         intent = self.stored_intent()
         self.assertEqual((intent["role"], intent["aborted"]), ("review", True))
@@ -2683,7 +2683,7 @@ class LaunchIntentTests(unittest.TestCase):
 
         # The safety behaviour of this branch is unchanged.
         self.assertEqual(outcome["action"], "review-launch-aborted")
-        self.assertEqual(self.reader.show(REF)["state"], "validate", "the card is not blocked")
+        self.assertEqual(self.reader.show(REF)["state"], "review", "the card is not blocked")
         intent = self.stored_intent()
         self.assertEqual((intent["role"], intent["aborted"]), ("review", True))
         self.assertEqual(intent["handle"], f"review:{REF}")
@@ -2954,7 +2954,7 @@ class LaunchIntentTests(unittest.TestCase):
 
         self.assertNotEqual(restarted["action"], "review-launch-aborted", "a vanished worker must not loop")
         self.assertEqual(self.host.reviews, [REF, REF], "the reviewer is relaunched, not aborted")
-        self.assertEqual(self.reader.show(REF)["state"], "validate", "the card is not blocked")
+        self.assertEqual(self.reader.show(REF)["state"], "review", "the card is not blocked")
         record = self.record()
         assert record is not None
         self.assertEqual(record.state, "reviewing", "the reviewer took the checkout")
@@ -3128,7 +3128,7 @@ class LaunchIntentTests(unittest.TestCase):
             outcome = self.tick()
 
         self.assertEqual(outcome["action"], "review-launch-aborted")
-        self.assertEqual(self.reader.show(REF)["state"], "validate", "the card is not blocked")
+        self.assertEqual(self.reader.show(REF)["state"], "review", "the card is not blocked")
         self.assertIsNotNone(self.record(), "the record is the only pointer to that reviewer")
         self.assertEqual(self.stored_intent()["role"], "review")
         self.assertTrue(self.head_alive("review"))
@@ -3243,7 +3243,7 @@ class LaunchIntentTests(unittest.TestCase):
         outcome = self.tick()
 
         self.assertEqual(outcome["action"], "review-stop-unconfirmed")
-        self.assertEqual(self.reader.show(REF)["state"], "validate", "the bounce did not happen")
+        self.assertEqual(self.reader.show(REF)["state"], "review", "the bounce did not happen")
         self.assertEqual(self.host.calls.count("restart_worker"), 0)
 
         self.host.fail_stop_review_reason = ""

@@ -354,16 +354,16 @@ class ClaimBoundaryTests(unittest.TestCase):
             outcome = claim.claim_ready_task(self.runtime, self.task, self.records, self.payload, "old-attempt")
 
         launch.assert_not_called()
-        self.assertEqual((outcome["action"], outcome["to"]), ("stage-resumed", "validate"))
+        self.assertEqual((outcome["action"], outcome["to"]), ("stage-resumed", "ci"))
         record = self.records["sample-1"]
         self.assertNotEqual(record.attempt_id, "old-attempt")
-        self.assertEqual((record.state, record.workspace, record.report_generation), ("validate", workspace, 3))
+        self.assertEqual((record.state, record.workspace, record.report_generation), ("ci", workspace, 3))
         self.assertEqual(
             _round_report_ids(record.workspace, record.attempt_id, "sample-1", record.report_generation),
             {attempt_request_id("old-attempt", action, "sample-1", "3") for action in _REPORT_ACTIONS},
         )
         moved = self.runtime.writer.move.call_args.kwargs
-        self.assertEqual(moved["target"], "validate")
+        self.assertEqual(moved["target"], "ci")
         self.assertEqual(moved["request_id"], attempt_request_id(record.attempt_id, "stage-resume", "sample-1", "3"))
 
     def test_a_rework_decided_on_a_held_candidate_opens_a_worker_round(self):

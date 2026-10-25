@@ -696,7 +696,10 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
         self, *, ci: str = "local", partial: bool = False, moved: bool = False
     ) -> tuple[DispatcherRecord, dict, dict]:
         self.start_dispatcher()
-        self.board.move(self.board.key_of(CARD_REF), "assessment")
+        self.board.move(self.board.key_of(CARD_REF), "validate")
+        self.writer.move(role="dispatcher", actor=self.runtime.owner, reference=CARD_REF,
+                         target="assessment", reason="release fixture", request_id="release-fixture-park")
+        self._decide("accept")
         # The production board is the card board: the release migrates the store it then writes to.
         self.instance(self.board_config(), self.data_dir)
         production, workspace = self.repos()

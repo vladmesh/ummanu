@@ -534,7 +534,7 @@ class CleanupOwner:
             # This admits only the predecessor's recorded head obligation. The
             # current board state and claim continue to belong to the successor.
             return {**current, "successor": successor}
-        if (current.get("state") in {"in_progress", "validate", "review", "assessment", "ready"}
+        if (current.get("state") in {"in_progress", "validate", "ci", "review", "assessment", "ready"}
                 and not current.get("closed")
                 and (intent["disposition"] != "done" or current.get("state") != "assessment")):
             raise HostError("cleanup card is still admitted for work")

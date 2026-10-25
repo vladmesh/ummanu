@@ -52,6 +52,7 @@ _CLASSIFICATION = re.compile(r"\Aclassification\s*:\s*[^\s.,;]+[.,;]?\s*", re.IG
 HEAD_FIELDS: dict[str, tuple[str, str]] = {
     "in_progress": ("head_override", "worker_head"),
     "validate": ("review_head_override", "review_head"),
+    "review": ("review_head_override", "review_head"),
 }
 
 LINKED = "linked"

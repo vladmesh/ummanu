@@ -126,6 +126,7 @@ REVISIONS = (
     "0034_po_restore_sequence",
     "0035_issue_reopened",
     "0036_card_ci_review",
+    "0037_stage_budget_candidates",
 )
 
 #: The first revision a release refuses to apply unattended.
@@ -364,7 +365,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         with self.assertRaises(sa.exc.IntegrityError):
             connection.exec_driver_sql("UPDATE tasks SET state = 'ci' WHERE task_ref = 'ummanu-1'")
         connection.rollback()
-        self.assertEqual(self.run_migrations(connection, admit=admit_additive), ("0036_card_ci_review",))
+        self.assertEqual(self.run_migrations(connection, admit=admit_additive), ("0036_card_ci_review", "0037_stage_budget_candidates"))
         self.assertEqual(saved(), before)
         for state in ("ci", "review", "validate"):
             connection.exec_driver_sql("UPDATE tasks SET state = %s WHERE task_ref = 'ummanu-1'", (state,))
@@ -388,13 +389,13 @@ class BoardStoreSchemaTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "cannot drop their states"):
                 command.downgrade(config, "0035_issue_reopened")
             connection.rollback()
-            self.assertEqual(migrate.current_revision(connection), "0036_card_ci_review")
+            self.assertEqual(migrate.current_revision(connection), "0037_stage_budget_candidates")
         connection.exec_driver_sql("UPDATE tasks SET state = 'validate'")
         connection.commit()
         command.downgrade(config, "0035_issue_reopened")
         connection.commit()
         self.assertEqual(connection.exec_driver_sql("SELECT state FROM tasks").scalar(), "validate")
-        self.assertEqual(self.run_migrations(connection), ("0036_card_ci_review",))
+        self.assertEqual(self.run_migrations(connection), ("0036_card_ci_review", "0037_stage_budget_candidates"))
 
     def test_the_revisions_reproduce_the_numbers_the_document_records(self) -> None:
         connection = self.owner_connection()
@@ -513,7 +514,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.assertEqual(privileges(), (True, False, False))
         before = grants()
         connection.commit()
-        self.assertEqual(self.run_migrations(connection), ("0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review"))
+        self.assertEqual(self.run_migrations(connection), ("0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review", "0037_stage_budget_candidates"))
         self.assertEqual(privileges(), (True, True, True))
         self.assertEqual(grants(), before)
 
@@ -565,7 +566,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             "VALUES ('sprint:7',2000000007,7,'old','old','open',now(),now())"
         )
         connection.commit()
-        self.assertEqual(self.run_migrations(connection, admit=admit_before_destructive), ("0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review"))
+        self.assertEqual(self.run_migrations(connection, admit=admit_before_destructive), ("0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review", "0037_stage_budget_candidates"))
         self.assertEqual(connection.exec_driver_sql("SELECT local_run_exceptions FROM sprints WHERE ref='sprint:7'").scalar(), [])
         entries = [{"project": "ummanu", "argv": ["docker", "run", "two words", ""], "rationale": "owner's exact probe"}]
         connection.exec_driver_sql("UPDATE sprints SET local_run_exceptions=%s::jsonb WHERE ref='sprint:7'", (json.dumps(entries),))
@@ -600,7 +601,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             "VALUES ('released-session',1,'owner','The dispatcher hands you this historical full input.',now())")
         before = tuple(connection.exec_driver_sql("SELECT * FROM po_feed").one())
         connection.commit()
-        self.assertEqual(self.run_migrations(connection, admit=admit_before_destructive), ("0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review"))
+        self.assertEqual(self.run_migrations(connection, admit=admit_before_destructive), ("0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review", "0037_stage_budget_candidates"))
         after = tuple(connection.exec_driver_sql("SELECT * FROM po_feed").one())
         self.assertEqual(after[:-1], before)
         self.assertIsNone(after[-1])
@@ -648,7 +649,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             (json.dumps(released_e2e),))
         before = connection.exec_driver_sql("SELECT * FROM sprint_resumes").one()
         connection.commit()
-        self.assertEqual(self.run_migrations(connection, admit=admit_before_destructive), ("0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review"))
+        self.assertEqual(self.run_migrations(connection, admit=admit_before_destructive), ("0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review", "0037_stage_budget_candidates"))
         after = connection.exec_driver_sql("SELECT * FROM sprint_resumes").one()
         self.assertEqual(tuple(after[:-1]), tuple(before))
         self.assertIsNone(after[-1])
@@ -692,7 +693,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.exec_driver_sql("INSERT INTO sprint_e2e_charges (dispatch_id,sprint_ref,task_ref,charged_at) VALUES ('paid','sprint:7','ummanu-1',now())")
         connection.commit()
         before = connection.exec_driver_sql("SELECT dispatch_id,sprint_ref,task_ref,charged_at FROM sprint_e2e_charges").all()
-        self.assertEqual(self.run_migrations(connection, admit=admit_before_destructive), ("0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review"))
+        self.assertEqual(self.run_migrations(connection, admit=admit_before_destructive), ("0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review", "0037_stage_budget_candidates"))
         self.assertEqual(connection.exec_driver_sql("SELECT allowed_productions,e2e_budget,e2e_used,owner_decisions FROM sprints WHERE ref='sprint:7'").one(), (["ummanu"], 7, 2, []))
         self.assertEqual(connection.exec_driver_sql("SELECT dispatch_id,sprint_ref,task_ref,charged_at FROM sprint_e2e_charges").all(), before)
         connection.exec_driver_sql("UPDATE sprints SET owner_decisions='[{\"id\":\"quoted\"}]'::jsonb")
@@ -720,7 +721,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 (kind, "real prior quotation " + kind, kind == "e2e_after_merge", "prior-" + kind))
         before = connection.exec_driver_sql("SELECT id,kind,subject_ref,text,created_at,read_at,dedup_key FROM owner_events ORDER BY id").all()
         connection.commit()
-        self.assertEqual(self.run_migrations(connection, admit=admit_before_destructive), ("0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review"))
+        self.assertEqual(self.run_migrations(connection, admit=admit_before_destructive), ("0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review", "0037_stage_budget_candidates"))
         after = connection.exec_driver_sql("SELECT id,kind,subject_ref,text,created_at,read_at,dedup_key FROM owner_events ORDER BY id").all()
         self.assertEqual(after, before)
         self.assertEqual(dict(connection.exec_driver_sql("SELECT kind,class FROM owner_events").all()), {
@@ -788,7 +789,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             marker = connection.exec_driver_sql("SELECT marker FROM task_comments").scalar()
             return events, {key: intent.get("data") for key, intent in intents.items()}, intents["legacy-move"], marker
 
-        self.assertEqual(self.run_migrations(connection), ("0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review"))
+        self.assertEqual(self.run_migrations(connection), ("0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review", "0037_stage_budget_candidates"))
         accepted = documents("accept")
         self.assertEqual(stored(), (
             accepted, {**accepted, "legacy-move": None},
@@ -1970,7 +1971,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         with self.assertLogs("ummanu.board.owner_events", level="WARNING"):
             self.assertFalse(record("sprint_closed", "sprint:5", "closed", "early", to=store))
 
-        self.assertEqual(self.run_migrations(connection), ("0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review"))
+        self.assertEqual(self.run_migrations(connection), ("0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review", "0037_stage_budget_candidates"))
 
         # Every old column loads unchanged; 0023 adds budget (3 and 0), 0026 no exceptions, 0027 no quotes,
         # 0031 no DoD items.
@@ -2060,7 +2061,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.commit()
         before = connection.exec_driver_sql("SELECT * FROM po_sessions ORDER BY session_id").fetchall()
 
-        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review"))
+        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review", "0037_stage_budget_candidates"))
 
         rows = connection.exec_driver_sql(
             "SELECT session_id, title FROM po_sessions ORDER BY session_id"
@@ -2092,7 +2093,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         )
 
         # Up again: the backfill runs on what is there, the null titles.
-        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review"))
+        self.assertEqual(self.run_migrations(connection), ("0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review", "0037_stage_budget_candidates"))
         self.assertEqual(
             connection.exec_driver_sql("SELECT title FROM po_sessions ORDER BY session_id").fetchall(),
             [("sprint:1467",), ("sprint:40",), (None,)],
@@ -2119,7 +2120,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             self.card(connection, "ummanu-7", task_type="wait")
         connection.rollback()
 
-        self.assertEqual(self.run_migrations(connection), ("0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review"))
+        self.assertEqual(self.run_migrations(connection), ("0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review", "0037_stage_budget_candidates"))
 
         self.assertEqual(connection.exec_driver_sql("SELECT * FROM tasks ORDER BY task_ref").fetchall(), before)
         self.card(connection, "ummanu-7", task_type="wait", extensions='{"extra": {"wait": "{}"}}')
@@ -2170,7 +2171,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             insert(DELEGATED_CARD_SETTLED, "notice", "k-3")
         connection.rollback()
 
-        self.assertEqual(self.run_migrations(connection), ("0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review"))
+        self.assertEqual(self.run_migrations(connection), ("0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review", "0037_stage_budget_candidates"))
 
         self.assertEqual(connection.exec_driver_sql("SELECT * FROM owner_events ORDER BY id").fetchall(), before)
         store = OwnerEventStore(self.credentials("app"))
@@ -2216,7 +2217,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.exec_driver_sql("UPDATE sprints SET status = 'closed', closed_at = now() WHERE ref = 'sprint:12'")
         connection.commit()
 
-        self.assertEqual(self.run_migrations(connection), ("0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review"))
+        self.assertEqual(self.run_migrations(connection), ("0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review", "0037_stage_budget_candidates"))
 
         self.assertEqual(
             connection.exec_driver_sql("SELECT ref, e2e_budget, e2e_used FROM sprints ORDER BY ref").fetchall(),
@@ -2277,7 +2278,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         )
         connection.commit()
 
-        self.assertEqual(self.run_migrations(connection), ("0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review"))
+        self.assertEqual(self.run_migrations(connection), ("0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review", "0037_stage_budget_candidates"))
 
         self.assertEqual(
             connection.exec_driver_sql("SELECT kind, class FROM owner_events").fetchall(),
@@ -2335,7 +2336,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         )
         prior = connection.exec_driver_sql("SELECT * FROM owner_events").fetchall()
         connection.commit()
-        self.assertEqual(self.run_migrations(connection), ("0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review"))
+        self.assertEqual(self.run_migrations(connection), ("0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review", "0037_stage_budget_candidates"))
         self.assertEqual(connection.exec_driver_sql("SELECT * FROM owner_events WHERE dedup_key='prior-notice'").fetchall(), prior)
         self.assertEqual(self.run_migrations(connection), ())
         store = OwnerEventStore(self.credentials("app"))

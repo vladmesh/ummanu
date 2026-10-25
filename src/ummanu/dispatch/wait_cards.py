@@ -53,6 +53,7 @@ from typing import Any
 from ummanu.board import wait_card
 from ummanu.board.completion_evidence import is_wait
 from ummanu.board.production_rights import WAIT_KIND, WAIT_OUTCOME_INPUT, card_facts
+from ummanu.board.task_routing import ACTIVE_STATES
 from ummanu.board.terminal_taxonomy import normalize_terminal_taxonomy
 from ummanu.board.tick_snapshot import select_cards
 from ummanu.board.wait_card import (
@@ -97,7 +98,7 @@ WAIT_MALFORMED_ACTION = "wait-malformed-blocked"
 _RUN_JQ = "{status, conclusion, html_url, created_at, updated_at, run_started_at}"
 _RUN_COMPLETED = "completed"
 #: The cards a wait's outcome can still reach: every column but Done.
-_DEPENDENT_STATES = {"issues", "ready", "in_progress", "validate", "assessment", "blocked"}
+_DEPENDENT_STATES = ACTIVE_STATES | {"issues", "ready", "blocked"}
 
 
 def utcnow() -> datetime:

@@ -78,7 +78,7 @@ def outcome_terminal_path(value: Any, *, state: str) -> OutcomeTerminalPath:
     # A record from before the explicit field can already have accepted a
     # report and left In progress.  Its state is the dispatcher-owned path
     # fact, never a source-handoff or marker lookup.
-    if state in {"validate", "review_starting", "reviewing", "assessment"}:
+    if state in {"validate", "ci", "review", "review_starting", "reviewing", "assessment"}:
         return OutcomeTerminalPath.FOLLOWS_ACCEPTED_REPORT
     return OutcomeTerminalPath.NO_ACCEPTED_REPORT
 

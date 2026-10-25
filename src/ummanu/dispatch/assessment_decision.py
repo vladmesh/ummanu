@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ummanu.board.completion_evidence import review_required
 from ummanu.board.protocol_artifacts import (
     ArtifactOwnershipViolation,
     validate_rework_prerequisites,
@@ -11,7 +12,7 @@ from ummanu.board.protocol_artifacts import (
 from ummanu.dispatch import attempt_accounting, release_lifecycle
 from ummanu.dispatch.assessment_park import complete_park as _complete_park
 from ummanu.dispatch.decision_pointer import decision_pointer
-from ummanu.dispatch.helpers import _last_marker_body
+from ummanu.dispatch.helpers import _last_marker, _last_marker_body, _review_adoption_baseline
 from ummanu.dispatch.review_packet import retain_rework_review
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from ummanu.dispatch.tick_telemetry import tick_stage
@@ -81,6 +82,18 @@ def _advance_assessment(
 
     decision, reason, prerequisites = recorded_decision(runtime, task)
     if not decision:
+        from ummanu.dispatch.review_verdict import parks_for_decision
+
+        if (task.get("type") == "code"
+                and continuation.verdict_outcome in {"green", "missing", "unknown"}
+                and _last_marker(task, 0, {"report:done", "report:partial", "report:blocked"}) == "report:done"
+                and (not review_required(task) or _last_marker(
+                    task, _review_adoption_baseline(task), {"review:green", "review:red"}
+                ) == "review:green")
+                and not parks_for_decision(runtime, task)):
+            return release_lifecycle.release_parked(
+                runtime, task, record, records, payload, attempt_id, automatic=True
+            )
         return {
             "status": "ok",
             "step": "assessment",

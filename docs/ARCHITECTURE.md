@@ -231,7 +231,10 @@ that restore would refuse.
 The dispatcher resolves routing, drives the worker and reviewer lifecycle, and checks board,
 workspace, report and review state before each transition. A substantive reviewer verdict parks the
 card in Assessment with the reviewer stopped and the worker held; the merge or next round runs only on
-a tick that carries out a recorded observer decision. Mechanical outcomes resolve in Validate.
+a tick that carries out a recorded observer decision. Code mechanical outcomes resolve in CI; Review covers reviewer launch and verdict wait.
+Live code Validate checkpoints migrate at dispatcher reconciliation without opening another round.
+Green code without an observer passes through Assessment and releases automatically; observer-owned
+Assessment requires a real decision, and unreadable routing context refuses release.
 
 Every head is interactive. A Codex profile runs its TUI on `local-pty` like a Claude one; a registry
 that still pins the retired `exec` launch mode is refused when it is loaded (`runtime.heads`), and a

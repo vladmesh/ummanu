@@ -751,6 +751,18 @@ class ClaimTests(DispatcherCase):
 class TargetReachedTests(DispatcherCase):
     RETURNS = ("observer", "dependents", f"po-session:{SESSION}")
 
+    def test_ci_and_review_dependents_receive_the_wait_outcome_once(self) -> None:
+        for stage in ("ci", "review"):
+            with self.subTest(stage=stage):
+                self.arrange(spec(returns=("dependents",), until="2026-09-27T11:00:00Z"),
+                             plain_doc(DEPENDENT, state=stage, blocked_by=WAIT))
+                self.claim()
+                self.tick()
+                self.tick()
+                self.assertEqual(self.board.cards[DEPENDENT]["state"], stage)
+                self.assertEqual(len([body for body in self.board.comments(DEPENDENT)
+                                      if "[wait:target_reached]" in body]), 1)
+
     def test_a_concluded_run_is_frozen_delivered_everywhere_and_the_card_is_done(self) -> None:
         for conclusion in ("success", "failure"):
             with self.subTest(conclusion=conclusion):

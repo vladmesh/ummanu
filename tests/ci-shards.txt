@@ -104,6 +104,7 @@ integration-dispatcher tests/test_git_workspace_manager.py
 integration-dispatcher tests/test_observer_git_workspace.py
 integration-dispatcher tests/test_legacy_dispatcher_records.py
 integration-dispatcher tests/test_dispatcher_contracts.py
+unit tests/test_dispatcher_stages.py
 unit tests/test_dispatcher_worker_report.py
 unit tests/test_dispatcher_claim.py
 unit tests/test_dispatcher_worker_continuation.py

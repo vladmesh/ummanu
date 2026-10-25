@@ -60,7 +60,7 @@ from ummanu.tasks import (
     standing_decision,
 )
 
-CARD_STATES = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
+CARD_STATES = ("issues", "ready", "in_progress", "validate", "ci", "review", "assessment", "blocked", "done")
 
 
 # The sprint the assessment fixture's card belongs to.
@@ -3426,7 +3426,7 @@ class AssessmentStateTests(CardStoreCase):
             for target in ("in_progress", "ready", "blocked"):
                 with self.subTest(source=source, target=target):
                     self.client.move(12, source)
-                    self.client.save_metadata(12, claim="worker")
+                    self.client.save_metadata(12, claim="worker", resolved_review_head="reviewer" if source == "review" else "")
                     request = f"recover-{source}-{target}"
                     moved = self.writer.move(
                         role="dispatcher", actor="d", reference="ummanu-468", target=target,
@@ -3435,6 +3435,7 @@ class AssessmentStateTests(CardStoreCase):
                     self.assertEqual(moved["task"]["state"], target)
                     self.assertEqual(moved["task"]["claim"]["worker"], None if target == "ready" else "worker")
                     self.assertEqual(recorded_card_transition(self.writer.audit.event(request)), (source, target))
+                    self.assertIsNone(moved["task"]["routing"]["resolved_review_head"])
 
     def test_dispatcher_transitions_are_exact(self) -> None:
         """Pinned exactly: a later card must widen this table deliberately, not by accident."""
@@ -3465,6 +3466,8 @@ class AssessmentStateTests(CardStoreCase):
                 (CardState.VALIDATE, CardState.IN_PROGRESS),
                 (CardState.VALIDATE, CardState.BLOCKED),
                 (CardState.VALIDATE, CardState.DONE),
+                (CardState.VALIDATE, CardState.CI),
+                (CardState.VALIDATE, CardState.REVIEW),
                 (CardState.VALIDATE, CardState.ASSESSMENT),
                 (CardState.ASSESSMENT, CardState.IN_PROGRESS),
                 (CardState.ASSESSMENT, CardState.DONE),
@@ -3494,6 +3497,18 @@ class AssessmentStateTests(CardStoreCase):
         dispatcher = {
             ("ready", "in_progress"),
             ("in_progress", "validate"),
+            ("in_progress", "ci"),
+            ("ci", "review"),
+            ("ci", "assessment"),
+            ("review", "assessment"),
+            ("ci", "in_progress"),
+            ("review", "in_progress"),
+            ("ci", "ready"),
+            ("review", "ready"),
+            ("ci", "blocked"),
+            ("review", "blocked"),
+            ("validate", "ci"),
+            ("validate", "review"),
             ("in_progress", "blocked"),
             ("in_progress", "ready"),
             ("in_progress", "assessment"),
@@ -3512,6 +3527,8 @@ class AssessmentStateTests(CardStoreCase):
             ("ready", "blocked"),
             ("in_progress", "blocked"),
             ("validate", "blocked"),
+            ("ci", "blocked"),
+            ("review", "blocked"),
             ("assessment", "blocked"),
         }
 
@@ -3521,9 +3538,9 @@ class AssessmentStateTests(CardStoreCase):
             if role in {"po", "observer"} and target in {"in_progress", "validate", "ci", "review", "assessment"}:
                 return False
             if role == "po":
-                return True
+                return source not in {"ci", "review"} or target in {"ready", "blocked"}
             if role == "observer":
-                return source != "assessment"
+                return source != "assessment" and (source not in {"ci", "review"} or target in {"ready", "blocked"})
             if role == "dispatcher":
                 return (source, target) in dispatcher
             if role == "steward":

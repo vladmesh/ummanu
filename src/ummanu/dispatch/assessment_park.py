@@ -22,10 +22,9 @@ def begin_park(
     reviewed_commit: str = "",
     phase: str = "review",
 ) -> dict[str, Any]:
-    """The only way into Assessment: a substantive verdict from Validate, or a partial report.
+    """Save an Assessment intent before moving its accepted verdict or partial report.
 
-    The red transition's order, for the same reason: the intent is on disk, with the reason the
-    card is moving, before anything observable moves. Nothing comes after the move — the card waits.
+    The round waits for its observer or continues automatic code release without one.
     """
     ref = task["ref"]
     # Re-pinned after the reviewer's pane was forgotten: the merge gate refuses a release for

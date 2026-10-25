@@ -24,6 +24,7 @@ from ummanu.board.legacy_codec import positive_int, text
 from ummanu.board.models import CardState
 from ummanu.board.roles import Role
 from ummanu.board.sql_cards import SqlCardClient
+from ummanu.board.terminal_taxonomy import normalize_terminal_taxonomy
 from ummanu.board.task_protocol.rows import (
     _TYPED_RECORD_TYPES,
     WAIT_CANCELLED,
@@ -219,6 +220,14 @@ def _cancel_held(
         record = records.get(reference)
         if record is not None:
             _stop_heads(runtime, task, record, reference, state, payload, records, progress)
+        if task["state"] in {"ci", "review"}:
+            writer.move(
+                role=role.value, actor=actor, reference=reference, target="blocked",
+                reason=reason, request_id=f"{request_id}-withdrawal",
+                sprint_override=role is Role.PO,
+                sprint_override_reason=reason if role is Role.PO else "",
+                terminal_taxonomy=normalize_terminal_taxonomy(disposition="operator_stop").to_record(),
+            )
 
     moves: list[tuple[dict[str, Any], str]] = []
     successors: list[dict[str, Any]] = []

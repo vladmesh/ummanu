@@ -202,7 +202,7 @@ class E2eStageTests(E2eStageFixture, unittest.TestCase):
         again = self.tick()
 
         self.assertEqual((again["action"], again["sha"]), ("e2e-waiting", SECOND_SHA), again)
-        self.assertEqual(self.card()["state"], "validate")
+        self.assertEqual(self.card()["state"], "ci")
         self.assertEqual(self.host.completed, [])
         self.assertEqual([dispatch["inputs"]["sha"] for dispatch in self.host.dispatches], [SHA, SECOND_SHA])
         self.assertEqual(self.card()["e2e"]["runs_dispatched"], 2)

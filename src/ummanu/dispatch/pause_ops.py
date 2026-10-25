@@ -500,7 +500,7 @@ def _resume_heads(
             continue
         record.paused_reviewer_at = 0.0
         task = _load_task(runtime, ref)
-        if task is None or task.get("state") != "validate":
+        if task is None or task.get("state") not in {"validate", "review"}:
             skipped.append(f"{ref}:reviewer")
             continue
         if _last_marker(task, record.review_baseline, REVIEW_MARKERS):

@@ -334,7 +334,7 @@ def _every_shape() -> list[dict[str, Any]]:
         "ref": ("ummanu-1", "ummanu-2", "sprint:1", ""),
         "marker": (None, "review:red", "review:green"),
         "target": (None, "blocked", "ready", "in_progress", "done", "validate", "assessment"),
-        "source": (None, "in_progress", "validate", "assessment", "ready", "blocked"),
+        "source": (None, "in_progress", "validate", "ci", "review", "assessment", "ready", "blocked"),
         "budget_event": (None, "hotfix", "recreated_task", "other"),
         "taxonomy": tuple(TAXONOMIES),
         "request": ("plain", "gate-red", "dispatcher-attempt-1-bringup-blocked"),
@@ -439,8 +439,8 @@ class CandidateCoverageTests(unittest.TestCase):
 
     def test_the_index_predicate_is_the_query_predicate(self) -> None:
         """The planner uses the partial index only while the query's predicate implies its own."""
-        path = SCRIPT_LOCATION / "versions" / "0013_budget_candidates.py"
-        spec = importlib.util.spec_from_file_location("revision_0013", path)
+        path = SCRIPT_LOCATION / "versions" / "0037_stage_budget_candidates.py"
+        spec = importlib.util.spec_from_file_location("revision_stage_budget", path)
         assert spec is not None and spec.loader is not None
         revision = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(revision)

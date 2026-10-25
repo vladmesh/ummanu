@@ -30,7 +30,7 @@ outside it (§3.11).
 | Module | Role |
 |---|---|
 | `board/schema.py` | SQLAlchemy models; the source of truth for §3 |
-| `board/migrations/` | Alembic environment and revisions `0001`–`0030` (§7.4) |
+| `board/migrations/` | Alembic environment and revisions `0001`–`0037` (§7.4) |
 | `board/migrate.py` | migration runner: advisory lock, owner connection, role passwords (§7.4) |
 | `board/release_migrations.py` | the release's target bundle, its eligibility and bounded apply (§7.4) |
 | `board/schema_gate.py` | the schema gate every operational connection and doctor read (§7.4) |
@@ -822,6 +822,7 @@ Revisions (`src/ummanu/board/migrations/versions/`):
 | `0034_po_restore_sequence` | app-role SELECT and UPDATE on `po_feed_entry_id_seq` so inert PO import can advance preserved feed identities; no other grants change; downgrade revokes those two privileges, retaining USAGE, rows and sequence position |
 | `0035_issue_reopened` | additive: `issue.reopened` in the `board_events.kind` CHECK, restated under the name `board_event_kind_in_vocabulary`; no column; the downgrade restores `0001`'s constraint and fails while an `issue.reopened` event exists |
 | `0036_card_ci_review` | additive: widens `tasks.state` to include `ci` and `review` under `task_state_in_vocabulary`; keeps Validate and all existing rows and round metadata; downgrade refuses while either new state exists |
+| `0037_stage_budget_candidates` | additive: rebuilds the budget candidate index with CI/Review restart sources; changes no card rows or lifecycle vocabulary |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column

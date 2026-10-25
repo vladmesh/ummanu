@@ -20,6 +20,7 @@ from ummanu.board.completion_evidence import (
     render_research_completion_link,
     research_report_path,
     research_report_refusal,
+    review_required,
 )
 from ummanu.board.terminal_taxonomy import BlockedReason
 from ummanu.dispatch import attempt_accounting, e2e_stage, post_merge, release_activation
@@ -38,9 +39,9 @@ from ummanu.knowledge_write import (
 from ummanu.state_repo import StateRepoError
 
 
-def released_verdict(record: DispatcherRecord) -> str:
+def released_verdict(task: dict[str, Any], record: DispatcherRecord) -> str:
     """The verdict a decided release carries: the parked one, or `missing` when no reviewer ran."""
-    return "missing" if record.worker_continuation.verdict_outcome == "missing" else "green"
+    return "missing" if not review_required(task) or record.worker_continuation.verdict_outcome == "missing" else "green"
 
 
 def review_drift(runtime: Any, task: dict[str, Any], record: DispatcherRecord) -> str:
@@ -274,6 +275,8 @@ def release_parked(
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
     attempt_id: str,
+    *,
+    automatic: bool = False,
 ) -> dict[str, Any]:
     """Perform an accept decision: re-check the mechanical state, then merge."""
     from ummanu.dispatch import gate_lifecycle
@@ -294,9 +297,9 @@ def release_parked(
             payload,
             attempt_id,
             step="assessment",
-            move_reason=decision_pointer(runtime, task, "accept"),
-            decision="accept",
-            verdict=released_verdict(record),
+            move_reason=("green code completion without observer" if automatic else decision_pointer(runtime, task, "accept")),
+            decision="" if automatic else "accept",
+            verdict=released_verdict(task, record),
         )
     # The release audit's e2e stage reads the gate itself and binds to the SHA it validated: a SHA with
     # a green run (or one reconciled to it by a base-only move) is not dispatched again, and one without
@@ -340,9 +343,9 @@ def release_parked(
         payload,
         attempt_id,
         step="assessment",
-        move_reason=decision_pointer(runtime, task, "accept"),
-        decision="accept",
-        verdict=released_verdict(record),
+        move_reason=("green code completion without observer" if automatic else decision_pointer(runtime, task, "accept")),
+        decision="" if automatic else "accept",
+        verdict=released_verdict(task, record),
     )
 
 
@@ -473,6 +476,15 @@ def release_effect(
             return release_activation.resume_refused_activation(
                 runtime, task, record, records, payload, attempt_id
             )
+    from ummanu.dispatch.gate_lifecycle import current_green_gate
+
+    automatic_release = None
+    if task.get("type") == "code" and not decision:
+        automatic_release = current_green_gate(runtime, task, record)
+    runtime.writer.admit_release(
+        role="dispatcher", actor=runtime.owner, reference=ref, decision=decision,
+        automatic_release=automatic_release,
+    )
     release_merge: dict[str, Any] | None = None
     if has_candidate(task):
         try:
@@ -540,6 +552,7 @@ def release_effect(
             disposition="accept",
             verdict=verdict,
             release_merge=release_merge,
+            automatic_release=automatic_release,
         )
         records.pop(ref, None)
         runtime.save_records(payload, records)

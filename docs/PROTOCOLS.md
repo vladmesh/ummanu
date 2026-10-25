@@ -96,25 +96,41 @@ The public path to the board is `ummanu task`. A card carries a `ref`, project, 
 dependency, claim, routing, workspace, retry and audit metadata:
 
 ```text
-Issues → ready → in_progress → validate → assessment → done
-                         └───────────────────────────→ blocked
+Code: Ready → In progress → CI → Review → Assessment → Done
+                            └─────────→ Assessment (review skipped)
+Research/infra: Ready → In progress → Validate → Assessment → Done
 ```
 
 Board columns, in order: `Issues, Ready, In progress, Validate, CI, Review, Assessment, Blocked, Done`.
 
-The persisted Card contract and board transport support `ci` (CI) and `review` (Review) as
-active states. The dispatcher holds In progress → CI → Review → Assessment and CI → Assessment
-when review is skipped, with returns from either stage to In progress, Ready or Blocked. Neither
-stage has a direct Done edge. The production dispatcher still produces Validate and keeps its
-existing review, gate and recovery workflow. Switching the producer and migrating Validate rounds
-remain separate work; the persisted vocabulary alone does not complete the CI/Review workflow.
+A code report:done enters CI before the mechanical gate runs. Pending checks and transport retries
+remain in CI. An accepted green gate for the current SHA permits Review when review is required,
+or Assessment when review is skipped. Review includes reviewer launch recovery and provider holds.
+A red gate returns the card to its worker through the existing bounded recovery path. Neither CI
+nor Review has a direct Done or Issues edge; withdrawal goes through Blocked. Research and infra
+keep Validate and their explicit review choice, without a candidate or mechanical gate.
 
-`assessment` is a durable wait for a decision. A substantive reviewer verdict, green or red, parks
-the card there: the reviewer is stopped, the round's worker stays suspended with its workspace, and
-nothing merges or reworks until a decision. A worker's partial report parks it from In progress the
-same way, with no review (see `report --kind partial`). Mechanical gate outcomes (CI, stand run, pre-merge
-re-check) resolve in Validate and never pass through Assessment. A card left in Assessment past the
-steward's stale threshold is reported like any other stuck card.
+Production reconciliation migrates live code Validate checkpoints before their next stage. A
+pending or unaccepted gate moves to CI; a requested or running review with an accepted gate moves
+to Review. A green skipped-review round continues through Assessment. The dispatcher audits the
+migration and retains the claim, workspace, report generation, review baseline, gate receipt,
+head identities, launch intents and verdict cursor. Board moves use a stable round request id;
+reconciliation repairs a checkpoint left behind by an interrupted move. A lost record follows the
+existing adoption path, including its durable review launch request. An inconsistent review/gate
+checkpoint refuses migration while retaining the round. Historical Validate and terminal rows stay
+unchanged. This uses the existing round store and reconciliation boundary.
+
+For an open sprint with an observer head, a substantive reviewer verdict, green or red, parks in
+Assessment: the reviewer stops and the round's worker remains suspended with its workspace until a
+real observer decision. A worker's partial report parks from In progress without review. Green code
+without an observer passes through an audited Assessment transition and automatically continues
+the existing release on the same tick. A replay resumes that release from Assessment. The writer
+checks the actual code card, accepted report, green verdict or skipped review, accepted gate policy,
+and current sprint/observer context before merge or teardown and again at the terminal move.
+No sprint, a closed or stopped sprint, an absent observer declaration or explicit `observer none`
+are supported automatic contexts; an unreadable sprint or malformed declaration authorizes no
+release. No observer decision is synthesized. Mechanical failures resolve through worker recovery
+or Blocked. Assessment's stale threshold still reports a card waiting there.
 
 ### Roles and transitions
 
@@ -124,7 +140,7 @@ admits a move through its one entry point, `admit_card_move`.
 
 - Only the dispatcher moves a card into In progress, Validate, CI, Review or Assessment: a claim, a report, a
   verdict, a gate outcome or a decision it performs. Its other edges are Blocked moves out of its
-  stages, Validate or Assessment to Done, In progress to Ready, and the two
+  stages, the live Validate migration to CI/Review, Validate or Assessment to Done, In progress to Ready, and the two
   [wait card](#wait-cards) edges.
 - The PO moves a card along declared lifecycle edges to Issues, Ready, Blocked or Done;
   CI and Review allow Ready or Blocked.
@@ -658,7 +674,7 @@ the same key, and the receiving side makes the repeat a no-op:
   on that card (request id `dispatcher-wait-card-comment-<wait card>-card-<ref>-<key>`). The card's own
   e2e stage reads the frozen result off the wait card and acts on it; the comment is what the card's
   history shows. A card that no longer exists takes nothing and the delivery is given up; any other
-  board error postpones it. `dependents` would not reach that card: it is in Validate or Assessment,
+  board error postpones it. `dependents` would not reach that card: it is in CI, Review, Validate or Assessment,
   not Ready, and names no `blocked_by`;
 - `observer`: the wait card's terminal move, last, after every other address: Done for
   `target_reached`, Blocked for every other outcome, with the result as the move's comment
@@ -1470,9 +1486,10 @@ suppresses a targeted reproduction of a new concrete risk.
 
 ### Decisions on a parked card
 
-A card parks only where a decision can come from: its sprint is open and declares a concrete observer
-head. A card with no linked sprint, or whose sprint declares `--observer none` or has closed, acts on
-its verdict on its own tick.
+A substantive verdict waits for a decision when its sprint is open and declares a concrete observer
+head. Green code without an observer passes through Assessment and releases automatically on its
+verdict tick; skipped code does so after its green gate. Non-code retains its immediate completion
+policy when no observer owns the decision. Unreadable routing context refuses release.
 
 The observer records the decision; the dispatcher performs it: merge and `assessment -> done` for an
 accept, a new worker round and `assessment -> in_progress` for a rework, `assessment -> blocked` for
@@ -1495,8 +1512,10 @@ on a card in neither Assessment nor Blocked, are refused with `transition_forbid
 A move out of Assessment carries the decision it performs, with one destination each: `accept` →
 Done, `rework` → In progress, `reslice` → Blocked. A `--decision` the card's audit does not hold since
 it entered the column, or paired with the wrong destination, is refused whoever passes it. The
-dispatcher must carry a decision: its move to Done or In progress without `--decision` is refused, as
-are `assessment -> ready`, `-> validate` and `-> issues`. The PO is not bound by this: its escape hatch
+dispatcher must carry a decision: its ordinary move to Done or In progress without `--decision` is refused.
+The finite automatic code release described above supplies accepted gate policy and rechecks actual
+no-observer routing, report and verdict facts; a general move without a decision gains no exception.
+Also refused are `assessment -> ready`, `-> validate` and `-> issues`. The PO is not bound by this: its escape hatch
 is `assessment -> done`, `-> ready`, `-> issues` or `-> blocked`, and on a card of a sprint that holds
 its project it carries `--sprint-override` and a reason.
 `assessment -> blocked` takes no decision from anyone (steward escalation and dispatcher failures).
@@ -1549,7 +1568,7 @@ mode.
 
 `archive` closes an execution task and removes it from active listings without deleting board
 history. PO-only, non-empty reason, append-only audit, idempotent through `--request-id`. Cards in
-In progress, Validate or Assessment, with an active claim, or with live dispatcher work are rejected
+In progress, CI, Review, Validate or Assessment, with an active claim, or with live dispatcher work are rejected
 (`live_work`), and the refusal names `task cancel`. A card archived from Done stays a satisfied
 dependency; from any other column it is not Done and unblocks nothing. It cannot close a Product or
 Issue (use `ummanu issue close`).
@@ -1558,7 +1577,7 @@ Issue (use `ummanu issue close`).
 python3 -P -m ummanu task cancel --role po --ref PROJECT-N --reason-file REASON.md --request-id REQUEST_ID
 ```
 
-`cancel` ends a card that is not Done, of any type, in Issues, Ready, In progress, Validate,
+`cancel` ends a card that is not Done, of any type, in Issues, Ready, In progress, CI, Review, Validate,
 Assessment or Blocked. The PO cancels any card; the observer only a card of its own sprint, under the
 [identity guard](#the-sprint-guard); every other role is `role_forbidden`. A Done or archived card, a
 Product and an Issue are `transition_forbidden`. The reason must be non-empty. One operation,
@@ -1568,7 +1587,8 @@ every lock wait, board statement and journal write:
 1. it takes the dispatcher tick lock, then the card's effect lock;
 2. it records the heads the card's dispatcher record names in the card's cleanup intent, then stops the
    worker, the reviewer and any unresolved launch through the stop reconciliation uses, saving each
-   stop receipt on the record as it lands;
+   stop receipt on the record as it lands; CI/Review withdrawal then audits a move to Blocked,
+   with operator-stop taxonomy and no restart charge;
 3. it archives the card in one transaction: the claim settled, a `[cancel]` comment with the reason, and
    one `cancelled` audit event carrying the actor, the role, the reason, the column the card left, the
    claim and the runs stopped;
@@ -1786,7 +1806,7 @@ session resolves it under effective standing authority, declining further runs w
 Only a new uncovered owner decision requires explicit `task handover --to owner`. The question
 itself grants no money; released exact owner-comment answer lines below remain compatible.
 
-The waiting card is not Blocked. It stays in its column (Validate, or Assessment in the release audit)
+The waiting card is not Blocked. It stays in its column (CI or Review, or Assessment in the release audit)
 and its entry records `budget_wait` (`decision`, `generation`, `scope`, `since`); `task show` carries
 `e2e.mark`: `e2e: budget spent, waiting on <decision>`, and the tick outcome is `e2e-budget-waiting`
 with `decision` and `mark`. A card that reaches the stage while the budget is still spent joins the
@@ -2979,7 +2999,7 @@ pending typed record.
 
 Follow-up board work runs inside the same transaction, after the column effect is confirmed and before
 the event commits: claim metadata for `claim`, the routing and retry reset on a move into Ready or
-Done, clearing the review head on a move out of Validate, and the move's reason comment. A refused or
+Done, clearing the review head on a move out of Validate or Review, and the move's reason comment. A refused or
 failed column move leaves nothing; a follow-up that does not land keeps the pending typed record.
 
 Recovery re-reads the card and commits a pending typed transition's exact event only when the requested
@@ -3042,10 +3062,10 @@ dispatcher move that acts on the rejection (the rework, Assessment or Blocked tr
 source (`review` or `gate`) and, for a review, the verdict event id. A gate rejection's event is that
 move. Events without the key reject nothing.
 
-A `done` report on a rejected SHA does not move to Validate, including the first report of a new
+A `done` report on a rejected SHA does not move to CI, including the first report of a new
 attempt after Blocked: the first sends the worker back to rework in the same workspace (a new commit is
 required) with a comment naming the rejecting verdict or gate event; the second in the same attempt
-moves the card to Blocked. A card that reaches Validate on a rejected SHA by any other path (a kept
+moves the card to Blocked. A card that reaches CI or Review on a rejected SHA by any other path (a kept
 record whose gate was green, an adopted lost record, a gate or review stage resumed from Blocked) is
 Blocked before the gate runs or a
 review launches, so it is never gated or reviewed again.
@@ -3060,7 +3080,7 @@ fragment: action download needs its runner notice adjacent to a failed-download 
 failures need a container/Buildx step and either a named registry outage or a Docker daemon HTTP 5xx;
 runner failures need a runner-service diagnostic. A setup-step name, card comment or manual flag never
 classifies; a pytest assertion mentioning a registry or 503, or a broken workflow setup, stays
-substantive. The SHA stays in Validate for an automatic retry with no worker round, no `gate-red`
+substantive. The SHA stays in its CI or Review stage for an automatic retry with no worker round, no `gate-red`
 transition and no `red_ci` budget event: the gate asks GitHub to rerun the failed run and treats the
 rollup as pending until that run reaches a new terminal state. Reruns are SHA-scoped and bounded by
 `UMMANU_GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS` (default 2); the rerun request uses the
@@ -3126,7 +3146,7 @@ dead head is handled by the wait watchdog's per-kind respawn ceiling, observed o
 
 ### Routing telemetry per attempt
 
-A card keeps no routing history (the resolved review head is cleared on leaving Validate; the routing
+A card keeps no routing history (the resolved review head is cleared on leaving Validate or Review; the routing
 block is reset on a return to Ready). Who worked and reviewed attempt N lives only in the append-only
 journal as `kind: "routing"` events, written by the dispatcher through the normal pending/commit path
 with no backend mutation, idempotent by request id.
@@ -3508,22 +3528,21 @@ instruction ([Decisions on a parked card](#decisions-on-a-parked-card)); there i
 next claim continues the round the card's last dispatcher Blocked move interrupted, at the stage it
 stopped at (`admission`, `worker`, `gate` or `review`). One reader, `resume_point` in
 `dispatch/claim.py`, decides it from the card's audit on every claim path. Only the dispatcher's own
-Blocked moves out of In progress, Validate or Assessment are read, and a claim made after one ends it:
+Blocked moves out of In progress, CI, Review, Validate or Assessment are read, and a claim made after one ends it:
 such a card resumes nothing and opens a fresh round at generation 1.
 
 A Blocked move out of In progress, a refusal before the card had a checkout, and a Blocked move out of
-Validate or Assessment that judged the candidate itself (a red review ceiling or repeated blockers, a
+CI, Review, Validate or Assessment that judged the candidate itself (a red review ceiling or repeated blockers, a
 rejected candidate, a reslice decision) resume at the worker stage. Any other Blocked move out of
-Validate or Assessment is a gate or review stage; the stage only names which check failed, since both
-continue in Validate.
+CI, Review, Validate or Assessment is a gate or review stage; the stage only names which check failed, since both
+continue in CI for code or Validate for research/infra.
 
 A gate or review stage continues on an unchanged candidate with no worker round, unless a rework
 decision returned the card. That holds when the interrupted round's last worker report is its admitted
 `report:done`, the retained checkout's HEAD is that report's `worker_check.candidate_sha`, and the
 checkout's `TASK.md` still names that round. The claim opens a new attempt whose record keeps the
-round's generation, report ids and decision, and the dispatcher moves the card In progress -> Validate,
-so the gate and the reviewer read the round's own admission evidence. The Validate path then runs
-unchanged: a candidate in the card's rejected ledger is Blocked naming the verdict before either check,
+round's generation, report ids and decision, and the dispatcher moves the code card In progress -> CI,
+so the gate and the reviewer read the round's own admission evidence. The CI path then runs: a candidate in the card's rejected ledger is Blocked naming the verdict before either check,
 the gate runs under its receipt rules, and the reviewer is launched on the same SHA.
 
 Every other return opens a worker round:
@@ -3655,7 +3674,7 @@ Stall ageing, rungs and the destructive guard are in [Head vitality](HEAD_VITALI
 ### Worker retention through validation and review
 
 After a worker reports `done`, the dispatcher suspends its live, addressable session before moving the
-card to Validate. A head that is not addressable is stopped with a confirmed stop instead. The retained
+card to CI (Validate for research/infra). A head that is not addressable is stopped with a confirmed stop instead. The retained
 state stays on the record through the mechanical gate and the following review, so the worker cannot
 change the checkout while it is judged. Before the reviewer starts, the suspension is confirmed from the
 heartbeat; an unconfirmable session gets a confirmed stop and the round loses its continuation. The
@@ -3670,7 +3689,7 @@ boundary, which stops and replaces it once. See
 
 Substantive red verdicts return the card to In progress through one transition that hands the round
 back to the session that wrote the code. (An enumerated infrastructure gate red instead stays in
-Validate; see [Rejected SHAs and gate infrastructure reruns](#rejected-shas-and-gate-infrastructure-reruns).)
+CI; see [Rejected SHAs and gate infrastructure reruns](#rejected-shas-and-gate-infrastructure-reruns).)
 A substantive red mechanical gate opens the rework directly. A red review on a card whose sprint
 declares a concrete observer parks it in Assessment once the reviewer's stop is confirmed, and the
 transition runs on the tick that performs a recorded `rework` decision. A red review on a card with no
@@ -3687,7 +3706,7 @@ moves a card to In progress for rework. The transition order:
    woken or launched.
 
 A round with nothing to reuse opens the same durable intent. A tick dying after step 1 is recovered by
-re-entering this transition against the current board, never by replaying the Validate handoff. An open
+re-entering this transition against the current board, never by replaying the submission handoff. An open
 intent outranks everything: every tick finishes it before reading the gate, a report marker or a verdict,
 and before starting a reviewer. The intent is immutable and carries its reason, so a rollup turning green
 cannot retract an owed red round, and the card moves once.
@@ -4264,7 +4283,7 @@ archived ones included, of an open sprint. `project` keeps that project's cards 
 `sprint` that sprint's, and `sprint="none"` the cards of no sprint; both together intersect, and a
 value no card matches is empty columns. The document echoes them as `filter: {project, sprint}`.
 A tile is `{ref, title, type, project, sprint, head, moved, blocked_reason, waiting_owner, ready_skip}`: `sprint`
-is `{state: linked|none|unreadable, ref}`; `head` is the chosen head else the resolved one, the worker's in `in_progress` and the reviewer's in `validate`,
+is `{state: linked|none|unreadable, ref}`; `head` is the chosen head else the resolved one, the worker's in `in_progress` and the reviewer's in `validate` or `review`; CI names no running reviewer,
 null elsewhere; `moved` is `{at, age_seconds}`, null for a missing, future or out-of-range
 `date_moved`; `blocked_reason` comes from the comment the move into Blocked wrote: the earliest
 comment marked with a moving role (`dispatcher`, `observer`, `po` or `steward`) at or after

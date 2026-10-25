@@ -545,7 +545,7 @@ class OutOfSprintCapTests(BudgetStageFixture, unittest.TestCase):
         self.assertFalse(shown.get("sprint"))
         self.assertIn(f"task e2e-budget --ref {CARD_REF} --role po", shown["description"])
         self.assertIn(f"https://github.com/{REPO}/actions/runs/8001", shown["description"])
-        self.assertEqual(self.card()["state"], "validate")
+        self.assertEqual(self.card()["state"], "ci")
         self.assertEqual(self.card()["e2e"]["mark"], f"e2e: budget spent, waiting on {decision['ref']}")
         self.assertEqual(self.host.dispatches, [])
 

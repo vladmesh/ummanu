@@ -452,6 +452,12 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIn("gate_check", self.host.calls)
         self.assertEqual(self.host.completed, [CARD_REF])
 
+        from ummanu.board.audit_contract import card_transition_of
+        stages = [(card_transition_of(event) or ("", ""))[1]
+                  for event in self.writer.audit.events(CARD_REF)]
+        self.assertEqual([stage for stage in stages if stage in {"ci", "review", "assessment", "done"}],
+                         ["ci", "assessment", "done"])
+
     def test_review_skipped_on_a_parked_code_card_merges_only_on_release(self) -> None:
         self._kind("code", review="skipped")
         self.start_dispatcher()
