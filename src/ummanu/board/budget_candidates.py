@@ -10,7 +10,7 @@ such a candidate with a terminal marker rather than making the SQL exact.
 An event is *uncharged* while no committed request has the id `sprint-budget-<identity>`, the id its
 charge or its terminal marker is written under. That is a primary-key probe, so the set is an
 anti-join and not a position: an event that commits late, or whose card cannot be looked up for any
-number of ticks, stays in the set until it is resolved (secretary-1661). `0013_budget_candidates`
+number of ticks, stays in the set until it is resolved. `0037_stage_budget_candidates`
 serves the read with a partial index holding only candidate rows.
 """
 
@@ -18,17 +18,18 @@ from __future__ import annotations
 
 from typing import Any
 
+from ummanu.board.task_routing import ACTIVE_STATES
+
 #: `_budget_event_type` spells these; the SQL below repeats them as literals, and the test that
 #: pins the predicate to the classifier (`tests/test_budget_candidates.py`) keeps them in step.
 _VERDICT_KINDS = ("verdict", "card.verdict")
-_ACTIVE_SOURCES = ("assessment", "in_progress", "validate")
 _CREATED_BUDGET_EVENTS = ("hotfix", "recreated_task")
 
 #: The charge id prefix; a charge and a terminal marker both take `CHARGE_PREFIX + identity`.
 CHARGE_PREFIX = "sprint-budget-"
 
 #: Over `intent`, the committed record. Kept textually identical to the partial index predicate of
-#: `0013_budget_candidates` (a test compares them), so the planner can prove the index applies. Its
+#: `0037_stage_budget_candidates` (a test compares them), so the planner can prove the index applies. Its
 #: `%` are literal: a statement that passes parameters doubles them (`sql_audit`).
 CANDIDATE_PREDICATE = (
     "(intent ->> 'ref') <> '' AND (intent ->> 'ref') NOT LIKE 'sprint:%' AND ("
@@ -37,9 +38,9 @@ CANDIDATE_PREDICATE = (
     " OR (intent -> 'transition' ->> 'target') = 'blocked'"
     " OR ((intent ->> 'kind') = 'moved' AND (intent -> 'payload' ->> 'to') = 'blocked')"
     " OR ((intent -> 'transition' ->> 'target') = 'ready'"
-    " AND (intent -> 'transition' ->> 'source') IN ('assessment', 'in_progress', 'validate'))"
+    " AND (intent -> 'transition' ->> 'source') IN ('assessment', 'in_progress', 'validate', 'ci', 'review'))"
     " OR ((intent ->> 'kind') = 'moved' AND (intent -> 'payload' ->> 'to') = 'ready'"
-    " AND (intent -> 'payload' ->> 'from') IN ('assessment', 'in_progress', 'validate'))"
+    " AND (intent -> 'payload' ->> 'from') IN ('assessment', 'in_progress', 'validate', 'ci', 'review'))"
     " OR (((intent -> 'transition' ->> 'target') = 'in_progress'"
     " OR ((intent ->> 'kind') = 'moved' AND (intent -> 'payload' ->> 'to') = 'in_progress'))"
     " AND (intent ->> 'request_id') LIKE '%gate-red%')"
@@ -84,9 +85,9 @@ def is_candidate(event: dict[str, Any]) -> bool:
         return True
     if "blocked" in (target, moved_to):
         return True
-    if target == "ready" and _member(event, "transition", "source") in _ACTIVE_SOURCES:
+    if target == "ready" and _member(event, "transition", "source") in ACTIVE_STATES:
         return True
-    if moved_to == "ready" and _member(event, "payload", "from") in _ACTIVE_SOURCES:
+    if moved_to == "ready" and _member(event, "payload", "from") in ACTIVE_STATES:
         return True
     if "in_progress" in (target, moved_to) and "gate-red" in (_member(event, "request_id") or ""):
         return True

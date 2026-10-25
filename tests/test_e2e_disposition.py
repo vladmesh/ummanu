@@ -197,6 +197,11 @@ class DispositionTests(unittest.TestCase):
         self.reconcile()
         self.assertEqual(self.mark().holder, "ummanu-4")
         self.assertEqual(card_waits(self.show(self.source))[0]["holder"], "ummanu-4")
+        for stage in ("ci", "review"):
+            self.cards["ummanu-4"]["state"] = stage
+            self.reconcile()
+            self.assertEqual(self.mark().holder, "ummanu-4")
+            self.assertEqual(card_waits(self.show(self.source))[0]["holder"], "ummanu-4")
         self.cards["ummanu-4"]["state"] = "done"
         self.reconcile()
         self.assertEqual(self.mark().state, "declined")

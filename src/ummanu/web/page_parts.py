@@ -35,6 +35,8 @@ def _chip(text: str, tone: str = "") -> str:
 STATE_TONES: dict[str, str] = {
     "in_progress": "accent",
     "validate": "accent",
+    "ci": "accent",
+    "review": "accent",
     "reviewing": "accent",
     "assessment": "warn",
     "blocked": "bad",

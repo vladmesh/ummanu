@@ -19,11 +19,11 @@ from ummanu.dispatch.candidate_ledger import rejected_candidate
 from ummanu.dispatch.claim import (
     STAGE_RESUME_STATE,
     claim_ready_task as _claim_ready_task,
-    continue_in_validate,
+    continue_validation,
     resolve_head as _resolve_claim_head,
 )
 from ummanu.dispatch.cleanup import ownership_lock
-from ummanu.dispatch.gate_lifecycle import run_gate as _run_gate
+from ummanu.dispatch.gate_lifecycle import current_green_gate, run_gate as _run_gate
 from ummanu.dispatch.helpers import (
     _report_adoption_baseline,
     _review_adoption_baseline,
@@ -74,6 +74,7 @@ from ummanu.dispatch.review_verdict import (
     advance_review_verdict as _advance_review_verdict,
     park_green_verdict as _park_green_verdict,
 )
+from ummanu.dispatch.stage_migration import reconcile_validation
 from ummanu.dispatch.state import (
     DispatcherRecord,
     OutcomeTerminalPath,
@@ -377,6 +378,7 @@ class DispatcherRuntime:
             # A wait card has no head either: the dispatcher observes its target and delivers its
             # outcome itself (dispatch/wait_cards.py).
             return _advance_wait_card(self, task, records, payload, attempt_id)
+        task = reconcile_validation(self, task, records, payload, attempt_id)
         # Staged usage obligations are deliberately not settled here: a card can finish its last
         # phase and leave `ACTIVE_STATES` in the same tick, so no per-card pass can be the site that
         # guarantees publication. `publish_pending_attempt_usage` owns that, over the whole pending
@@ -401,7 +403,7 @@ class DispatcherRuntime:
             return _claim_ready_task(self, task, records, payload, attempt_id)
         if task["state"] == "in_progress":
             return self._advance_worker(task, records, payload, attempt_id)
-        if task["state"] == "validate":
+        if task["state"] in {"validate", "ci", "review"}:
             return self._advance_review(task, records, payload, attempt_id)
         if task["state"] == "assessment":
             return _advance_assessment(self, task, records, payload, attempt_id)
@@ -515,7 +517,7 @@ class DispatcherRuntime:
             with tick_stage("launch"):
                 return _launch_worker_after_claim(self, task, record, records, payload)
         if record.state == STAGE_RESUME_STATE:
-            return continue_in_validate(self, task, record, records, payload)
+            return continue_validation(self, task, record, records, payload)
         with tick_stage("report"):
             marker = _worker_report_marker(self, task, record, records, payload, attempt_id)
             recovered = _recover_worker_continuation(
@@ -598,12 +600,21 @@ class DispatcherRuntime:
         if (
             has_candidate(task)
             and record.state not in ("review_starting", "reviewing")
-            and record.gate_state != "green"
+            and not current_green_gate(self, task, record).policy_valid
         ):
             with tick_stage("gate"):
                 gated = _run_gate(self, task, record, records, payload, attempt_id)
             if gated is not None:
                 return gated
+        if task["state"] == "ci" and review_required(task):
+            self.writer.move(
+                role="dispatcher", actor=self.owner, reference=ref, target="review",
+                reason="mechanical gate accepted; review required",
+                request_id=_attempt_request_id(
+                    record.attempt_id or attempt_id, "ci-review", ref, str(record.report_generation)
+                ),
+            )
+            task = self.reader.show(ref)
         if not review_required(task) and record.state not in ("review_starting", "reviewing"):
             # `review: skipped`: no reviewer for any kind. The accepted report takes the path a green
             # verdict takes, which for a code card still re-reads the gate and merges on release.
@@ -1019,7 +1030,7 @@ class DispatcherRuntime:
         return record
 
     def _review_launch_recorded(self, task: dict[str, Any], review_baseline: int) -> bool:
-        if task.get("state") != "validate":
+        if task.get("state") not in {"validate", "review"}:
             return False
         return self.audit.committed_event(_review_launch_request_id(task["ref"], review_baseline)) is not None
 

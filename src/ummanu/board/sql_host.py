@@ -51,6 +51,7 @@ from ummanu.board.task_protocol.rows import (
     all_project_cards,
     project_card_by_reference,
 )
+from ummanu.board.task_routing import ACTIVE_STATES
 from ummanu.board.tick_snapshot import select_cards, select_sprints
 from ummanu.board.transitions import BoardProtocolError, transition, transition_for
 from ummanu.dispatch.ownership import reference_lock
@@ -436,7 +437,7 @@ class SqlBoardHost:
             return self._transition(operation, finish=finish)
         with reference_lock(self.data_dir, operation.ref), (
             reference_lock(self.data_dir, "capacity", lane="admission")
-            if operation.target in {CardState.IN_PROGRESS, CardState.VALIDATE, CardState.ASSESSMENT}
+            if operation.target in ACTIVE_STATES
             else contextlib.nullcontext()
         ):
             return self._transition(operation, finish=finish)

@@ -68,8 +68,8 @@ class StageResumeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         resumed = self.tick()
 
-        self.assertEqual((resumed["action"], resumed["to"]), ("stage-resumed", "validate"), resumed)
-        self.assertEqual(self.reader.show(CARD_REF)["state"], "validate")
+        self.assertEqual((resumed["action"], resumed["to"]), ("stage-resumed", "ci"), resumed)
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "ci")
         record = self._record()
         self.assertNotEqual(record["attempt_id"], first_attempt)
         self.assertEqual(record["report_generation"], 1)
@@ -95,7 +95,7 @@ class StageResumeTests(DispatcherRuntimeFixture, unittest.TestCase):
         move = self.writer.move
 
         def lost_tick(**kwargs):
-            if kwargs.get("target") == "validate":
+            if kwargs.get("target") == "ci":
                 raise OSError("the tick died")
             return move(**kwargs)
 
@@ -105,8 +105,8 @@ class StageResumeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         finished = self.tick()
 
-        self.assertEqual((finished["action"], finished["to"]), ("stage-resumed", "validate"), finished)
-        self.assertEqual(self.reader.show(CARD_REF)["state"], "validate")
+        self.assertEqual((finished["action"], finished["to"]), ("stage-resumed", "ci"), finished)
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "ci")
         self.assertEqual(self._worker_launches(), workers)
 
     def test_a_gate_infrastructure_block_returned_to_ready_reruns_the_gate_on_the_same_sha(self) -> None:

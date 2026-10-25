@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ummanu.board.completion_evidence import has_candidate
+from ummanu.board.observer_routing import AUTOMATIC_ASSESSMENT_REASON, observer_managed
 from ummanu.board.review_blockers import repeated_open_blockers
 from ummanu.dispatch import attempt_accounting, e2e_stage, release_lifecycle
 from ummanu.dispatch.assessment_park import begin_park, complete_park
@@ -29,12 +30,11 @@ from ummanu.dispatch.state import (
     REVIEW_REJECTION_REASON,
     DispatcherRecord,
 )
-from ummanu.dispatch.types import STOPPED_BY_REVIEW_VERDICT, GateTransportError, HostError
+from ummanu.dispatch.types import STOPPED_BY_REVIEW_VERDICT, GateTransportError
 from ummanu.dispatch.worker_continuation import (
     begin_red_transition as _begin_red_transition,
     complete_red_transition as _complete_red_transition,
 )
-from ummanu.kernel.errors import TaskError
 
 
 def advance_review_verdict(
@@ -142,19 +142,7 @@ def advance_review_verdict(
 
 def parks_for_decision(runtime: Any, task: dict[str, Any]) -> bool:
     """Whether a substantive verdict on this card waits for a decision, or acts at once."""
-    reference = str(task.get("sprint") or "")
-    if not reference:
-        return False
-    try:
-        sprint = runtime.sprints.show(reference)
-    except (TaskError, HostError):
-        return False
-    if str(sprint.get("status") or "") != "open":
-        return False
-    observer = sprint.get("observer")
-    if not isinstance(observer, dict):
-        return False
-    return str(observer.get("kind") or "") == "head" and bool(observer.get("profile"))
+    return observer_managed(task, runtime.sprints.show)
 
 
 def park_green_verdict(
@@ -210,8 +198,23 @@ def park_green_verdict(
         if refused is not None:
             return refused
     parks = parks_for_decision(runtime, task)
+    pinned = (record.review_commit or runtime.host.head_commit(record)) if has_candidate(task) else ""
+    if reviewed and (parks or task.get("type") == "code"):
+        unconfirmed = runtime._end_review_pane_confirmed(
+            record, records, payload, ref, step="review", attempt_id=attempt_id,
+            initiator=STOPPED_BY_REVIEW_VERDICT,
+        )
+        if unconfirmed is not None:
+            return unconfirmed
     if not parks:
-        # No observer to release it, so the green verdict merges on its own tick.
+        if task.get("type") == "code":
+            begin_park(
+                runtime, task, record, records, payload, attempt_id,
+                verdict_outcome="green" if reviewed else "missing",
+                reviewed_commit=pinned,
+                move_reason=AUTOMATIC_ASSESSMENT_REASON,
+            )
+            task = runtime.reader.show(ref)
         return release_lifecycle.release_effect(runtime,
             task,
             record,
@@ -222,21 +225,6 @@ def park_green_verdict(
             move_reason="review:green" if reviewed else "report:done, review skipped",
             verdict="green" if reviewed else "missing",
         )
-    # The checkout must be quiet while the card waits, so the reviewer's pane goes here — but
-    # its commit is read first, because ending the reviewer forgets the commit it judged.
-    pinned = (record.review_commit or runtime.host.head_commit(record)) if has_candidate(task) else ""
-    if reviewed:
-        unconfirmed = runtime._end_review_pane_confirmed(
-            record,
-            records,
-            payload,
-            ref,
-            step="review",
-            attempt_id=attempt_id,
-            initiator=STOPPED_BY_REVIEW_VERDICT,
-        )
-        if unconfirmed is not None:
-            return unconfirmed
     if not has_candidate(task):
         waits = "there is no candidate to merge, and Done waits"
     elif reviewed:

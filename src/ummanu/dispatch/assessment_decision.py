@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ummanu.board.observer_routing import automatic_assessment_origin
 from ummanu.board.protocol_artifacts import (
     ArtifactOwnershipViolation,
     validate_rework_prerequisites,
@@ -81,6 +82,11 @@ def _advance_assessment(
 
     decision, reason, prerequisites = recorded_decision(runtime, task)
     if not decision:
+        if (task.get("type") == "code"
+                and automatic_assessment_origin(runtime.audit.events(ref))):
+            return release_lifecycle.release_parked(
+                runtime, task, record, records, payload, attempt_id, automatic=True
+            )
         return {
             "status": "ok",
             "step": "assessment",

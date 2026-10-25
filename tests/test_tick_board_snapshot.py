@@ -181,7 +181,17 @@ class TickBoardSnapshotTests(unittest.TestCase):
             runtime.writer.record_e2e_state(role="dispatcher", actor=runtime.owner,
                                            reference="demo-4", state=state.text())
             runtime.writer.move(role="dispatcher", actor=runtime.owner, reference="demo-2",
-                                target="done", reason="after-merge release", request_id="release-code",
+                                target="assessment", reason="green skipped code", request_id="release-park")
+            self.store.audit.append("release-park", {
+                "request_id": "release-park", "event_id": "event-release-park", "kind": "moved",
+                "ref": "demo-2", "actor": {"role": "dispatcher", "id": runtime.owner},
+                "outcome": "success", "payload": {"from": "ci", "to": "assessment"}})
+            self.store.audit.append("release-decision", {
+                "request_id": "release-decision", "event_id": "event-release-decision", "kind": "decided",
+                "ref": "demo-2", "actor": {"role": "observer", "id": "observer"},
+                "outcome": "success", "payload": {"decision": "accept", "assessment_visit": "event-release-park"}})
+            runtime.writer.move(role="dispatcher", actor=runtime.owner, reference="demo-2",
+                                target="done", reason="after-merge release", request_id="release-code", decision="accept",
                                 sprint_override=True, sprint_override_reason="Unit disposition")
             self.store.audit.append("hotfix-create", {
                 "request_id": "hotfix-create", "event_id": "hotfix-created", "kind": "created",

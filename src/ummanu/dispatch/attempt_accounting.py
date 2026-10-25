@@ -25,6 +25,7 @@ from ummanu.dispatch.attempt_usage import (
     collect_usage as _collect_usage,
     provider_usage_source as _provider_usage_source,
 )
+from ummanu.dispatch.gate_receipt import AcceptedGreenGate
 from ummanu.dispatch.helpers import _round_report_ids
 from ummanu.dispatch.state import (
     DispatcherRecord,
@@ -525,6 +526,7 @@ def terminal_effect(
     release_merge: dict[str, Any] | None = None,
     release_claim: bool = False,
     rejected_candidate: dict[str, Any] | None = None,
+    automatic_release: AcceptedGreenGate | None = None,
 ) -> dict[str, Any]:
     """The lifecycle-owned terminal effect and its non-blocking finisher.
 
@@ -582,6 +584,7 @@ def terminal_effect(
         request_id=request_id,
         outcome_owed=obligation,
         terminal_taxonomy=taxonomy.to_record() if taxonomy is not None else None,
+        **({"automatic_release": automatic_release} if automatic_release is not None else {}),
         **({"release_merge": release_merge} if release_merge is not None else {}),
         **({"release_claim": True} if release_claim else {}),
         **({"rejected_candidate": rejected_candidate} if rejected_candidate is not None else {}),

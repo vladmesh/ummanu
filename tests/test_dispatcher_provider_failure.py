@@ -221,7 +221,7 @@ class ProviderFailureFallbackTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIn("codex-reviewer", health["reason"])
         self.assertNotIn("sk-svcac", health["reason"])
         card = self.reader.show(REF)
-        self.assertEqual(card["state"], "validate")
+        self.assertEqual(card["state"], "review")
         comment = self._comments()[-1]
         for part in ("codex-reviewer", "openai-sub", "401 Unauthorized", "claude-opus"):
             self.assertIn(part, comment)

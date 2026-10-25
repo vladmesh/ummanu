@@ -70,6 +70,8 @@ _STATE_COLUMNS = {
     "ready": "Ready",
     "in_progress": "In progress",
     "validate": "Validate",
+    "ci": "CI",
+    "review": "Review",
     "assessment": "Assessment",
     "blocked": "Blocked",
     "done": "Done",

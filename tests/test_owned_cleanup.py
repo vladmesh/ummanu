@@ -114,7 +114,10 @@ class OwnedCleanupTests(unittest.TestCase):
         self.host = SimpleNamespace(head_runtime_for=lambda run: self.backend,
                                     _decide_workspace_environment_ownership=lambda path: "absent")
         self.runtime = SimpleNamespace(data_dir=self.data, catalog=self.catalog, host=self.host,
-                                       reader=SimpleNamespace(show=lambda ref: copy.deepcopy(self.tasks[ref])),
+                                       reader=SimpleNamespace(
+                                           show=lambda ref: copy.deepcopy(self.tasks[ref]),
+                                           list=lambda *, states: [copy.deepcopy(task) for task in self.tasks.values()
+                                                                  if task["state"] in states]),
                                        writer=SimpleNamespace(settle_cleanup_claim=self.settle_claim),
                                        audit=SimpleNamespace(events=lambda ref: [{"kind": "claimed"}]),
                                        cleanup_clock=HourlyClock())

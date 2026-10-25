@@ -46,6 +46,16 @@ from ummanu.dispatch.worker_continuation import begin_red_transition as _begin_r
 from ummanu.kernel.errors import TaskError
 
 
+def current_green_gate(runtime: Any, task: dict[str, Any], record: DispatcherRecord) -> AcceptedGreenGate:
+    """Accept the saved gate only under the current checkout and declared gate policy."""
+    if record.gate_state != "green":
+        return AcceptedGreenGate(None, False)
+    return AcceptedGreenGate.accept(
+        record.gate_attestation.to_json(), current_sha=runtime.host.head_commit(record),
+        gate_mode=_validation_ci(runtime.host, task), noop=runtime.host.mode == "noop",
+    )
+
+
 def run_gate(
     runtime: Any,
     task: dict[str, Any],

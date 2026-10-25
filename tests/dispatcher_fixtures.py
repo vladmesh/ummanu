@@ -23,6 +23,7 @@ from tests.fanout_fixtures import accepted_transport_run
 from tests.observer_identity import bind_observer
 from tests.sql_backend_fixtures import card_store
 from ummanu._fsutil import file_lock
+from ummanu.board.completion_evidence import has_candidate
 from ummanu.dispatch.heartbeat import heartbeat_identity
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.runtime import DispatcherRuntime
@@ -321,7 +322,8 @@ class DispatcherRuntimeFixture:
             "status": status,
             "observer": {"kind": "head", "profile": profile},
         }
-        self.board.add_sprint("sprint:1031", status=status, sprint_reservations='["ummanu"]')
+        self.board.add_sprint("sprint:1031", status=status, sprint_reservations='["ummanu"]',
+                              sprint_observer=json.dumps({"kind": "head", "profile": profile}))
         self.board.save_metadata(12, sprint_ref="sprint:1031")
 
     def start_dispatcher(self) -> None:
@@ -371,7 +373,7 @@ class DispatcherRuntimeFixture:
             request_id=self._worker_report_request_id(),
         )
         advanced = self.tick()
-        self.assertEqual(advanced["to"], "validate")
+        self.assertEqual(advanced["to"], "ci" if has_candidate(self.reader.show(CARD_REF)) else "validate")
 
     def _pilot_record(self) -> dict:
         return self.runtime.production_state.load()["records"]["ummanu-510"]
@@ -422,7 +424,7 @@ class DispatcherRuntimeFixture:
         self.tick()
         stale_id = self._worker_report_request_id()
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci" if has_candidate(self.reader.show(CARD_REF)) else "validate")
         self.tick()
         self._review_red()
         self._park_and_decide("rework")

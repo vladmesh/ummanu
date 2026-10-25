@@ -109,6 +109,23 @@ class CardCancelTests(CancelFixture, unittest.TestCase):
         self.assertEqual((card["state"], card["closed"], card["claim"]["worker"]), ("blocked", True, None))
         self.assertEqual(self.cancelled_event()["payload"]["claim"], "ummanu-510-pilot")
 
+    def test_ci_and_review_withdrawal_passes_through_blocked_before_archive(self) -> None:
+        from ummanu.board.audit_contract import card_transition_of
+
+        for stage in ("ci", "review"):
+            with self.subTest(stage=stage):
+                self.board.move(12, stage)
+                self.board._execute("UPDATE tasks SET archived = false WHERE task_ref = %s", (CARD_REF,))
+                self.board._commit_unless_nested()
+                request = f"cancel-{stage}"
+                self.cancel(request)
+                self.cancel(request)
+                card = self.reader.show(CARD_REF)
+                self.assertEqual((card["state"], card["closed"]), ("blocked", True))
+                transitions = [card_transition_of(event) for event in self.writer.audit.events(CARD_REF)
+                               if event.get("request_id") == f"{request}-withdrawal"]
+                self.assertEqual(transitions, [(stage, "blocked")])
+
     def test_an_assessment_card_is_archived(self) -> None:
         self.board.move(12, "assessment")
 

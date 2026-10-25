@@ -47,6 +47,7 @@ from ummanu.board.completion_evidence import (
     po_completion_fields,
     render_po_completion_record,
     research_report_refusal,
+    review_required,
 )
 from ummanu.board.estimate import (
     create_refusal as estimate_create_refusal,
@@ -144,6 +145,7 @@ from ummanu.runtime.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
 
 if TYPE_CHECKING:
     from ummanu.board.sql_cards import SqlCardClient
+    from ummanu.dispatch.gate_receipt import AcceptedGreenGate
 
 from ummanu.board.task_protocol.dispatcher import DispatcherTaskWrites
 from ummanu.board.task_protocol.recovery import RecoveryMixin
@@ -2412,6 +2414,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         wait_outcome: str | None = None,
         release_claim: bool = False,
         rejected_candidate: dict[str, Any] | None = None,
+        automatic_release: AcceptedGreenGate | None = None,
     ) -> dict[str, Any]:
         role = self._role(role, BOARD_ROLES, actor=actor)
         reason = self._redact_for_board(reason)
@@ -2538,7 +2541,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         except CardTransitionForbidden as exc:
             raise TaskError("transition_forbidden", str(exc), 3) from None
         target_state = CardState(target)
-        self._check_decision(task, source, target, decision, role)
+        self._check_decision(task, source, target, decision, role, automatic_release=automatic_release)
         result = self._transition_card(
             reference=reference,
             target=target_state,
@@ -2675,7 +2678,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             )
         elif clear_mark:
             self.client.call("saveTaskMetadata", task_id=_task_number(task), values=clear_mark)
-        if source == "validate" and target not in {"ready", "done"}:
+        if source in {"validate", "review"} and target not in {"ready", "done", "ci", "review"}:
             self.client.call(
                 "saveTaskMetadata", task_id=_task_number(task), values={"resolved_review_head": ""}
             )
@@ -2771,11 +2774,12 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         target: str,
         decision: str,
         role: str,
+        *,
+        automatic_release: AcceptedGreenGate | None = None,
     ) -> None:
-        """Require every supplied Assessment decision to exist and match the
-        destination. Dispatcher exits require a decision; PO moves use sprint override.
-        Blocked without a decision is allowed for failure/escalation; observers cannot
-        move cards out of Assessment.
+        """Assessment exits require a recorded decision or admitted automatic code release.
+
+        Failure escalation to Blocked remains undecided; observers decide without moving the card.
         """
         if decision and decision not in DECISION_VALUES:
             raise TaskError("validation", f"decision must be one of {', '.join(sorted(DECISION_VALUES))}", 2)
@@ -2793,6 +2797,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             and target in DECIDED_TARGETS
             and decision_kind is None
             and role in DECISION_BOUND_ROLES
+            and not (target == "done" and self._automatic_code_release(task, automatic_release))
         ):
             raise TaskError(
                 "decision_required",
@@ -2813,6 +2818,44 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                 f"no {decision} decision is recorded on this card since it entered Assessment",
                 3,
             )
+
+    def _automatic_code_release(self, task: dict[str, Any], gate: AcceptedGreenGate | None) -> bool:
+        """Automatic Assessment exit requires its own origin, green policy and no observer."""
+        from ummanu.board.observer_routing import automatic_assessment_origin, observer_managed
+        from ummanu.dispatch.gate_receipt import AcceptedGreenGate
+        from ummanu.sprints import SprintReader
+
+        if not isinstance(gate, AcceptedGreenGate) or not gate.policy_valid or task.get("type") != "code":
+            return False
+        events = self.audit.events(task["ref"])
+        if not automatic_assessment_origin(events):
+            return False
+        if observer_managed(task, lambda ref: SprintReader(self.client).show(ref, include_cards=False)):
+            return False
+        report = ""
+        verdict = ""
+        for event in events:
+            data = _event_payload(event)
+            marker = str(data.get("marker") or "")
+            actor = event.get("actor")
+            event_role = actor.get("role") if isinstance(actor, dict) else event.get("role")
+            if event.get("kind") in {"reported", "card.reported"} and event_role == "worker":
+                report, verdict = marker, ""
+            elif event.get("kind") in {"verdict", "card.verdict"} and event_role == "reviewer":
+                verdict = marker
+        return report == "report:done" and (not review_required(task) or verdict == "review:green")
+
+    def admit_release(
+        self, *, role: str, actor: str, reference: str, decision: str,
+        automatic_release: AcceptedGreenGate | None = None,
+    ) -> None:
+        """Check terminal authority before a release merges or tears down its workspace."""
+        self._role(role, {Role.DISPATCHER}, actor=actor)
+        task = self.reader.show(reference)
+        if task.get("type") == "code" and task["state"] != "assessment":
+            raise TaskError("transition_forbidden", "code release requires Assessment", 3)
+        self._check_decision(task, task["state"], "done", decision, role,
+                             automatic_release=automatic_release)
 
     def _decision_recorded(self, reference: str, decision: str) -> bool:
         return standing_decision(self.audit.events(reference)) == decision

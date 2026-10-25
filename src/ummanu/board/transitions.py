@@ -171,6 +171,12 @@ TRANSITIONS: dict[EntityKind, dict[TransitionKey, Transition]] = {
         (CardState.VALIDATE, CardState.IN_PROGRESS): Transition(
             CardState.VALIDATE, CardState.IN_PROGRESS, EventKind.CARD_RETURNED
         ),
+        (CardState.VALIDATE, CardState.CI): Transition(
+            CardState.VALIDATE, CardState.CI, EventKind.CARD_MOVED
+        ),
+        (CardState.VALIDATE, CardState.REVIEW): Transition(
+            CardState.VALIDATE, CardState.REVIEW, EventKind.CARD_MOVED
+        ),
         (CardState.VALIDATE, CardState.ASSESSMENT): Transition(
             CardState.VALIDATE, CardState.ASSESSMENT, EventKind.CARD_ASSESSED
         ),

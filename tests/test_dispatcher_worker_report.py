@@ -118,8 +118,8 @@ class WorkerReportBoundaryTests(unittest.TestCase):
         self.assertTrue(self.record.worker_continuation.validation_move_pending)
         first_request = self.runtime.writer.move.call_args.kwargs["request_id"]
         outcome = self.handle("report:done")
-        self.assertEqual(outcome["to"], "validate")
-        self.assertEqual(self.record.state, "validate")
+        self.assertEqual(outcome["to"], "ci")
+        self.assertEqual(self.record.state, "ci")
         self.assertEqual(self.record.report_generation, 3)
         self.assertEqual(self.runtime.writer.move.call_args.kwargs["request_id"], first_request)
         self.assertEqual(self.runtime.host.verify_worker_result.call_count, 2)

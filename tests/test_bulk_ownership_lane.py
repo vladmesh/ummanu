@@ -18,6 +18,7 @@ from unittest import mock
 
 from tests import test_narrow_cleanup_lock as narrow
 from tests.fakes.card_restore import BOARD, COLUMNS, RETIRED, StoreModel
+from tests.fakes.marker_audit import MarkerAudit
 from ummanu import restore, task_restore
 from ummanu.dispatch import cleanup, ownership
 from ummanu.dispatch.types import HostError
@@ -62,11 +63,6 @@ class RestoreStore(StoreModel):
         return []
 
 
-class RestoreAudit(narrow.Audit):
-    def pending_events(self):
-        return copy.deepcopy(list(self._pending.values()))
-
-
 def restore_under_limit() -> None:
     """Run the complete import, including real normalization, writes and parity."""
     _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -87,7 +83,7 @@ def restore_under_limit() -> None:
             (board / "cards.json").write_text(json.dumps({"version": 1, "cards": cards}))
             (board / "export.json").write_text(json.dumps({"version": 1}))
             store = RestoreStore(root)
-            audit = RestoreAudit(root)
+            audit = MarkerAudit(root)
             with mock.patch("ummanu.board.sql_audit.SqlTaskAudit", return_value=audit):
                 assert restore.import_normalized_board(root, client=store) == count
             assert len(store.rows) == count

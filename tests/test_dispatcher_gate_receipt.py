@@ -378,7 +378,7 @@ class AttestationLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.host.fail_stop_review_reason = "scope unit was not loaded; settlement unconfirmed"
         for _ in range(3):
             self.assertEqual(self.tick()["action"], "review-stop-unconfirmed")
-            self.assertEqual(self.reader.show(CARD_REF)["state"], "validate")
+            self.assertEqual(self.reader.show(CARD_REF)["state"], "review")
             self.assertEqual(self._pilot_record()["worker_continuation"]["stage"], "retained")
             self.assertTrue(self._pilot_record()["worker_continuation"]["session_held"])
             self.now += timedelta(seconds=3)
@@ -478,7 +478,7 @@ class AttestationLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
             self.assertEqual(outcome["attestation_failure"]["count"], min(count, 3))
             self.assertEqual(outcome["attestation_failure"]["committed"]["event_id"], foreign["event_id"])
             self.assertIn(request_id, outcome["reason"])
-            self.assertEqual(self.reader.show(CARD_REF)["state"], "validate")
+            self.assertEqual(self.reader.show(CARD_REF)["state"], "review")
             self.assertEqual(self._pilot_record()["worker_continuation"]["stage"], "retained")
             self.assertEqual(self.host.completed, [])
             self.assertEqual(self.host.resumed_workers, [])

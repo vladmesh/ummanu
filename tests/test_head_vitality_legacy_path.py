@@ -166,7 +166,7 @@ class IssueB5195041LegacyIdlePathTests(LegacyPathTests):
         self.host.fail_resume_worker_reason = ""
         self.tick()
         self.report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         self.assertEqual(self.tick()["action"], "review-started")
         self.writer.verdict(
             role="reviewer",
@@ -278,7 +278,7 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         self.tick()
         self.report_done()
         # The report's own move lands in validate; the gate has not been asked yet.
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
 
         gated = self.tick()
         self.assertEqual(gated["action"], "gate-pending")
@@ -348,7 +348,7 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         ]
         self.tick()
         self.report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         self.tick()  # first pending stamp
 
         stopped_status = {
@@ -411,7 +411,7 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         self.host.gate_results = [GateResult("pending", "CI still running")] * 8
         self.tick()
         self.report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         self.tick()  # first pending stamp (no scripted worker status yet: plain wait)
 
         refusal_status = {
@@ -462,7 +462,7 @@ class Issue02fe04d7RetainedWorkerTests(LegacyPathTests):
         self.host.gate_results = [GateResult("pending", "CI still running") for _ in range(pending_ticks)]
         self.tick()
         self.report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         self.assertTrue(
             self.record_of().worker_continuation.retained,
             "report:done retains the worker: that is the retention this card is about",

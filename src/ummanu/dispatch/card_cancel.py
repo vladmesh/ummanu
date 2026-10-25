@@ -37,6 +37,7 @@ from ummanu.board.task_protocol.rows import (
     _task_number,
     project_card_by_reference,
 )
+from ummanu.board.terminal_taxonomy import normalize_terminal_taxonomy
 from ummanu.dispatch.launch import REVIEW_ROLE, WORKER_ROLE, launch_intent
 from ummanu.dispatch.ownership import _ALLOWANCE, Allowance, Deferred, _path_lock, reference_lock
 from ummanu.dispatch.production import ProductionState, _stop_record_heads
@@ -219,6 +220,14 @@ def _cancel_held(
         record = records.get(reference)
         if record is not None:
             _stop_heads(runtime, task, record, reference, state, payload, records, progress)
+        if task["state"] in {"ci", "review"}:
+            writer.move(
+                role=role.value, actor=actor, reference=reference, target="blocked",
+                reason=reason, request_id=f"{request_id}-withdrawal",
+                sprint_override=role is Role.PO,
+                sprint_override_reason=reason if role is Role.PO else "",
+                terminal_taxonomy=normalize_terminal_taxonomy(disposition="operator_stop").to_record(),
+            )
 
     moves: list[tuple[dict[str, Any], str]] = []
     successors: list[dict[str, Any]] = []

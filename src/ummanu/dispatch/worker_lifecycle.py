@@ -838,7 +838,7 @@ class WorkerContinuation:
         self.verdict_outcome = verdict_outcome
 
     def confirm_park(self) -> None:
-        """The card is in Assessment. From here only a recorded decision moves it."""
+        """Confirm Assessment, where the decision or admitted automatic code release continues."""
         if self.stage == WorkerContinuationStage.ASSESSMENT_PARKED:
             return
         if self.stage != WorkerContinuationStage.ASSESSMENT_PENDING:

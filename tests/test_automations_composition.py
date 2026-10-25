@@ -40,6 +40,18 @@ class StewardCliReaderTests(unittest.TestCase):
         self.state = AgentState("steward", state_dir=Path(self.tmp.name) / "state")
         self.reader = self.Reader()
 
+    def test_stale_query_includes_ci_and_review_and_reports_each_once(self) -> None:
+        cards = [{"reference": f"sample-{index}", "state": stage, "column": column, "date_moved": 1}
+                 for index, (stage, column) in enumerate((("ci", "CI"), ("review", "Review")), 1)]
+        reader = mock.Mock()
+        reader.active_cards.side_effect = lambda *, states: [card for card in cards if card["state"] in states]
+        signals = steward_cli.signals
+        with mock.patch.object(signals.time, "time", return_value=1_000_000):
+            hits, watermark = signals._stale_signals({"notified_stale": {}}, reader)
+            repeated, _ = signals._stale_signals({"notified_stale": watermark}, reader)
+        self.assertEqual([hit["column"] for hit in hits], ["CI", "Review"])
+        self.assertEqual(repeated, [])
+
     def test_scan_precheck_and_advance_pass_an_explicit_reader(self) -> None:
         batch = {"pending": {"notified_blocked": []}, "signals": {"new_blocked": []}}
         with contextlib.ExitStack() as stack:

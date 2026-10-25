@@ -66,6 +66,8 @@ CARD_TRANSITIONS: dict[Role, frozenset[CardTransitionKey]] = {
             (CardState.VALIDATE, CardState.IN_PROGRESS),
             (CardState.VALIDATE, CardState.BLOCKED),
             (CardState.VALIDATE, CardState.DONE),
+            (CardState.VALIDATE, CardState.CI),
+            (CardState.VALIDATE, CardState.REVIEW),
             (CardState.VALIDATE, CardState.ASSESSMENT),
             (CardState.ASSESSMENT, CardState.IN_PROGRESS),
             (CardState.ASSESSMENT, CardState.DONE),

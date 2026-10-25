@@ -8,13 +8,17 @@ applies this rule under card row locks and recovers pending work from durable ma
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Mapping
+from collections.abc import Callable, Mapping
+from typing import Any
 
 from ummanu.board import e2e_record, po_execution, po_origin, wait_card
 from ummanu.board.audit_contract import card_transition_of, is_protocol_event
 from ummanu.board.completion_evidence import (
-    E2E_DISPOSITION_SECTION, po_completion_record, render_po_completion_record,
+    E2E_DISPOSITION_SECTION,
+    po_completion_record,
+    render_po_completion_record,
 )
+from ummanu.board.task_routing import ACTIVE_STATES
 
 
 def safe_retry(run: e2e_record.E2eRun) -> bool:
@@ -170,7 +174,7 @@ def disposition_effect(*, operation: dict[str, Any], carrier: str, run: e2e_reco
         if not planned:
             return neutral("Follow-up needs an open supported sprint or a genuine PO turn")
         if holder.get("state") != "done":
-            if holder.get("state") not in {"ready", "in_progress", "validate", "assessment", "blocked"}:
+            if holder.get("state") not in ACTIVE_STATES | {"ready", "blocked"}:
                 return neutral("Follow-up has no live planned state")
             effect.update(status="follow_up", holder=outcome["holder"])
         else:

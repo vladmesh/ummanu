@@ -1169,6 +1169,24 @@ def _reconcile_production(
         task = card(ref)
         return task is not None and fenced_task(fence, task)
 
+    from ummanu.dispatch.stage_migration import reconcile_validation
+
+    for candidate in _production_tasks(runtime, {"validate"}):
+        ref = str(candidate["ref"])
+        if ref not in active_refs or candidate.get("type") != "code":
+            continue
+        task = card(ref)
+        if task is not None and not fenced(ref) and task["state"] == "validate":
+            record = records.get(ref)
+            if record is not None and task.get("claim", {}).get("worker") not in (None, record.worker):
+                continue
+            try:
+                reconcile_validation(runtime, task, records, payload,
+                                     record.attempt_id if record is not None else production_adopt_attempt_id(ref))
+            except (TaskError, HostError) as exc:
+                outcomes.append({"status": "degraded", "step": "production-reconcile", "ref": ref,
+                                 "action": "validation-migration-refused", "reason": str(exc)})
+
     for ref in sorted(ref for ref in records if ref not in active_refs):
         if fenced(ref):
             continue

@@ -14,10 +14,12 @@ from types import MethodType, SimpleNamespace
 from unittest import mock
 
 from tests import test_owned_cleanup as owned_fixtures, test_tick_board_snapshot as tick_fixtures
-from tests.fakes.board import MemoryAudit
 from tests.fakes.dispatcher import FakeCatalog
+from tests.fakes.marker_audit import MarkerAudit
+from tests.observer_identity import bind_observer
 from tests.support.cleanup_lock_probe import LockProbes, run_host_operations, run_production_operations
 from ummanu import restore
+from ummanu.board.backend import record_key
 from ummanu.board.host import TransitionRequest
 from ummanu.board.models import Actor, CardState, EntityKind
 from ummanu.board.tick_snapshot import tick_snapshot
@@ -42,26 +44,6 @@ def lock_free(data):
         return True
 
 
-class Audit(MemoryAudit):
-    """The generic and typed audit contracts over the same memory owner."""
-
-    def __init__(self, root):
-        super().__init__()
-        self.board_dir = root / "board"
-
-    def stage(self, request_id, event):
-        self._pending[request_id] = copy.deepcopy(event)
-
-    def events(self, reference="", kind=None, **kwargs):
-        return [event for event in super().events(reference) if kind is None or event["kind"] == kind]
-
-    def pending_marker_owner(self, reference, content, *, request_id):
-        return None
-
-    def marker_comment_lock(self, reference):
-        return contextlib.nullcontext()
-
-
 class NarrowCleanupLockTests(unittest.TestCase):
     def setUp(self):
         self.fixture = owned_fixtures.OwnedCleanupTests()
@@ -77,7 +59,7 @@ class NarrowCleanupLockTests(unittest.TestCase):
             metadata["sprint_ref"] = ""
             if "sprint_status" in metadata:
                 metadata["sprint_status"] = "closed"
-        self.audit = Audit(self.data)
+        self.audit = MarkerAudit(self.data)
         self.enterContext(mock.patch("ummanu.board.sql_audit.SqlTaskAudit", return_value=self.audit))
         self.writer = TaskWriter(self.store, data_dir=self.data)
         self.owner = self.fixture.owner
@@ -530,6 +512,15 @@ class NarrowCleanupLockTests(unittest.TestCase):
 
     def test_assessment_decision_release_reaches_real_host_teardown(self):
         task, record = self.assessment_record()
+        sprint_key = record_key("sprint", "sprint:1")
+        self.store.meta[sprint_key].update(sprint_status="open", sprint_reservations='["sample"]')
+        self.store.meta[1]["sprint_ref"] = "sprint:1"
+        self.store.rows[1]["column_id"] = 9
+        self.writer.move(role="dispatcher", actor="test-dispatcher", reference="sample-1",
+                         target="assessment", reason="review complete", request_id="park")
+        bind_observer(self, "sprint:1")
+        self.writer.decide(role="observer", actor="observer", reference="sample-1",
+                           kind="accept", body="release the reviewed candidate", request_id="accept")
         host = self.fixture.host
         host.mode = "real"
         host.cleanup_owner = self.owner
@@ -538,6 +529,7 @@ class NarrowCleanupLockTests(unittest.TestCase):
         host.teardown = MethodType(CommandHostRuntime.teardown, host)
         host.complete_green = lambda *a: None
         runtime = self.owner.runtime
+        runtime.owner = "test-dispatcher"
         runtime.save_records = lambda *a: None
         records = {"sample-1": record}
 

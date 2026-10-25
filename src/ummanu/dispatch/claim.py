@@ -851,7 +851,7 @@ def _prepare_claim(
     records[ref] = record
     runtime.save_records(payload, records)
     if held:
-        return continue_in_validate(runtime, claimed, record, records, payload)
+        return continue_validation(runtime, claimed, record, records, payload)
     return ClaimHandoff(
         claimed=claimed,
         record=record,
@@ -878,17 +878,14 @@ def _held_candidate_workspace(
     return workspace
 
 
-def continue_in_validate(
+def continue_validation(
     runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Move a claim held on its round's candidate into Validate, where the gate and review run on it.
-
-    Idempotent under one record: a tick that dies before the move replays it with the same request id.
-    """
+    """Resume an accepted candidate in CI without another worker round, under one stable move id."""
     ref = str(task["ref"])
     attempt_accounting.persist_outcome_round_context(runtime, task, record, phase="worker")
     attempt_accounting.capture_outcome_source(
@@ -898,14 +895,14 @@ def continue_in_validate(
         role="dispatcher",
         actor=runtime.owner,
         reference=ref,
-        target="validate",
+        target="ci" if has_candidate(task) else "validate",
         reason=(
             "the checkout still holds the candidate of the round's accepted report:done; "
             "validation continues on it with no worker round"
         ),
         request_id=_attempt_request_id(record.attempt_id, "stage-resume", ref, str(record.report_generation)),
     )
-    record.state = "validate"
+    record.state = "ci" if has_candidate(task) else "validate"
     runtime.save_records(payload, records)
     return {
         "status": "ok",
@@ -914,7 +911,7 @@ def continue_in_validate(
         "attempt_id": record.attempt_id,
         "action": "stage-resumed",
         "workspace": record.workspace,
-        "to": "validate",
+        "to": record.state,
     }
 
 
@@ -960,10 +957,10 @@ def resume_point(runtime: Any, task: dict[str, Any]) -> ResumePoint:
                 decision = stage_decision
             else:
                 decision = None
-            if source in {"validate", "assessment"}:
+            if source in {"validate", "ci", "review", "assessment"}:
                 last_report = None
             stage, stage_decision = "", None
-        elif target == "blocked" and dispatcher and source in {"in_progress", "validate", "assessment"}:
+        elif target == "blocked" and dispatcher and source in {"in_progress", "validate", "ci", "review", "assessment"}:
             stage = _interrupted_stage(request_id, token, source)
             stage_decision = None if source == "assessment" else decision
             stage_report = last_report
