@@ -52,7 +52,7 @@ class StageResumeTests(DispatcherRuntimeFixture, unittest.TestCase):
         record = records[CARD_REF]
         stalled = wait_vitality._escalate_wait(
             self.runtime, self.reader.show(CARD_REF), record, records, payload, record.attempt_id,
-            kind="review", stall=1, trigger="confirmed stall",
+            kind="review", stall=1, cause="stall", trigger="confirmed stall",
         )
         self.assertEqual(stalled["to"], "blocked", stalled)
         self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")

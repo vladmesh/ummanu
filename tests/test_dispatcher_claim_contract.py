@@ -50,13 +50,13 @@ class ClaimAuditContractTests(DispatcherRuntimeFixture, unittest.TestCase):
             if action.endswith("wait-stall"):
                 result = wait_vitality._escalate_wait(
                     self.runtime, task, record, records, payload, record.attempt_id,
-                    kind=action.split("-")[0], stall=1, trigger="confirmed stall",
+                    kind=action.split("-")[0], stall=1, cause="stall", trigger="confirmed stall",
                 )
             elif action == "worker-respawn-blocked":
                 self.host.fail_restart_error = HostError("respawn refused", bring_up_cause=cause)
                 result = wait_vitality._respawn_wait(
                     self.runtime, task, record, records, payload, record.attempt_id,
-                    kind="worker", now=1.0, trigger="confirmed dead head",
+                    kind="worker", now=1.0, cause="head_exit", trigger="confirmed dead head",
                 )
                 self.host.fail_restart_error = None
             else:
