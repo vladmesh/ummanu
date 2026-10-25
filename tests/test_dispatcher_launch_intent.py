@@ -1394,11 +1394,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertLess(self.host.calls.index("confirm_worker_retained"), len(self.host.calls))
 
     def fail_the_red_move(self):
-        """The red intent reaches the disk and the board move behind it does not.
-
-        A refusing move and a process that dies just before it leave the same thing on disk: an
-        open red transition over a card the board still shows in Validate.
-        """
+        """Persist the red intent while refusing its board move."""
         real_move = self.writer.move
 
         def move(**kwargs):
@@ -1409,13 +1405,8 @@ class LaunchIntentTests(unittest.TestCase):
         return mock.patch.object(self.writer, "move", move)
 
     def assert_red_intent_open_in_validate(self, phase: str) -> None:
-        """A red transition whose move did not land, over a card the board has not moved.
-
-        The column that card sits in depends on which red opened the transition: a mechanical
-        gate opens one in Validate, a rework decision opens one over a card already parked in
-        Assessment. Either way the transition is what the record owes and the board has not moved.
-        """
-        self.assertIn(self.reader.show(REF)["state"], ("review", "assessment"))
+        """The red intent retains its source stage until the board move commits."""
+        self.assertEqual(self.reader.show(REF)["state"], "ci" if phase == "gate" else "assessment")
         stranded = self.record()
         assert stranded is not None
         self.assertEqual(stranded.worker_continuation.stage, WorkerContinuationStage.RED_TRANSITION_PENDING)

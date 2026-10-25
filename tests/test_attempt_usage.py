@@ -1285,7 +1285,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         advanced = self.tick()
 
-        self.assertEqual(advanced["to"], "validate")
+        self.assertEqual(advanced["to"], "ci")
         events = self.usage_events()
         self.assertEqual(len(events), 1)
         usage = events[0]
@@ -1336,7 +1336,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         session_id = self.bind_source("worker", journal, adapter="claude")
         self._report_done()
 
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
 
         usage = self.usage_events()[0]
         self.assertEqual(usage["adapter"], "claude")
@@ -1374,7 +1374,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.bind_source("worker", journal, adapter="claude")
         self._report_done()
 
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
 
         usage = self.usage_events()[0]
         self.assertEqual(usage["resolved_model"], "claude-opus-5-5")
@@ -1388,7 +1388,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         journal = self.codex_journal("worker-1.jsonl", input_tokens=100, output_tokens=10)
         self.bind_source("worker", journal)
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         first = self.usage_events()
 
         write_jsonl(journal, [codex_token_count(input_tokens=999999, output_tokens=88888)])
@@ -1456,7 +1456,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
             adapter="claude",
         )
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
 
         events = self.usage_events()
         self.assertEqual(
@@ -1498,7 +1498,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
         self._report_done()
 
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
 
         usage = self.usage_events()
         self.assertEqual(len(usage), 1, "one round, one worker phase, however often it was launched")
@@ -1529,8 +1529,8 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         advanced = self.tick()
 
-        self.assertEqual(advanced["to"], "validate", "usage collection never decides the card")
-        self.assertEqual(self.reader.show(CARD_REF)["state"], "validate")
+        self.assertEqual(advanced["to"], "ci", "usage collection never decides the card")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "ci")
         usage = self.usage_events()[0]
         self.assertEqual(usage["outcome"], AttemptUsageOutcome.SOURCE_UNREADABLE.value)
         self.assertTrue(all(value is None for value in usage["tokens"].values()))
@@ -1540,7 +1540,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.tick()
         self._report_done()
 
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
 
         usage = self.usage_events()[0]
         self.assertEqual(usage["outcome"], AttemptUsageOutcome.SOURCE_UNAVAILABLE.value)
@@ -1589,7 +1589,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         advanced = self.tick()
 
-        self.assertEqual(advanced["to"], "validate", "a staged obligation does not hold the card")
+        self.assertEqual(advanced["to"], "ci", "a staged obligation does not hold the card")
         self.assertEqual(self.usage_events(), [], "nothing is published yet")
         staged = self.staged_usage()
         self.assertEqual(len(staged), 1)
@@ -1611,7 +1611,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.bind_source("worker", journal)
         restore = self.refuse_usage_audit("append")
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
 
         write_jsonl(journal, [codex_token_count(input_tokens=999999, output_tokens=88888)])
         restore()
@@ -1637,7 +1637,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         restore()
 
-        self.assertEqual(self.tick()["to"], "validate", "the retry accepts the same report")
+        self.assertEqual(self.tick()["to"], "ci", "the retry accepts the same report")
         self.assertEqual(len(self.usage_events()), 1)
 
     def test_two_worker_phases_on_one_retained_codex_session_split_it_at_the_boundary(self) -> None:
@@ -1648,7 +1648,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         journal = self.codex_journal("worker.jsonl", input_tokens=100, output_tokens=10)
         session_id = self.bind_source("worker", journal)
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         self.tick()
         self._review_red()
 
@@ -1663,7 +1663,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
         self.host.commit = "retained-rework-c0ffee"
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
 
         phases = [usage for usage in self.usage_events() if usage["role"] == "worker"]
         self.assertEqual([usage["session_id"] for usage in phases], [session_id, session_id])
@@ -1685,7 +1685,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         journal = write_jsonl(self.data_dir / "sessions" / "reset-retained.jsonl", records[:2])
         session_id = self.bind_source("worker", journal)
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         self.tick()
         self._review_red()
         self.assertEqual(self._park_and_decide("rework")["action"], "review-red-reused-worker")
@@ -1693,7 +1693,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         write_jsonl(journal, records)
         self.host.commit = "retained-reset-rework-c0ffee"
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
 
         phases = [
             usage
@@ -1719,7 +1719,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         journal = self.codex_journal("replaced.jsonl", input_tokens=100, output_tokens=10)
         self.bind_source("worker", journal)
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         self.tick()
         self._review_red()
         self._park_and_decide("rework")
@@ -1728,7 +1728,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.host.commit = "retained-replaced-c0ffee"
         self._report_done()
 
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         phases = [usage for usage in self.usage_events() if usage["role"] == "worker"]
         self.assertEqual(phases[-1]["outcome"], "arithmetic_contradiction")
         self.assertTrue(all(value is None for value in phases[-1]["tokens"].values()))
@@ -1742,7 +1742,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         journal = self.claude_journal("worker.jsonl", "msg_1", input_tokens=8, output_tokens=90)
         session_id = self.bind_source("worker", journal, adapter="claude")
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         self.tick()
         self._review_red()
 
@@ -1756,7 +1756,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
         self.host.commit = "retained-rework-c0ffee"
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
 
         phases = [usage for usage in self.usage_events() if usage["role"] == "worker"]
         self.assertEqual([usage["session_id"] for usage in phases], [session_id, session_id])
@@ -1795,7 +1795,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         session_id = self.bind_source("worker", journal, adapter="claude")
         restore = self.refuse_usage_audit("append")
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
 
         self.tick()
         self._review_red("review-red-round-one")
@@ -1804,7 +1804,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         write_jsonl(journal, records[:3])
         self.host.commit = "retained-gap-round-two-c0ffee"
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
 
         self.tick()
         self._review_red("review-red-round-two")
@@ -1815,7 +1815,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         write_jsonl(journal, records)
         self.host.commit = "retained-gap-round-three-c0ffee"
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
 
         staged = [
             item
@@ -1914,7 +1914,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         session_id = self.bind_source("worker", journal, adapter=adapter)
         restore = self.refuse_usage_audit("append")
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         self.tick()
         self._review_red()
         self.assertEqual(self._park_and_decide("rework")["action"], "review-red-reused-worker")
@@ -1932,7 +1932,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
             expected = {"input": [8, 5], "output": [90, 40], "final": {"input": 13, "output": 130}}
         self.host.commit = "retained-rework-c0ffee"
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
 
         staged = [
             item
@@ -1997,7 +1997,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         journal = self.data_dir / "sessions" / "appears-later.jsonl"
         self.bind_source("worker", journal)
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         first = [usage for usage in self.usage_events() if usage["role"] == "worker"]
         self.assertEqual(first[0]["outcome"], "source_unreadable")
 
@@ -2033,7 +2033,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         write_jsonl(journal, [codex_token_count(input_tokens=450, output_tokens=61)])
         self.host.commit = "retained-rework-c0ffee"
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         accounted = self.usage_events()
 
         write_jsonl(journal, [codex_token_count(input_tokens=900000, output_tokens=70000)])
@@ -2141,7 +2141,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.bind_source("worker", self.codex_journal("worker-1.jsonl", input_tokens=100, output_tokens=10))
         restore = self.refuse_usage_audit("append")
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         staged = self.staged_usage()
         self.assertEqual(len(staged), 1)
         # The dispatcher restarts without its records, the way recovery finds the board.
@@ -2209,7 +2209,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.tick()
         self.bind_source("worker", self.codex_journal("worker-1.jsonl", input_tokens=100, output_tokens=10))
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         accounted = self.usage_events()
         self.assertEqual(len(accounted), 1)
 
@@ -2249,7 +2249,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
             journal = self.claude_journal("worker.jsonl", "msg_1", input_tokens=8, output_tokens=90)
             self.bind_source("worker", journal, adapter="claude")
             self._report_done()
-            self.assertEqual(self.tick()["to"], "validate")
+            self.assertEqual(self.tick()["to"], "ci")
             self.tick()
             self.bind_source(
                 "review", self.codex_journal("review-1.jsonl", input_tokens=200, output_tokens=20)
@@ -2266,7 +2266,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
             self.host.commit = "one-rule-rework-c0ffee"
             restore = self.refuse_usage_audit("append")
             self._report_done()
-            self.assertEqual(self.tick()["to"], "validate")
+            self.assertEqual(self.tick()["to"], "ci")
             restore()
             self.production_tick()
 

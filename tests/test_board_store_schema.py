@@ -389,7 +389,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "cannot drop their states"):
                 command.downgrade(config, "0035_issue_reopened")
             connection.rollback()
-            self.assertEqual(migrate.current_revision(connection), "0037_stage_budget_candidates")
+            self.assertEqual(migrate.current_revision(connection), "0036_card_ci_review")
         connection.exec_driver_sql("UPDATE tasks SET state = 'validate'")
         connection.commit()
         command.downgrade(config, "0035_issue_reopened")
@@ -974,6 +974,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0034_po_restore_sequence",
                 "0035_issue_reopened",
                 "0036_card_ci_review",
+                "0037_stage_budget_candidates",
             ),
         )
         rows = connection.exec_driver_sql(
@@ -1246,6 +1247,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0034_po_restore_sequence",
                 "0035_issue_reopened",
                 "0036_card_ci_review",
+                "0037_stage_budget_candidates",
             ),
         )
 
@@ -1632,6 +1634,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0034_po_restore_sequence",
                 "0035_issue_reopened",
                 "0036_card_ci_review",
+                "0037_stage_budget_candidates",
             ),
         )
         self.assertEqual(migrate.current_revision(connection), "0013_budget_candidates")
@@ -1687,6 +1690,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0034_po_restore_sequence",
                 "0035_issue_reopened",
                 "0036_card_ci_review",
+                "0037_stage_budget_candidates",
             ),
         )
 
@@ -1782,6 +1786,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0034_po_restore_sequence",
                 "0035_issue_reopened",
                 "0036_card_ci_review",
+                "0037_stage_budget_candidates",
             ),
         )
 
@@ -1815,6 +1820,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "0034_po_restore_sequence",
                 "0035_issue_reopened",
                 "0036_card_ci_review",
+                "0037_stage_budget_candidates",
             ),
         )
 
@@ -1917,7 +1923,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(
             self.run_migrations(connection),
-            ("0017_po_card_kinds", "0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review"),
+            ("0017_po_card_kinds", "0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items", "0032_accept_decision", "0033_po_session_moved", "0034_po_restore_sequence", "0035_issue_reopened", "0036_card_ci_review", "0037_stage_budget_candidates"),
         )
 
         self.assertEqual(

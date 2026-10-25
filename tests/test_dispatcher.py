@@ -21,6 +21,7 @@ from typing import Any, ClassVar
 from unittest import mock
 
 from tests.fakes.review_packet import marker_event
+from tests.observer_identity import bind_observer
 from ummanu._fsutil import file_lock, try_file_lock, write_json
 from ummanu.board.models import Actor, AttemptUsageOutcome, EntityKind, Event, EventKind
 from ummanu.board.sprint_read import BUDGET_UNCHARGED_INFRASTRUCTURE
@@ -13543,10 +13544,19 @@ class ReviewBaseReconciliationTests(unittest.TestCase):
             git(base_writer, "push", "--quiet", "origin", "main")
             seed = dispatcher_seed()
             seed.tasks[0]["reference"] = task["ref"]
+            seed.tasks[0]["column_id"] = 9
             board = card_store(self, seed, instance_dir=Path(tmp) / "instance")
             writer = TaskWriter(board, data_dir=Path(tmp) / "data")
             reader = TaskReader(board)
             self.assertEqual(writer.audit.events(task["ref"]), [])
+            board.add_sprint("sprint:1", sprint_reservations='["ummanu"]',
+                             sprint_observer='{"kind":"head","profile":"test-observer"}')
+            board.save_metadata(12, sprint_ref="sprint:1")
+            writer.move(role="dispatcher", actor="dispatcher", reference=task["ref"],
+                        target="assessment", reason="review complete", request_id="park")
+            bind_observer(self, "sprint:1")
+            writer.decide(role="observer", actor="observer", reference=task["ref"],
+                          kind="accept", body="release the reviewed candidate", request_id="accept")
             runtime = SimpleNamespace(
                 host=host, writer=writer, reader=reader, audit=writer.audit,
                 owner="dispatcher", save_records=mock.Mock(),

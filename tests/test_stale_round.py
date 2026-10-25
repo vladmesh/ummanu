@@ -208,7 +208,7 @@ class StaleRoundTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(len(self._stale_comments()), 1)
 
         self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         self.tick()
         self._review_red()
         reopened = self.now + 1

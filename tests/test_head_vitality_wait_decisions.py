@@ -753,7 +753,7 @@ class RejectedReportAnswerOwedTests(DispatcherRuntimeFixture, unittest.TestCase)
             body="reworked",
             request_id=self._worker_report_request_id(),
         )
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         self.assertEqual(self._record_field(), 0.0)
 
     def test_the_owed_answer_reaches_the_reduction_as_a_declared_input(self) -> None:

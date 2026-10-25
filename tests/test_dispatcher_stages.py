@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
+from tests.fakes.marker_audit import MarkerAudit
+from tests.fakes.tick_board import SPRINT, CountingStore
+from tests.observer_identity import bind_observer
+from ummanu.board.backend import record_key
 from ummanu.board.budget_candidates import is_candidate
 from ummanu.board.host import TransitionRequest
 from ummanu.board.models import Actor, CardState, EntityKind
@@ -302,6 +308,28 @@ class ReleaseAdmissionTests(unittest.TestCase):
             self.admit(decision="accept")
         self.writer._decision_recorded.return_value = True
         self.admit(decision="accept")
+
+    def test_release_admission_consumes_the_real_writer_observer_decision(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        store = CountingStore(root)
+        audit = MarkerAudit(root)
+        self.enterContext(mock.patch("ummanu.board.sql_audit.SqlTaskAudit", return_value=audit))
+        store.meta[record_key("sprint", SPRINT)]["sprint_reservations"] = '["alpha"]'
+        writer = TaskWriter(store, data_dir=root)
+        writer.move(role="dispatcher", actor="dispatcher", reference="demo-1",
+                    target="assessment", reason="review complete", request_id="park")
+        admission = {"role": "dispatcher", "actor": "dispatcher", "reference": "demo-1", "decision": "accept"}
+        with self.assertRaises(TaskError) as refused:
+            writer.admit_release(**admission)
+        self.assertEqual(refused.exception.code, "decision_required")
+
+        bind_observer(self, SPRINT)
+        writer.decide(role="observer", actor="observer", reference="demo-1", kind="accept",
+                      body="release the reviewed candidate", request_id="accept")
+
+        writer.admit_release(**admission)
+        self.assertEqual(writer.reader.show("demo-1")["state"], "assessment")
+        self.assertEqual(audit.events("demo-1")[-1]["data"]["decision"], "accept")
 
     def test_refused_terminal_authority_precedes_merge_and_teardown(self):
         runtime = mock.Mock()

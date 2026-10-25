@@ -1382,8 +1382,8 @@ class ProductionPauseTests(unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        self.assertEqual(result["actions"][0]["to"], "validate")
-        self.assertEqual(self.reader.show(self.ref)["state"], "validate")
+        self.assertEqual(result["actions"][0]["to"], "ci")
+        self.assertEqual(self.reader.show(self.ref)["state"], "ci")
         # ...and the Ready neighbour is still not claimed while the drain holds.
         self.assertEqual(self.reader.show("ummanu-511")["state"], "ready")
 
@@ -1509,7 +1509,7 @@ class ProductionPauseTests(unittest.TestCase):
 
         self.assertEqual(result["parked"], [f"{self.ref}:worker"])
         self.assertNotIn("restart_worker", self.host.calls)
-        self.assertEqual(self.runtime.production_tick()["actions"][0]["to"], "validate")
+        self.assertEqual(self.runtime.production_tick()["actions"][0]["to"], "ci")
 
     def test_resume_hands_the_wait_watchdog_a_fresh_window(self) -> None:
         """A freeze advances nothing, so its whole length would otherwise count as head silence."""

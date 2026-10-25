@@ -10,7 +10,7 @@ such a candidate with a terminal marker rather than making the SQL exact.
 An event is *uncharged* while no committed request has the id `sprint-budget-<identity>`, the id its
 charge or its terminal marker is written under. That is a primary-key probe, so the set is an
 anti-join and not a position: an event that commits late, or whose card cannot be looked up for any
-number of ticks, stays in the set until it is resolved (secretary-1661). `0037_stage_budget_candidates`
+number of ticks, stays in the set until it is resolved. `0037_stage_budget_candidates`
 serves the read with a partial index holding only candidate rows.
 """
 

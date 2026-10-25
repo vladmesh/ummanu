@@ -257,7 +257,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
     def test_verdictless_gate_termination_keeps_the_consumed_report_required(self) -> None:
         self._start_worker_round()
         self._report_done("gate will terminate this report round")
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         payload = self.runtime.production_state.load()
         record = self.runtime.production_state.records(payload)[CARD_REF]
         attempt_accounting.terminal_effect(
@@ -457,7 +457,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.host.commit = "second-round-c0ffee"
         self._report_done("second round done")
-        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["to"], "ci")
         self.tick()
         self._review_red()
         self.assertEqual(self.tick()["to"], "assessment")
@@ -547,7 +547,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.runtime.production_state.put_records(payload, {})
         payload["attempt_id"] = "attempt-after-state-loss"
         self.runtime.production_state.save(payload)
-        self.assertEqual(self.reader.show(CARD_REF)["state"], "validate")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "ci")
 
         with mock.patch.object(
             self.host, "gate_check", side_effect=HostError("gate infrastructure is unavailable")
@@ -581,7 +581,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._start_worker_round()
         self._report_done("the report handoff will be unavailable")
         with mock.patch.object(attempt_accounting, "capture_outcome_source"):
-            self.assertEqual(self.tick()["to"], "validate")
+            self.assertEqual(self.tick()["to"], "ci")
 
         payload = self.runtime.production_state.load()
         record = self.runtime.production_state.records(payload)[CARD_REF]

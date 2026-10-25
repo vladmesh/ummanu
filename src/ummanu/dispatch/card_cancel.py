@@ -24,7 +24,6 @@ from ummanu.board.legacy_codec import positive_int, text
 from ummanu.board.models import CardState
 from ummanu.board.roles import Role
 from ummanu.board.sql_cards import SqlCardClient
-from ummanu.board.terminal_taxonomy import normalize_terminal_taxonomy
 from ummanu.board.task_protocol.rows import (
     _TYPED_RECORD_TYPES,
     WAIT_CANCELLED,
@@ -38,6 +37,7 @@ from ummanu.board.task_protocol.rows import (
     _task_number,
     project_card_by_reference,
 )
+from ummanu.board.terminal_taxonomy import normalize_terminal_taxonomy
 from ummanu.dispatch.launch import REVIEW_ROLE, WORKER_ROLE, launch_intent
 from ummanu.dispatch.ownership import _ALLOWANCE, Allowance, Deferred, _path_lock, reference_lock
 from ummanu.dispatch.production import ProductionState, _stop_record_heads

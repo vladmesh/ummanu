@@ -23,6 +23,7 @@ from tests.fanout_fixtures import accepted_transport_run
 from tests.observer_identity import bind_observer
 from tests.sql_backend_fixtures import card_store
 from ummanu._fsutil import file_lock
+from ummanu.board.completion_evidence import has_candidate
 from ummanu.dispatch.heartbeat import heartbeat_identity
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.runtime import DispatcherRuntime
