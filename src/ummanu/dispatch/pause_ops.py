@@ -28,6 +28,8 @@ import time
 from typing import Any
 
 from ummanu._fsutil import file_lock
+from ummanu.board.head_changes import CAUSE_OPERATOR_STOP
+from ummanu.dispatch.head_changes import record_head_stop, role_run
 from ummanu.dispatch.helpers import WORKER_REPORT_MARKERS, _last_marker
 from ummanu.dispatch.launch import (
     REVIEW_ROLE,
@@ -169,6 +171,7 @@ def pause(
             stopped_reviewer: list[str] = []
             stopped_observer: list[str] = []
             excluded: list[str] = []
+            operator_stops: list[tuple[str, DispatcherRecord, str, dict[str, Any]]] = []
             if resolved == "freeze":
                 payload = runtime.production_state.load()
                 if _state_unreadable(payload):
@@ -178,6 +181,7 @@ def pause(
                     warnings.append("production state is unreadable: the flag is set but no head was stopped")
                 else:
                     records = runtime.production_state.records(payload)
+                    heads_before = _heads_before(records)
                     # The freeze is a stop path like any other, and its stops have to be durable
                     # before the panes are touched (secretary-1412): an operator freeze interrupted
                     # half-way must still leave every head it had begun stopping named on its record,
@@ -187,6 +191,11 @@ def pause(
                         stopped_worker, stopped_reviewer, excluded = _freeze_heads(
                             runtime, records, _excluded_paths(exclude_workspaces)
                         )
+                    operator_stops = [
+                        (ref, records[ref], kind, run)
+                        for ref, kind, run in heads_before
+                        if ref in (stopped_reviewer if kind == REVIEW_ROLE else stopped_worker)
+                    ]
                     # Observer heads stop with everything else, with the freeze's own reason on the
                     # record. The next tick after the resume brings them back.
                     observer_stops = freeze_observers(
@@ -216,7 +225,31 @@ def pause(
                     legacy_mirror=mirror,
                 )
             )
+            warnings.extend(_record_operator_stops(runtime, operator_stops, f"pipeline freeze by {actor}: {reason}"))
     return _with_status(runtime, {"step": "pause", "action": action}, warnings=warnings)
+
+
+def _heads_before(records: dict[str, DispatcherRecord]) -> list[tuple[str, str, dict[str, Any]]]:
+    """The run of each role a freeze would stop directly: a launch intent's role is settled apart."""
+    heads: list[tuple[str, str, dict[str, Any]]] = []
+    for ref, record in sorted(records.items()):
+        intent = launch_intent(record)
+        intent_role = str(intent.get("role") or WORKER_ROLE) if intent else ""
+        heads.extend((ref, kind, role_run(record, kind)) for kind in (REVIEW_ROLE, WORKER_ROLE) if kind != intent_role)
+    return heads
+
+
+def _record_operator_stops(
+    runtime: Any, stops: list[tuple[str, DispatcherRecord, str, dict[str, Any]]], reason: str
+) -> list[str]:
+    """Journal each head the freeze confirmed stopped; a refused write is the operator's warning."""
+    warnings: list[str] = []
+    for ref, record, kind, run in stops:
+        try:
+            record_head_stop(runtime, ref, record, kind=kind, cause=CAUSE_OPERATOR_STOP, reason=reason, before=run)
+        except TaskError as exc:
+            warnings.append(f"the {kind} stop of {ref} was not written to its history: {exc.message}")
+    return warnings
 
 
 def resume(runtime: Any, *, actor: str) -> dict[str, Any]:

@@ -2481,7 +2481,8 @@ actions`.
 
 A card page (`/tasks/{ref}`) is headed by the card's title and opens on its **Task** tab: the card's full
 description, rendered from its Markdown. Beside it are the work (report, verdict, decision, result), the
-timeline of transitions with the records that made them, and the raw event tail. The side panel's `Heads`
+timeline of transitions with the records that made them and the head changes between them
+([Protocols](PROTOCOLS.md#head-changes)), and the raw event tail. The side panel's `Heads`
 lists every run the card recorded, by role: the latest run of each role is a chip with the model that ran
 it — the exact id the run reported (`claude-opus-5-5`, shown as `Opus 5.5`), else the configured one
 marked as configured — its effort (five bars and a word; hollow bars when no effort flag was passed and

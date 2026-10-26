@@ -14,7 +14,9 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from ummanu.board.head_changes import CAUSE_HEAD_EXIT, CAUSE_STALL
 from ummanu.dispatch import attempt_accounting
+from ummanu.dispatch.head_changes import owe_head_change, record_head_stop, role_run
 from ummanu.dispatch.head_vitality import (
     snapshots_from_status as _snapshots_from_status,
     status_has_vitality_observation,
@@ -290,6 +292,7 @@ def _decide_wait_by_verdict(
             payload,
             attempt_id,
             kind=kind,
+            cause=CAUSE_HEAD_EXIT,
             trigger=(
                 "memory_limit: the supervisor recorded a head memory-limit kill"
                 if loss_reason == "memory_limit"
@@ -329,6 +332,7 @@ def _decide_wait_by_verdict(
             payload,
             attempt_id,
             kind=kind,
+            cause=CAUSE_STALL,
             trigger=reason,
             degraded=True,
         )
@@ -492,6 +496,7 @@ def _decide_wait_by_verdict(
             payload,
             attempt_id,
             kind=kind,
+            cause=CAUSE_STALL,
             trigger=f"no terminal output since launch for {int(now - started_at)}s",
         )
     if progress_at and now - progress_at > stall:
@@ -502,6 +507,7 @@ def _decide_wait_by_verdict(
             payload,
             attempt_id,
             kind=kind,
+            cause=CAUSE_STALL,
             trigger=f"no terminal output for {int(now - progress_at)}s",
         )
     if not waiting_since:
@@ -1229,6 +1235,7 @@ def _trigger_wait_watchdog(
     attempt_id: str,
     *,
     kind: str,
+    cause: str,
     trigger: str,
     stall: int | None = None,
     degraded: bool = False,
@@ -1260,6 +1267,7 @@ def _trigger_wait_watchdog(
                 attempt_id,
                 kind=kind,
                 now=time.time(),
+                cause=cause,
                 trigger=trigger,
                 degraded=degraded,
             )
@@ -1272,6 +1280,7 @@ def _trigger_wait_watchdog(
                 attempt_id,
                 kind=kind,
                 stall=_stall_seconds(kind) if stall is None else stall,
+                cause=cause,
                 trigger=trigger,
             )
         ),
@@ -1288,6 +1297,7 @@ def _respawn_wait(
     *,
     kind: str,
     now: float,
+    cause: str,
     trigger: str,
     degraded: bool = False,
 ) -> dict[str, Any]:
@@ -1308,6 +1318,7 @@ def _respawn_wait(
             attempt_id,
             kind=kind,
             now=now,
+            cause=cause,
             trigger=trigger,
             degraded=degraded,
         )
@@ -1325,10 +1336,12 @@ def _respawn_wait_bring_up(
     *,
     kind: str,
     now: float,
+    cause: str,
     trigger: str,
     degraded: bool = False,
 ) -> dict[str, Any]:
     ref = task["ref"]
+    stopped = role_run(record, kind)
     if kind == "review":
         step = "review"
         # Only the reviewer is stalled; its pane goes and the workspace stays. A stall is not a
@@ -1344,6 +1357,9 @@ def _respawn_wait_bring_up(
         )
         if unconfirmed is not None:
             return unconfirmed
+        owe_head_change(
+            record, ref, kind=kind, cause=cause, reason=trigger, before=stopped, attempt_id=attempt_id
+        )
         # One bring-up path for the reviewer, shared with the normal launch and the recovery path.
         outcome = _start_review(
             runtime, task, records, record, attempt_id, action="review-respawned", payload=payload
@@ -1357,6 +1373,9 @@ def _respawn_wait_bring_up(
         unconfirmed = runtime._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
         if unconfirmed is not None:
             return unconfirmed
+        owe_head_change(
+            record, ref, kind=kind, cause=cause, reason=trigger, before=stopped, attempt_id=attempt_id
+        )
         failure = _write_worker_relaunch_intent(
             runtime, payload, records, ref, record, action="worker-respawn", task=task
         )
@@ -1447,9 +1466,11 @@ def _escalate_wait(
     *,
     kind: str,
     stall: int,
+    cause: str,
     trigger: str,
 ) -> dict[str, Any]:
     ref = task["ref"]
+    stopped = role_run(record, kind)
     if kind == "review":
         step = "review"
         # The reviewer may still hold the checkout when its second stall escalates. End it
@@ -1472,6 +1493,16 @@ def _escalate_wait(
         unconfirmed = runtime._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
     if unconfirmed is not None:
         return unconfirmed
+    record_head_stop(
+        runtime,
+        ref,
+        record,
+        kind=kind,
+        cause=cause,
+        reason=f"{trigger} after respawn",
+        before=stopped,
+        attempt_id=attempt_id,
+    )
     request_id = _attempt_request_id(
         record.attempt_id or attempt_id, f"{kind}-wait-stall", ref, _wait_cycle_token(record)
     )

@@ -19,6 +19,7 @@ from ummanu.board import (
 )
 from ummanu.board.completion_evidence import is_wait
 from ummanu.board.events import AnalyticsOutcomeConflict, BoardEventCanon
+from ummanu.board.head_changes import HEAD_CHANGED_KIND, head_change_payload
 from ummanu.board.legacy_codec import text as _text
 from ummanu.board.models import Actor, EntityKind, Event, EventKind
 from ummanu.board.outcome_round_context import OutcomeRoundContext
@@ -623,6 +624,43 @@ class DispatcherTaskWrites:
             normalized_payload,
             lambda task: None,
             identity=normalized_payload,
+        )
+
+    def head_changed(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        payload: Mapping[str, Any],
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Append one head lifecycle record for the card, keyed by the stopped run's request id.
+        Journal-only: the card's state and metadata are not touched.
+        """
+        role = self._role(role, {Role.DISPATCHER}, actor=actor)
+        if not request_id.strip():
+            raise TaskError("validation", "a head change needs the request id of its operation", 2)
+        try:
+            normalized = head_change_payload(
+                role=str(payload.get("role") or ""),
+                cause=str(payload.get("cause") or ""),
+                reason=str(payload.get("reason") or ""),
+                before=payload.get("before"),
+                after=payload.get("after"),
+                requested=str(payload.get("requested") or ""),
+            )
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
+        return self._write(
+            HEAD_CHANGED_KIND,
+            role,
+            actor,
+            reference,
+            request_id,
+            normalized,
+            lambda task: None,
+            identity=normalized,
         )
 
     def outcome_round_context(

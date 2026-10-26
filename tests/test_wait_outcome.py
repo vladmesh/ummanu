@@ -203,10 +203,10 @@ class WaitOutcomeTests(unittest.TestCase):
                 outcome = wait._guard_or_wait(runtime, task, record, "tick-attempt", kind=kind,
                                              action="respawn", proceed=proceed, current_run_id="bound-run")
             elif case.startswith("respawn") or case == "intent-unwritable":
-                outcome = wait._respawn_wait(*args, kind=kind, now=1000.0, trigger="stall trigger",
+                outcome = wait._respawn_wait(*args, kind=kind, now=1000.0, cause="stall", trigger="stall trigger",
                                             degraded=case == "respawn-degraded")
             elif case.startswith("terminal"):
-                outcome = wait._escalate_wait(*args, kind=kind, stall=300, trigger="stall trigger")
+                outcome = wait._escalate_wait(*args, kind=kind, stall=300, cause="stall", trigger="stall trigger")
             elif case in ("recovery-missing", "observe", "observe-escalated", "sigcont",
                           "sigcont-foreign", "suspension-escalation"):
                 outcome = wait.execute_recovery_intent(*args, episode=episode, kind=kind, now=1000.0)

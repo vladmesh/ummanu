@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from ummanu.board.backend import card_client
 from ummanu.board.estimate import DEFAULT_ESTIMATE_MINUTES
+from ummanu.board.head_changes import HEAD_CHANGED_KIND, head_changes
 from ummanu.board.models import CardState
 from ummanu.board.owner_handover import OWNER, OWNER_ROLE
 from ummanu.board.roles import BOARD_ROLES, CREATE_ROLES, EDIT_ROLES, Role
@@ -470,7 +471,16 @@ def run_task_list(args: argparse.Namespace) -> int:
 
 
 def run_task_show(args: argparse.Namespace) -> int:
-    return _run_task_read(args, lambda reader: reader.show(args.ref))
+    return _run_task_read(args, lambda reader: _show_with_head_changes(reader, args.ref))
+
+
+def _show_with_head_changes(reader: TaskReader, reference: str) -> dict[str, object]:
+    """The card, and its head changes read from the card's own committed audit."""
+    from ummanu.tasks import task_audit_for
+
+    card = reader.show(reference)
+    events = task_audit_for(reader.client).events(reference, kind=HEAD_CHANGED_KIND)
+    return {**card, "head_changes": head_changes(events)}
 
 
 def run_task_repair_references_preview(args: argparse.Namespace) -> int:

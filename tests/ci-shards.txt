@@ -317,6 +317,7 @@ unit tests/test_cli_live_defaults.py
 unit tests/test_cli_errors.py
 unit tests/test_task_routing.py
 unit tests/test_task_dod_link.py
+unit tests/test_head_changes.py
 integration-board tests/test_tasks.py
 integration-board tests/test_tasks_sql_backend.py
 integration-heads tests/test_automations_dispatch.py

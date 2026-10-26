@@ -755,49 +755,96 @@ RECORD_KINDS = {
 
 
 def _timeline(items: list[dict[str, Any]]) -> str:
-    """Every card transition, oldest first, each opening on the records since the previous one."""
+    """Every card transition and head change, oldest first; a transition opens on the records since
+    the previous transition."""
     ordered = sorted(items, key=lambda item: str(item.get("occurred_at") or ""))
-    steps: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+    steps: list[str] = []
     pending: list[dict[str, Any]] = []
     for item in ordered:
+        if item.get("kind") == HEAD_CHANGED_KIND:
+            steps.append(_head_change_step(item))
+            continue
         if item.get("kind") in RECORD_KINDS and (item.get("data") or {}).get("body"):
             pending.append(item)
         if isinstance(item.get("transition"), dict) and item["transition"]:
-            steps.append((item, pending))
+            steps.append(_transition_step(item, pending))
             pending = []
     if not steps:
         return '<p class="empty">no transition has been recorded for this card yet.</p>'
-    parts = ['<ol class="timeline">']
-    for event, records in steps:
-        transition = event["transition"]
-        when = str(event.get("occurred_at") or "")
-        clock = when[11:19] if len(when) >= 19 else when
-        actor = _mapping(event.get("actor"))
-        reason = str(event.get("reason") or "")
-        short = reason if len(reason) <= 120 else reason[:117].rstrip() + "…"
-        detail = [
-            f'<p class="why">{escape(when)} · {escape(str(actor.get("role") or ""))} {escape(str(actor.get("id") or ""))} · <span class="mono">{escape(str(event.get("kind") or ""))}</span></p>',
-            (f"<div>{_long(reason, chars=300)}</div>" if reason else ""),
-        ]
-        for record in records:
-            data = record.get("data") or {}
-            who = _mapping(record.get("actor"))
-            stamp = str(record.get("occurred_at") or "")
-            marker = str(data.get("marker") or data.get("decision") or data.get("status") or "")
-            detail.append(
-                '<div class="record">'
-                f'<div class="who"><b>{escape(RECORD_KINDS[str(record.get("kind"))])}</b>'
-                f"{' · ' + escape(marker) if marker else ''} · {escape(stamp[11:19] if len(stamp) >= 19 else stamp)}"
-                f" · {escape(str(who.get('id') or who.get('role') or ''))}</div>"
-                f"{_long(data.get('body'), chars=200)}"
-                "</div>"
-            )
-        parts.append(
-            f'<li><details><summary><time title="{escape(when)}">{escape(clock)}</time>'
-            f'<span>{_state_chip(transition.get("source"))}<span class="arrow">→</span>{_state_chip(transition.get("target"))}'
-            f' <span class="why">{escape(short)}</span></span></summary>'
-            f'<div class="detail">{"".join(part for part in detail if part)}</div></details></li>'
-        )
-    parts.append("</ol>")
-    return "\n".join(parts)
+    return "\n".join(['<ol class="timeline">', *steps, "</ol>"])
 
+
+def _transition_step(event: dict[str, Any], records: list[dict[str, Any]]) -> str:
+    transition = event["transition"]
+    when = str(event.get("occurred_at") or "")
+    clock = when[11:19] if len(when) >= 19 else when
+    actor = _mapping(event.get("actor"))
+    reason = str(event.get("reason") or "")
+    short = reason if len(reason) <= 120 else reason[:117].rstrip() + "…"
+    detail = [
+        f'<p class="why">{escape(when)} · {escape(str(actor.get("role") or ""))} {escape(str(actor.get("id") or ""))} · <span class="mono">{escape(str(event.get("kind") or ""))}</span></p>',
+        (f"<div>{_long(reason, chars=300)}</div>" if reason else ""),
+    ]
+    for record in records:
+        data = record.get("data") or {}
+        who = _mapping(record.get("actor"))
+        stamp = str(record.get("occurred_at") or "")
+        marker = str(data.get("marker") or data.get("decision") or data.get("status") or "")
+        detail.append(
+            '<div class="record">'
+            f'<div class="who"><b>{escape(RECORD_KINDS[str(record.get("kind"))])}</b>'
+            f"{' · ' + escape(marker) if marker else ''} · {escape(stamp[11:19] if len(stamp) >= 19 else stamp)}"
+            f" · {escape(str(who.get('id') or who.get('role') or ''))}</div>"
+            f"{_long(data.get('body'), chars=200)}"
+            "</div>"
+        )
+    return (
+        f'<li><details><summary><time title="{escape(when)}">{escape(clock)}</time>'
+        f'<span>{_state_chip(transition.get("source"))}<span class="arrow">→</span>{_state_chip(transition.get("target"))}'
+        f' <span class="why">{escape(short)}</span></span></summary>'
+        f'<div class="detail">{"".join(part for part in detail if part)}</div></details></li>'
+    )
+
+
+#: The `head_changed` record of a card head's confirmed stop and its launched successor.
+HEAD_CHANGED_KIND = "head_changed"
+
+#: How each recorded cause of a head change reads on the timeline.
+HEAD_CHANGE_CAUSES = {
+    "stall": "confirmed stall",
+    "head_exit": "head exited",
+    "provider_failover": "provider failover",
+    "operator_stop": "manual stop",
+}
+
+
+def _head_change_step(item: dict[str, Any]) -> str:
+    """One head change: role, stop or replacement, cause, time and profile before -> after."""
+    data = _mapping(item.get("data"))
+    before = _mapping(data.get("before"))
+    after = _mapping(data.get("after"))
+    role = str(data.get("role") or "head")
+    replaced = data.get("change") == "replaced"
+    cause = str(data.get("cause") or "")
+    when = str(item.get("occurred_at") or "")
+    clock = when[11:19] if len(when) >= 19 else when
+    successor = str(after.get("profile") or "") if replaced else "no successor"
+    if replaced and after.get("profile") == before.get("profile"):
+        successor += " (same profile, new run)"
+    profiles = f"{before.get('profile') or 'unknown'} → {successor}"
+    detail = [
+        f'<p class="why">{escape(when)} · {escape(HEAD_CHANGE_CAUSES.get(cause, cause))} · <span class="mono">{escape(str(item.get("kind") or ""))}</span></p>',
+        f"<div>{_long(data.get('reason'), chars=300)}</div>",
+        f'<p class="why">run <span class="mono">{escape(str(before.get("run_id") or ""))}</span>'
+        + (f' → <span class="mono">{escape(str(after.get("run_id") or ""))}</span>' if replaced else "")
+        + "</p>",
+    ]
+    requested = str(data.get("requested") or "")
+    if requested and requested != before.get("profile"):
+        detail.append(f'<p class="why">requested profile {escape(requested)}</p>')
+    return (
+        f'<li><details><summary><time title="{escape(when)}">{escape(clock)}</time>'
+        f'<span>{_chip(f"{role} {"replaced" if replaced else "stopped"}", "warn")}'
+        f' <span class="why">{escape(HEAD_CHANGE_CAUSES.get(cause, cause))}: {escape(profiles)}</span></span></summary>'
+        f'<div class="detail">{"".join(detail)}</div></details></li>'
+    )

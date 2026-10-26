@@ -24,6 +24,7 @@ from ummanu.dispatch.claim import (
 )
 from ummanu.dispatch.cleanup import ownership_lock
 from ummanu.dispatch.gate_lifecycle import current_green_gate, run_gate as _run_gate
+from ummanu.dispatch.head_changes import settle_head_change
 from ummanu.dispatch.helpers import (
     _report_adoption_baseline,
     _review_adoption_baseline,
@@ -829,6 +830,7 @@ class DispatcherRuntime:
             snapshot = record.worker_run.snapshot or snapshot
         record.worker_run = cast(PersistedRoutingHeadSnapshot, snapshot)
         self._record_routing(ref, record, phase="worker", heads=[record.worker_run])
+        settle_head_change(self, ref, record, kind=WORKER_ROLE, successor=True)
 
     def record_review_routing(
         self,
@@ -852,6 +854,7 @@ class DispatcherRuntime:
             snapshot = record.review_run.snapshot or snapshot
         record.review_run = cast(PersistedRoutingHeadSnapshot, snapshot)
         self._record_routing(ref, record, phase="review", heads=[record.review_run])
+        settle_head_change(self, ref, record, kind=REVIEW_ROLE, successor=True)
 
     def _record_routing(
         self,
