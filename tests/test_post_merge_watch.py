@@ -7,6 +7,8 @@ whose request ids are idempotent the way the audit's are, and the observer signi
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -21,8 +23,9 @@ from unittest import mock
 from tests import source_trees
 from tests.fakes.marker_audit import MarkerAudit
 from tests.fakes.tick_board import CountingStore
-from tests.observer_identity import bind_observer
+from tests.observer_identity import as_observer, bind_observer
 from tests.production_runtime_fixtures import registered_production_runtime
+from ummanu.board import sprint_dod
 from ummanu.board.backend import record_key
 from ummanu.board.budget_candidates import is_candidate
 from ummanu.board.models import Actor, CardState, EntityKind, Event, EventKind
@@ -33,12 +36,14 @@ from ummanu.dispatch import post_merge, release_lifecycle
 from ummanu.dispatch.gate_receipt import mint_gate_receipt
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.observer import render_observer_wake_context
+from ummanu.dispatch.origin_returns import render_origin_input
 from ummanu.dispatch.state import DispatcherRecord, PersistedGateReceipt
 from ummanu.dispatch.types import HostError, MergeLanding
 from ummanu.tasks import (
     RELEASE_MERGE_KEY,
     TaskError,
     TaskWriter,
+    is_merged_release,
     is_significant_card_event,
     is_significant_observer_event,
     recorded_card_transition,
@@ -437,7 +442,9 @@ class ReleaseOpensTheWatchTests(unittest.TestCase):
         self.assertIsNone(self.accounting.terminal_effect.call_args.kwargs.get("release_merge"))
 
 
-class PostMergeLifecycleTests(unittest.TestCase):
+class _ReleaseFixture:
+    """A real writer over the in-memory board, its card released into Post-merge CI by `release`."""
+
     def prepare(self, *, managed=False, reviewed=True, path="github-pr"):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         store = CountingStore(root)
@@ -483,7 +490,7 @@ class PostMergeLifecycleTests(unittest.TestCase):
             validated_sha=SHA, base_sha=OTHER_SHA, gate_mode="github", check_set_identity="unit",
             required_checks=[{"name": "unit", "conclusion": "SUCCESS"}],
         ))
-        self.runtime, self.store, self.record = runtime, store, record
+        self.runtime, self.store, self.record, self.root = runtime, store, record, root
         self.payload, self.records = {}, {"demo-1": record}
         self.decision = "accept" if managed else ""
         return runtime
@@ -504,6 +511,8 @@ class PostMergeLifecycleTests(unittest.TestCase):
     def transitions(self):
         return [event for event in self.runtime.audit.events("demo-1") if recorded_card_transition(event)]
 
+
+class PostMergeLifecycleTests(_ReleaseFixture, unittest.TestCase):
     def test_managed_automatic_and_skipped_merges_wait_without_a_round_then_finish_exact_green(self):
         for managed, reviewed, path in ((True, True, "github-pr"), (True, False, "push"),
                                         (False, True, "push"), (False, False, "github-pr")):
@@ -724,6 +733,280 @@ class PostMergeLifecycleTests(unittest.TestCase):
         self.assertEqual(runtime.audit.events("demo-1"), before)
         self.assertEqual(runtime.reader.show("demo-1")["state"], "done")
 
+
+ISSUE = "issue:0123456789abcdef0123"
+
+
+class ManualDispositionTests(_ReleaseFixture, unittest.TestCase):
+    """`task dispose-post-merge`: the explicit human exit of a non-green Post-merge CI wait."""
+
+    def prepare(self, *, managed=True, reviewed=True, path="github-pr"):
+        runtime = super().prepare(managed=managed, reviewed=reviewed, path=path)
+        rows, meta = self.store.rows, self.store.meta
+        for number, reference, values in (
+            (90, ISSUE, {"record_type": "issue", "issue_product": "shop", "issue_kind": "bug", "issue_priority": "P2"}),
+            (91, "product:shop", {"record_type": "product", "product_id": "shop", "product_projects": '["alpha"]'}),
+            (92, "issue:other-product", {"record_type": "issue", "issue_product": "other", "issue_kind": "bug",
+                                         "issue_priority": "P2"}),
+            (93, "product:other", {"record_type": "product", "product_id": "other", "product_projects": '["beta"]'}),
+        ):
+            rows[number] = {"id": number, "reference": reference, "title": reference, "description": "",
+                            "project_id": rows[1]["project_id"], "column_id": 1, "position": number, "is_active": 1}
+            meta[number] = values
+        self.store.add(94, "ready", project="alpha")
+        self.store.add(95, "ready", project="beta")
+        self.store.add(96, "done", project="alpha", closed=True)
+        return runtime
+
+    def wait_on(self, result):
+        """Release, publish one committed `result` and return its event id; the card waits in Post-merge CI."""
+        self.release()
+        runtime = self.runtime
+        if result == "red":
+            runtime.host.check_runs = [_check("unit", conclusion="failure", run="901")]
+            runtime.host.logs = {"901": "unit\tRun tests\t##[error]boom\n"}
+        if result == "absent":
+            self.payload[post_merge.WATCHES_KEY]["demo-1"]["absent_reason"] = "no push workflow"
+        self.assertEqual(self.reconcile(4600 if result == "timeout" else 1100)[-1]["result"], result)
+        self.assertEqual(runtime.reader.show("demo-1")["state"], "post_merge_ci")
+        return self.facts()[-1]["event_id"]
+
+    def facts(self):
+        return [event for event in self.runtime.audit.events("demo-1") if event.get("payload", {}).get("post_merge_ci")]
+
+    def dispose(self, event_id, *, role="observer", action="ignore-flake", follow_up="", **kwargs):
+        return self.runtime.writer.dispose_post_merge_ci(
+            role=role, actor=role, reference="demo-1", action=action, reason=kwargs.pop("reason", "known flaky runner"),
+            result_event=event_id, follow_up=follow_up, request_id=kwargs.pop("request_id", "disposition"), **kwargs,
+        )
+
+    def test_each_action_closes_each_non_green_result_in_done_with_its_evidence(self):
+        for result in ("red", "absent", "timeout"):
+            for action, follow_up in (("ignore-flake", ""), ("issue", ISSUE), ("hotfix", "demo-94")):
+                with self.subTest(result=result, action=action):
+                    runtime = self.prepare()
+                    event_id = self.wait_on(result)
+                    before = len(self.store.comments.get(1, []))
+                    disposed = self.dispose(event_id, action=action, follow_up=follow_up)
+                    self.assertEqual((disposed["action"], disposed["replayed"]), ("disposed", False))
+                    self.assertEqual(runtime.reader.show("demo-1")["state"], "done")
+                    done = self.transitions()[-1]
+                    self.assertEqual(done["event_id"], disposed["event_id"])
+                    self.assertEqual((done["kind"], recorded_card_transition(done), owed_target(done)),
+                                     ("card.moved", ("post_merge_ci", "done"), "done"))
+                    self.assertEqual(done["actor"]["role"], "observer")
+                    self.assertEqual(done["data"]["post_merge_disposition"], {
+                        "action": action, "reason": "known flaky runner", **({"ref": follow_up} if follow_up else {})})
+                    self.assertEqual(done["data"]["post_merge_ci_event"], event_id)
+                    self.assertEqual(done["data"]["release_merge"], {"base": "main", "merge_sha": SHA, "path": "github-pr"})
+                    self.assertIn(f"Post-merge CI {result} for {SHA} stays non-green", done["reason"])
+                    self.assertEqual([fact["payload"]["post_merge_ci"]["result"] for fact in self.facts()], [result])
+                    self.assertEqual(len(self.store.comments[1]), before + 1)
+                    self.assertFalse(is_significant_card_event(done, linked_refs={"demo-1"}))
+                    self.assertFalse(is_merged_release(done))
+                    self.assertEqual((self.records, self.payload[post_merge.WATCHES_KEY]), ({}, {}))
+                    self.assertNotIn("e2e", runtime.reader.show("demo-1"))
+                    dod = sprint_dod.section(sprint_dod.new_items(["ship"]), events=runtime.audit.events("demo-1"),
+                                             cards=[{"ref": "demo-1", "dod_item": "d1", "state": "done"}])
+                    self.assertEqual(dod["in_main"], 1)
+                    self.assertEqual(dod["items"][0]["delivery"]["merged"][0]["event_id"],
+                                     self.transitions()[-2]["event_id"])
+                    events = runtime.audit.events("demo-1")
+                    text = render_origin_input(runtime.reader.show("demo-1"), {"session": "po-1"}, events,
+                                               events.index(done))
+                    self.assertIn("## Post-merge CI disposition", text)
+                    self.assertIn(f"merged {SHA} onto main", text)
+
+    def test_a_lost_reply_replays_and_a_changed_or_late_request_cannot_override(self):
+        runtime = self.prepare()
+        event_id = self.wait_on("red")
+        first = self.dispose(event_id, action="issue", follow_up=ISSUE)
+        history, comments = runtime.audit.events("demo-1"), list(self.store.comments[1])
+        replay = self.dispose(event_id, action="issue", follow_up=ISSUE)
+        self.assertEqual((replay["event_id"], replay["replayed"]), (first["event_id"], True))
+        self.assertEqual((runtime.audit.events("demo-1"), self.store.comments[1]), (history, comments))
+        for changed in ({"action": "ignore-flake", "follow_up": ""}, {"action": "issue", "follow_up": ISSUE,
+                        "reason": "another reason"}, {"action": "hotfix", "follow_up": "demo-94"},
+                        {"action": "issue", "follow_up": ISSUE, "role": "po"}):
+            with self.subTest(changed=changed), self.assertRaises(TaskError) as refused:
+                self.dispose(event_id, **changed)
+            self.assertEqual(refused.exception.code, "request_conflict")
+        with self.assertRaises(TaskError) as late:
+            self.dispose(event_id, action="ignore-flake", request_id="late-disposition")
+        self.assertEqual(late.exception.code, "transition_forbidden")
+        self.assertEqual(runtime.audit.events("demo-1"), history)
+
+    def test_wrong_results_pending_and_wrong_follow_ups_leave_the_wait_untouched(self):
+        runtime = self.prepare()
+        self.release()
+        self.assertEqual(self.reconcile(), [])
+        writer = runtime.writer
+        cases = [("pending", {}, "validation")]
+        staged = _comment(ref="demo-1", fact={"card": "demo-1", "base": "main", "merge_sha": SHA, "result": "red"})
+        staged["event_id"], staged["request_id"] = "staged-red", "staged-red"
+        runtime.audit.stage("staged-red", staged)
+        cases.append(("staged-red", {}, "validation"))
+        for request, fact, code in (("wrong-sha", {"merge_sha": OTHER_SHA, "result": "red"}, "validation"),
+                                    ("other-card", {"card": "demo-2", "result": "red"}, "validation"),
+                                    ("other-base", {"base": "develop", "result": "timeout"}, "validation"),
+                                    ("green", {"result": "green"}, "transition_forbidden")):
+            writer.post_merge_ci(actor=runtime.owner, reference="demo-1", body=request, request_id=request,
+                                 fact={"card": "demo-1", "base": "main", "merge_sha": SHA, **fact})
+            cases.append((next(event["event_id"] for event in self.facts() if event["request_id"] == request),
+                          {}, code))
+        writer.post_merge_ci(actor=runtime.owner, reference="demo-2", body="other", request_id="demo-2-red",
+                             fact={"card": "demo-2", "base": "main", "merge_sha": SHA, "result": "red"})
+        foreign = next(event["event_id"] for event in runtime.audit.events("demo-2") if event.get("request_id") == "demo-2-red")
+        cases.append((foreign, {}, "validation"))
+        writer.post_merge_ci(actor=runtime.owner, reference="demo-1", body="red", request_id="red",
+                             fact={"card": "demo-1", "base": "main", "merge_sha": SHA, "result": "red"})
+        red = self.facts()[-1]["event_id"]
+        cases += [
+            (red, {"action": "skip"}, "validation"),
+            (red, {"reason": "  "}, "validation"),
+            (red, {"action": "issue"}, "validation"),
+            (red, {"action": "hotfix"}, "validation"),
+            (red, {"follow_up": ISSUE}, "validation"),
+            (red, {"action": "hotfix", "follow_up": "demo-1"}, "validation"),
+            (red, {"action": "issue", "follow_up": "issue:other-product"}, "validation"),
+            (red, {"action": "issue", "follow_up": "demo-94"}, "validation"),
+            (red, {"action": "issue", "follow_up": "issue:missing"}, "not_found"),
+            (red, {"action": "hotfix", "follow_up": ISSUE}, "validation"),
+            (red, {"action": "hotfix", "follow_up": "demo-95"}, "validation"),
+            (red, {"action": "hotfix", "follow_up": "demo-96"}, "validation"),
+            (red, {"action": "hotfix", "follow_up": "demo-404"}, "not_found"),
+        ]
+        history = runtime.audit.events("demo-1")
+        for index, (event_id, arguments, code) in enumerate(cases):
+            with self.subTest(event_id=event_id, arguments=arguments), self.assertRaises(TaskError) as refused:
+                self.dispose(event_id, request_id=f"attempt-{index}", **arguments)
+            self.assertEqual(refused.exception.code, code)
+        self.assertEqual(runtime.reader.show("demo-1")["state"], "post_merge_ci")
+        self.assertEqual([event for event in runtime.audit.events("demo-1") if recorded_card_transition(event)],
+                         [event for event in history if recorded_card_transition(event)])
+        self.store.rows[90]["is_active"] = 0
+        with self.assertRaises(TaskError) as closed:
+            self.dispose(red, action="issue", follow_up=ISSUE, request_id="closed-issue")
+        self.assertEqual(closed.exception.code, "validation")
+
+    def test_only_the_cards_observer_or_the_po_within_its_authority_disposes(self):
+        runtime = self.prepare()
+        event_id = self.wait_on("red")
+        for role in ("worker", "reviewer", "dispatcher", "steward", "retro"):
+            with self.subTest(role=role), self.assertRaises(TaskError) as refused:
+                self.dispose(event_id, role=role)
+            self.assertEqual(refused.exception.code, "role_forbidden")
+        with as_observer("sprint:2"), self.assertRaises(TaskError) as foreign:
+            self.dispose(event_id, request_id="foreign-observer")
+        self.assertEqual(foreign.exception.code, "observer_sprint_mismatch")
+        with self.assertRaises(TaskError) as reserved:
+            self.dispose(event_id, role="po", request_id="po-without-override")
+        self.assertEqual(reserved.exception.code, "sprint_write_forbidden")
+        for role in ("po", "observer"):
+            with self.subTest(generic_move=role), self.assertRaises(TaskError) as generic:
+                runtime.writer.move(role=role, actor=role, reference="demo-1", target="done",
+                                    reason="manual completion", request_id="generic-" + role,
+                                    sprint_override=role == "po", sprint_override_reason="owner")
+            self.assertEqual(generic.exception.code, "transition_forbidden")
+            self.assertIn("task dispose-post-merge", generic.exception.message)
+        self.assertEqual(runtime.reader.show("demo-1")["state"], "post_merge_ci")
+        disposed = self.dispose(event_id, role="po", sprint_override=True, sprint_override_reason="owner accepted risk")
+        self.assertEqual(runtime.reader.show("demo-1")["state"], "done")
+        self.assertEqual(self.transitions()[-1]["actor"], {"role": "po", "id": "po"})
+        self.assertFalse(is_significant_card_event(self.transitions()[-1], linked_refs={"demo-1"}))
+        self.assertEqual(disposed["replayed"], False)
+
+    def test_the_observer_cannot_dispose_a_card_outside_its_sprint(self):
+        runtime = self.prepare(managed=False)
+        bind_observer(self, "sprint:1")
+        event_id = self.wait_on("absent")
+        with self.assertRaises(TaskError) as refused:
+            self.dispose(event_id, request_id="observer-outside-sprint")
+        self.assertEqual(refused.exception.code, "sprint_write_forbidden")
+        self.assertEqual(self.dispose(event_id, role="po")["task"]["state"], "done")
+        self.assertEqual(runtime.reader.show("demo-1")["state"], "done")
+
+    def test_a_live_watch_after_manual_settlement_finishes_publication_and_retires(self):
+        runtime = self.prepare()
+        self.release()
+        runtime.host.check_runs = [_check("unit", conclusion="failure", run="901")]
+        runtime.sprint_writer.fail_next = HostError("sprint reply unavailable")
+        self.assertEqual(self.reconcile()[0]["status"], "degraded")
+        self.payload = json.loads(json.dumps(runtime.saved[-1]))
+        watch = self.payload[post_merge.WATCHES_KEY]["demo-1"]
+        self.assertFalse(watch.get("published"))
+        disposed = self.dispose(self.facts()[-1]["event_id"], action="hotfix", follow_up="demo-94")
+        settled = runtime.writer.settle_post_merge_ci(
+            actor=runtime.owner, reference="demo-1", merge=post_merge.release_merge_marker(watch),
+            result_request_id=post_merge._request_id(watch, "card"), request_id=post_merge._request_id(watch, "await"))
+        self.assertEqual(settled["action"], "unchanged")
+        with self.assertRaises(TaskError):
+            runtime.writer.settle_post_merge_ci(
+                actor=runtime.owner, reference="demo-1", merge={**post_merge.release_merge_marker(watch), "merge_sha": OTHER_SHA},
+                result_request_id=post_merge._request_id(watch, "card"), request_id=post_merge._request_id(watch, "await"))
+        outcomes = self.reconcile()
+        self.assertEqual((outcomes[-1]["status"], outcomes[-1]["result"]), ("ok", "red"))
+        self.assertEqual(self.payload[post_merge.WATCHES_KEY], {})
+        self.assertEqual(runtime.reader.show("demo-1")["state"], "done")
+        self.assertEqual(self.transitions()[-1]["event_id"], disposed["event_id"])
+        self.assertEqual((len(self.facts()), len(runtime.sprint_writer.events)), (1, 1))
+        self.assertNotIn("e2e", runtime.reader.show("demo-1"))
+        self.assertEqual(self.reconcile(), [])
+
+    def test_the_result_wake_names_the_disposition_handle_and_the_disposition_wakes_nobody(self):
+        runtime = self.prepare()
+        event_id = self.wait_on("timeout")
+        wake = observer_wake_context(runtime.audit.events("demo-1"))
+        self.assertIn(f"--result-event {event_id}", wake)
+        self.dispose(event_id)
+        events = runtime.audit.events("demo-1")
+        released = events.index(self.transitions()[-2])
+        self.assertEqual([event["event_id"] for event in events[released:]
+                          if is_significant_card_event(event, linked_refs={"demo-1"})], [event_id])
+        runtime.host.check_runs = [_check("unit")]
+        green = post_merge.wake_facts([{**self.facts()[-1], "payload": {
+            **self.facts()[-1]["payload"], "post_merge_ci": {**self.facts()[-1]["payload"]["post_merge_ci"],
+                                                              "result": "green"}}}])
+        self.assertNotIn("dispose-post-merge", render_observer_wake_context(
+            {"ref": "sprint:1", "comments": []}, change="linked-card", post_merge=green))
+
+    def test_the_cli_drives_the_writer_and_replays_its_request_id(self):
+        from ummanu.cli import build_parser
+
+        self.prepare()
+        event_id = self.wait_on("red")
+        (self.root / "reason.md").write_text("tracked in the product backlog", encoding="utf-8")
+
+        def run(*extra):
+            argv = ["task", "dispose-post-merge", "--ref", "demo-1", "--result-event", event_id,
+                    "--data-dir", str(self.root), "--reason-file", str(self.root / "reason.md"), *extra]
+            args = build_parser().parse_args(argv)
+            out, err = io.StringIO(), io.StringIO()
+            with (mock.patch("ummanu.task_commands._instance", return_value=str(self.root)),
+                  mock.patch("ummanu.task_commands.card_client", return_value=self.store),
+                  contextlib.redirect_stdout(out), contextlib.redirect_stderr(err)):
+                code = args.handler(args)
+            return code, json.loads(out.getvalue() or err.getvalue())
+
+        code, refused = run("--role", "worker", "--actor", "worker", "--action", "issue",
+                            "--follow-up", ISSUE, "--request-id", "cli-worker")
+        self.assertEqual((code, refused["error"]["code"]), (3, "role_forbidden"))
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(["task", "dispose-post-merge", "--ref", "demo-1", "--role", "observer",
+                                       "--result-event", event_id, "--action", "issue", "--reason", "r"])
+        for replayed in (False, True):
+            code, answer = run("--role", "observer", "--actor", "observer", "--action", "issue",
+                               "--follow-up", ISSUE, "--request-id", "cli-disposition")
+            self.assertEqual((code, answer["action"], answer["replayed"]), (0, "disposed", replayed))
+        done = self.transitions()[-1]
+        self.assertEqual(done["data"]["post_merge_disposition"],
+                         {"action": "issue", "reason": "tracked in the product backlog", "ref": ISSUE})
+        self.assertEqual(sum(recorded_card_transition(event)[1] == "done" for event in self.transitions()), 1)
+
+
+def observer_wake_context(events):
+    return render_observer_wake_context({"ref": "sprint:1", "comments": []}, change="linked-card",
+                                        post_merge=post_merge.wake_facts(events))
 
 class ResolutionTests(unittest.TestCase):
     def setUp(self) -> None:

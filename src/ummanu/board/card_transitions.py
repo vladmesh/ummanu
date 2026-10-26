@@ -37,6 +37,9 @@ DISPATCHER_STAGES: frozenset[CardState] = frozenset(
 #: Roles whose exits out of Assessment require a recorded decision.
 DECISION_BOUND_ROLES: frozenset[Role] = frozenset({Role.DISPATCHER})
 
+#: Held only for `TaskWriter.dispose_post_merge_ci`; `task move` refuses every Post-merge CI exit.
+_POST_MERGE_DISPOSITION: frozenset[CardTransitionKey] = frozenset({(CardState.POST_MERGE_CI, CardState.DONE)})
+
 # The one role authority registry; lifecycle declarations remain in ``board.transitions``.
 CARD_TRANSITIONS: dict[Role, frozenset[CardTransitionKey]] = {
     Role.PO: frozenset(
@@ -45,7 +48,7 @@ CARD_TRANSITIONS: dict[Role, frozenset[CardTransitionKey]] = {
         for target in _CARD_STATES
         if (source, target) in TRANSITIONS[EntityKind.CARD] and target not in DISPATCHER_STAGES
         and source is not CardState.POST_MERGE_CI
-    ),
+    ) | _POST_MERGE_DISPOSITION,
     Role.DISPATCHER: frozenset(
         {
             (CardState.READY, CardState.IN_PROGRESS),
@@ -88,7 +91,7 @@ CARD_TRANSITIONS: dict[Role, frozenset[CardTransitionKey]] = {
         and source is not CardState.ASSESSMENT
         and source is not CardState.POST_MERGE_CI
         and target not in DISPATCHER_STAGES
-    ),
+    ) | _POST_MERGE_DISPOSITION,
     Role.WORKER: frozenset(),
     Role.REVIEWER: frozenset(),
     Role.RETRO: frozenset(),

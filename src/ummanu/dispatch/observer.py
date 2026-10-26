@@ -2955,7 +2955,14 @@ def render_observer_wake_context(
             "A worker round went stale. Record one `Stale round decision:` comment on its card "
             "(continue, partial or reslice) with a reason:\n\n" + "\n\n".join(stale) + "\n\n" + changed
         )
-    facts = [render_fact(fact) for fact in post_merge or [] if isinstance(fact, dict)]
+    results = [fact for fact in post_merge or [] if isinstance(fact, dict)]
+    facts = [render_fact(fact) for fact in results]
+    facts += [
+        f"{fact.get('card')} stays in Post-merge CI until you close this result: `ummanu task dispose-post-merge "
+        f"--ref {fact.get('card')} --role observer --result-event {fact.get('event_id')} --action "
+        "ignore-flake|issue|hotfix [--follow-up <issue or hotfix ref>] --reason <why>`."
+        for fact in results if fact.get("result") != "green" and fact.get("event_id")
+    ]
     if facts:
         changed = (
             "A release's post-merge CI on the integration base has answered. Decide the next step "

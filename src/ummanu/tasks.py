@@ -160,6 +160,7 @@ from ummanu.board.task_protocol.rows import (
     PO_SESSION_KEY as PO_SESSION_KEY,
     POST_MERGE_CI_KEY as POST_MERGE_CI_KEY,
     POST_MERGE_CI_RESULTS as POST_MERGE_CI_RESULTS,
+    POST_MERGE_DISPOSITION_KEY,
     REJECTED_CANDIDATE_KEY,
     RELEASE_MERGE_KEY as RELEASE_MERGE_KEY,
     RUNTIME_TAILS as RUNTIME_TAILS,
@@ -2533,7 +2534,8 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         source = task["state"]
         _check_execution_record(task)
         if source == "post_merge_ci" or (target == "post_merge_ci" and source != "assessment"):
-            raise TaskError("transition_forbidden", "the post-merge watch owns this transition", 3)
+            raise TaskError("transition_forbidden", "the post-merge watch owns this transition; a non-green "
+                            "result is closed only by `task dispose-post-merge`", 3)
         if target == "post_merge_ci":
             if task.get("type") != "code" or release_merge is None:
                 raise TaskError("transition_forbidden", "Post-merge CI requires a code release merge", 3)
@@ -2704,6 +2706,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         terminal_taxonomy: dict[str, Any] | None = None,
         release_merge: dict[str, Any] | None = None,
         post_merge_ci_event: str | None = None,
+        post_merge_disposition: dict[str, str] | None = None,
         wait_outcome: str | None = None,
         po_session: str | None = None,
         rejected_candidate: dict[str, Any] | None = None,
@@ -2751,6 +2754,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                             ),
                             **({RELEASE_MERGE_KEY: dict(release_merge)} if release_merge is not None else {}),
                             **({"post_merge_ci_event": post_merge_ci_event} if post_merge_ci_event else {}),
+                            **({POST_MERGE_DISPOSITION_KEY: post_merge_disposition} if post_merge_disposition else {}),
                             # A wait card's outcome, and a dependent it Blocks: never a budget charge.
                             **({WAIT_OUTCOME_KEY: wait_outcome} if wait_outcome else {}),
                             # The PO session whose turn completed the card (`complete`).

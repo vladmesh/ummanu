@@ -107,7 +107,8 @@ Blocked, Done`.
 `post_merge_ci` (Post-merge CI) is a persisted Card state for a merged card waiting on its exact
 merge commit's CI. The board store, `task show`, `task list --state` and the board and read views
 carry it. A real code merge enters it through the release writer, with no claim or worker round.
-Only the [post-merge watch](#post-merge-ci) can finish it on committed exact green CI evidence.
+Only the [post-merge watch](#post-merge-ci) can finish it on committed exact green CI evidence; a
+committed non-green result ends only by an explicit [manual disposition](#manual-disposition).
 Releases that merge nothing retain their supported Done path.
 
 A code report:done enters CI before the mechanical gate runs. Pending checks and transport retries
@@ -156,6 +157,8 @@ admits a move through its one entry point, `admit_card_move`.
 - The PO moves a card along declared lifecycle edges to Issues, Ready, Blocked or Done;
   CI and Review allow Ready or Blocked.
 - The observer has the PO's edges except any out of Assessment. A move out of Blocked needs a reason.
+- The PO and the observer hold Post-merge CI → Done only for `task dispose-post-merge`
+  ([manual disposition](#manual-disposition)); `task move` refuses every exit from Post-merge CI.
 - The steward moves a card from Ready, In progress, Validate, CI, Review or Assessment to Blocked and from Blocked
   to Done, each with a reason, from Blocked to Ready, and its own report card from In progress to Done.
 - Workers, reviewers and retro move nothing.
@@ -2679,9 +2682,43 @@ remains evidence; a Blocked or reworked card receives no completion authority fr
 
 Pending stays Post-merge CI. Red, absent and timeout publish their result and leave the card there
 without a worker, automatic rework, hotfix or ignore. No role can use generic `task move` to enter
-or leave this wait, except the admitted dispatcher release into it. Manual non-green disposition
-has no supported handle. A published non-green watch can be dropped; the state and immutable result
-remain the unfinished obligation.
+or leave this wait, except the admitted dispatcher release into it. A published non-green watch can
+be dropped; the state and immutable result remain the unfinished obligation until a
+[manual disposition](#manual-disposition). The wake for a non-green result names that command with
+the result's event id.
+
+##### Manual disposition
+
+```text
+task dispose-post-merge --ref <card> --role observer|po --result-event <result event_id>
+  --action ignore-flake|issue|hotfix [--follow-up <ref>] --reason <why>|--reason-file <file>
+  --request-id <id> [--sprint-override --sprint-override-reason-file <file>]
+```
+
+`TaskWriter.dispose_post_merge_ci` is its one writer. Under the card's reference lock and board
+transaction it requires the card in Post-merge CI with its latest transition the dispatcher's
+release carrying `release_merge`, and `--result-event` naming that card's committed dispatcher
+`post_merge_ci` fact for the same card, base and full merge SHA with result `red`, `absent` or
+`timeout`. A pending, staged, missing, green, foreign or other-merge result is refused, as is a card
+outside Post-merge CI. `ignore-flake` accepts the risk and names no follow-up. `issue` names an open
+Issue whose product owns the card's project; `hotfix` names an open code card of the same project,
+never the card itself. The handle creates, starts or reruns nothing: the issue or hotfix exists
+first, and a hotfix runs as an ordinary card.
+
+Only the observer of the card's open sprint, or the PO within the sprint guard (an override with a
+reason for a reserved project), may dispose; every other role is refused. The disposition moves
+Post-merge CI → Done as `card.moved` by that role. Its reason states the non-green result, merge
+SHA, action and follow-up, and its data keeps `release_merge`, `post_merge_ci_event` and
+`post_merge_disposition` (`action`, `reason`, `ref`). It writes no green fact and repeats no accept,
+review, merge or cleanup. Done here means a person closed the obligation, not that CI passed:
+after-merge e2e is never queued from it and DoD delivery still reads the dispatcher's release merge.
+
+The request id binds the payload. A repeat with the same id and payload returns the committed result
+without another transition, comment or origin return; another action, reason, result, follow-up or
+actor under that id is refused with `request_conflict`, and a later request finds the card Done and
+is refused. A live watch reading the Done keeps publishing its result, sees the disposition bound to
+that result and merge, and retires without moving the card back. The disposition is not an observer
+wake; a delegated card returns its result to its origin once, from this Done.
 
 A live watch from a released Done is settled by the same owner against its committed merge marker.
 Unresolved and non-green obligations move Done → Post-merge CI with `card.moved`; an exact committed

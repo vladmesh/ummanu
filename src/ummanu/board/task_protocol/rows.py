@@ -411,6 +411,10 @@ REJECTED_CANDIDATE_KEY = "rejected_candidate"
 #: The payload key of the one card event that records a post-merge CI result.
 POST_MERGE_CI_KEY = "post_merge_ci"
 POST_MERGE_CI_RESULTS = ("green", "red", "absent", "timeout")
+#: The data key of the manual Done that closes a non-green Post-merge CI obligation: action, reason, follow-up ref.
+POST_MERGE_DISPOSITION_KEY = "post_merge_disposition"
+#: `issue` and `hotfix` hand the remaining work to an existing ref; `ignore-flake` accepts the risk.
+POST_MERGE_DISPOSITIONS = ("ignore-flake", "issue", "hotfix")
 
 
 #: The payload key of the one card event that records a stale worker round.

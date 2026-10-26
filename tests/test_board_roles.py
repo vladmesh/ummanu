@@ -133,14 +133,16 @@ class DispatcherStageTests(unittest.TestCase):
                 with self.subTest(role=role, source=source), self.assertRaises(CardTransitionForbidden):
                     card_transition(role, source, CardState.DONE)
 
-    def test_only_dispatcher_release_completion_and_live_watch_upgrade_hold_post_merge_edges(self) -> None:
+    def test_post_merge_edges_belong_to_the_release_the_watch_and_the_manual_disposition(self) -> None:
         allowed = {(CardState.ASSESSMENT, CardState.POST_MERGE_CI),
                    (CardState.DONE, CardState.POST_MERGE_CI), (CardState.POST_MERGE_CI, CardState.DONE)}
+        disposition = (CardState.POST_MERGE_CI, CardState.DONE)
         for role, other in product(Role, set(CardState) - {CardState.POST_MERGE_CI}):
             for source, target in ((other, CardState.POST_MERGE_CI), (CardState.POST_MERGE_CI, other)):
                 with self.subTest(role=role.value, source=source.value, target=target.value):
                     self.assertEqual(self.holds(role, source, target),
-                                     role is Role.DISPATCHER and (source, target) in allowed)
+                                     (role is Role.DISPATCHER and (source, target) in allowed)
+                                     or (role in {Role.PO, Role.OBSERVER} and (source, target) == disposition))
 
     def test_the_steward_stops_a_card_under_review_only_with_a_reason(self) -> None:
         def facts(reason: str) -> CardMoveFacts:

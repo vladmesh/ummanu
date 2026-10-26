@@ -1,4 +1,4 @@
-"""Dispatcher control writes for wait, PO, e2e, routing and accounting."""
+"""Dispatcher control writes for wait, PO, e2e, routing and accounting, and post-merge CI settlement."""
 
 from __future__ import annotations
 
@@ -26,6 +26,8 @@ from ummanu.board.models import Actor, CardState, EntityKind, Event, EventKind
 from ummanu.board.outcome_round_context import OutcomeRoundContext
 from ummanu.board.roles import Role
 from ummanu.board.task_protocol.rows import (
+    POST_MERGE_DISPOSITION_KEY,
+    POST_MERGE_DISPOSITIONS,
     RELEASE_MERGE_KEY,
     _charge_time,
     _check_execution_record,
@@ -79,6 +81,11 @@ class DispatcherTaskWrites:
             if existing is None:
                 latest = next((event for event in reversed(events) if recorded_card_transition(event)), None)
                 stored = latest.get("data", {}).get(RELEASE_MERGE_KEY) if latest is not None else None
+                if (task["state"] == "done" and latest is not None and stored == merge and result_event is not None
+                        and latest["data"].get(POST_MERGE_DISPOSITION_KEY)
+                        and latest["data"].get("post_merge_ci_event") == result_event["event_id"]):
+                    # A committed manual disposition already closed this exact result's obligation.
+                    return {"action": "unchanged", "task": task}
                 if (task["state"] not in {"done", "post_merge_ci"}
                         or latest is None or not is_merged_release(latest) or stored != merge
                         or recorded_card_transition(latest)[1] != task["state"]):
@@ -95,6 +102,91 @@ class DispatcherTaskWrites:
             )
             return {"action": "moved", "task": self.reader.show(reference),
                     "event_id": result.event.event_id, "replayed": existing is not None}
+
+    def dispose_post_merge_ci(
+        self, *, role: str, actor: str, reference: str, action: str, reason: str, result_event: str,
+        request_id: str, follow_up: str = "", sprint_override: bool = False, sprint_override_reason: str = "",
+    ) -> dict[str, Any]:
+        """Close the current release's committed non-green Post-merge CI result in Done on one human decision.
+        The result stays non-green; the Done records action, reason, follow-up, result event and merge.
+        """
+        role = self._role(role, {Role.OBSERVER, Role.PO}, actor=actor)
+        if action not in POST_MERGE_DISPOSITIONS:
+            raise TaskError("validation", "post-merge disposition must be one of " + ", ".join(POST_MERGE_DISPOSITIONS), 2)
+        reason = self._redact_for_board(reason).strip()
+        follow_up = follow_up.strip()
+        if not reason or not result_event.strip() or not request_id.strip():
+            raise TaskError("validation", "a post-merge disposition needs a reason, result event and request id", 2)
+        if (action == "ignore-flake") == bool(follow_up):
+            raise TaskError("validation", "issue and hotfix name their follow-up ref; ignore-flake names none", 2)
+        if follow_up == reference:
+            raise TaskError("validation", "a post-merge disposition cannot follow up on its own card", 2)
+        disposition = {"action": action, "reason": reason, **({"ref": follow_up} if follow_up else {})}
+        existing = self._typed_event(request_id)
+        if existing is not None:
+            if (existing.ref != reference or existing.actor != Actor(role, actor)
+                    or existing.data.get(POST_MERGE_DISPOSITION_KEY) != disposition
+                    or existing.data.get("post_merge_ci_event") != result_event):
+                raise TaskError("request_conflict",
+                                f"request id {request_id!r} already recorded another operation or disposition", 3)
+            result = self._transition_card(
+                reference=reference, target=CardState.DONE, role=role, actor=actor, reason=existing.reason,
+                request_id=request_id, release_merge=existing.data[RELEASE_MERGE_KEY],
+                post_merge_ci_event=result_event, post_merge_disposition=disposition,
+                finish=self._transition_cleanup(self.reader.show(reference), source=str(existing.source_state or ""),
+                                                target="done", reason="", role=role),
+            )
+            return {"action": "disposed", "task": self.reader.show(reference),
+                    "event_id": result.event.event_id, "replayed": True}
+        task = self.reader.show(reference)
+        override = self._guard_sprint_write(
+            role=role, actor=actor, project=task["project"], card_sprint=str(task.get("sprint") or ""),
+            linked_sprint=None, sprint_override=sprint_override,
+            sprint_override_reason=self._redact_for_board(sprint_override_reason).strip(),
+            request_id=request_id, reference=reference,
+        )
+        if role == "observer" and not override and not self._sprint_holds_project(task["project"]):
+            raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
+        with reference_lock(self.data_dir, reference), self._mutation():
+            task = self.reader.show(reference)
+            events = self.audit.events(reference)
+            latest = next((event for event in reversed(events) if recorded_card_transition(event)), None)
+            if (task["state"] != "post_merge_ci" or latest is None or not is_merged_release(latest)
+                    or recorded_card_transition(latest)[1] != "post_merge_ci"):
+                raise TaskError("transition_forbidden", f"{reference} holds no current Post-merge CI release", 3)
+            merge = latest["data"][RELEASE_MERGE_KEY]
+            fact = next((post_merge_ci_fact(event) for event in events if event.get("event_id") == result_event), None)
+            if fact is None:
+                raise TaskError("validation", f"{result_event} is no committed post-merge CI result of {reference}", 2)
+            if (fact.get("card"), fact.get("base"), fact.get("merge_sha")) != (reference, merge["base"], merge["merge_sha"]):
+                raise TaskError("validation", "post-merge result does not match the current release merge", 2)
+            if fact["result"] == "green":
+                raise TaskError("transition_forbidden", "a green result completes through the post-merge watch", 3)
+            self._check_disposition_follow_up(task, action, follow_up)
+            text = (f"Post-merge CI {fact['result']} for {merge['merge_sha']} stays non-green; "
+                    f"{role} disposition {action}{' ' + follow_up if follow_up else ''}: {reason}")
+            result = self._transition_card(
+                reference=reference, target=CardState.DONE, role=role, actor=actor, reason=text,
+                request_id=request_id, release_merge=merge, post_merge_ci_event=result_event,
+                post_merge_disposition=disposition,
+                finish=self._transition_cleanup(task, source="post_merge_ci", target="done", reason=text, role=role),
+            )
+            return {"action": "disposed", "task": self.reader.show(reference),
+                    "event_id": result.event.event_id, "replayed": False}
+
+    def _check_disposition_follow_up(self, task: dict[str, Any], action: str, follow_up: str) -> None:
+        """An issue follow-up is an open Issue of a product owning the card's project; a hotfix is an open code card of it."""
+        if action == "issue":
+            from ummanu.product_issues import ProductIssueStore
+
+            store = ProductIssueStore(self.client, data_dir=self.data_dir, instance=self.instance_dir)
+            issue = store.show_issue(follow_up)
+            if issue["closed"] or task["project"] not in store.show_product(issue["product"])["projects"]:
+                raise TaskError("validation", f"{follow_up} is no open issue of a product owning {task['project']}", 2)
+        elif action == "hotfix":
+            card = self.reader.show(follow_up)
+            if card.get("type") != "code" or card["closed"] or card.get("project") != task["project"]:
+                raise TaskError("validation", f"{follow_up} is no open code card of project {task['project']}", 2)
 
     def record_wait_state(self, *, role: str, actor: str, reference: str, state: str) -> None:
         """The dispatcher's one write of a wait card's `wait_state`. A state field, not
