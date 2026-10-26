@@ -18,6 +18,7 @@ TASK_STATE_BY_COLUMN = {
     "CI": "ci",
     "Review": "review",
     "Assessment": "assessment",
+    "Post-merge CI": "post_merge_ci",
     "Blocked": "blocked",
     "Done": "done",
 }

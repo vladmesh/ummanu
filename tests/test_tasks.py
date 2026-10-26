@@ -62,7 +62,9 @@ from ummanu.tasks import (
 from ummanu.web.page_card import _timeline
 from ummanu.webproto.journal import CommittedAudit
 
-CARD_STATES = ("issues", "ready", "in_progress", "validate", "ci", "review", "assessment", "blocked", "done")
+CARD_STATES = (
+    "issues", "ready", "in_progress", "validate", "ci", "review", "assessment", "post_merge_ci", "blocked", "done"
+)
 
 
 # The sprint the assessment fixture's card belongs to.
@@ -3391,7 +3393,10 @@ class AssessmentStateTests(CardStoreCase):
         self.assertEqual(_STATE_BY_COLUMN["Assessment"], "assessment")
         self.assertEqual(
             list(_STATE_BY_COLUMN),
-            ["Issues", "Ready", "In progress", "Validate", "CI", "Review", "Assessment", "Blocked", "Done"],
+            [
+                "Issues", "Ready", "In progress", "Validate", "CI", "Review", "Assessment", "Post-merge CI",
+                "Blocked", "Done",
+            ],
         )
 
     def test_ci_review_and_validate_round_trip_with_metadata_and_transition_history(self) -> None:
@@ -3422,6 +3427,31 @@ class AssessmentStateTests(CardStoreCase):
                     self.assertEqual(recorded_card_transition(self.writer.audit.event(request)), (source, target))
                     self.assertEqual(shown["comments"][:len(before["comments"])], before["comments"])
                     source = target
+
+    def test_a_stored_post_merge_ci_card_reads_back_whole_through_show_list_and_filter(self) -> None:
+        self.client.move(12, "in_progress")
+        self.client.save_metadata(12, claim="worker", round_id="round-fixture")
+        self.writer.move(
+            role="dispatcher", actor="d", reference="ummanu-468", target="blocked",
+            reason="history before the wait", request_id="history-before-wait",
+        )
+        self.client.save_metadata(12, sprint_ref=SPRINT, dod_item="d2")
+        self.client.move(12, "post_merge_ci")
+        reader = TaskReader(self.client)
+        before = reader.show("ummanu-468")
+
+        self.assertEqual(before["state"], "post_merge_ci")
+        self.assertEqual((before["ref"], before["sprint"], before["dod_item"]), ("ummanu-468", SPRINT, "d2"))
+        self.assertEqual(before["claim"]["worker"], "worker")
+        self.assertEqual(
+            recorded_card_transition(self.writer.audit.event("history-before-wait")), ("in_progress", "blocked")
+        )
+        self.assertEqual(
+            [card["ref"] for card in reader.list(states={"post_merge_ci"}, project="ummanu", sprint=SPRINT)],
+            ["ummanu-468"],
+        )
+        self.assertNotIn("ummanu-468", [card["ref"] for card in reader.list(states={"assessment", "done"})])
+        self.assertEqual(reader.show("ummanu-468"), before)
 
     def test_ci_review_recovery_uses_writer_cleanup_and_audit(self) -> None:
         for source in ("ci", "review"):
@@ -3535,7 +3565,7 @@ class AssessmentStateTests(CardStoreCase):
         }
 
         def authorized(role: str, source: str, target: str) -> bool:
-            if source == target:
+            if source == target or "post_merge_ci" in {source, target}:
                 return False
             if role in {"po", "observer"} and target in {"in_progress", "validate", "ci", "review", "assessment"}:
                 return False

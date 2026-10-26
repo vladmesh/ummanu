@@ -116,6 +116,7 @@ class ColumnTests(unittest.TestCase):
                 row("u-6", "assessment"),
                 row("u-7", "ci"),
                 row("u-8", "review"),
+                row("u-9", "post_merge_ci"),
             ]
         )
         status, html = page(client)
@@ -131,6 +132,7 @@ class ColumnTests(unittest.TestCase):
                 ("CI", "1"),
                 ("Review", "1"),
                 ("Assessment", "1"),
+                ("Post-merge CI", "1"),
                 ("Blocked", "0"),
                 ("Done", "1"),
             ],
@@ -151,6 +153,7 @@ class ColumnTests(unittest.TestCase):
                 ("CI", True),
                 ("Review", True),
                 ("Assessment", True),
+                ("Post-merge CI", True),
                 ("Blocked", True),
                 ("Done", False),
             ],
@@ -423,7 +426,7 @@ class FilterTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual({count for _title, count, _tiles in columns(html)}, {"0"})
-        self.assertEqual(len(columns(html)), 9)
+        self.assertEqual(len(columns(html)), 10)
         form = self.form(html)
         self.assertIn("showing: project gone<b> · sprint sprint:404", text(form))
         self.assertNotIn("<b>", form)

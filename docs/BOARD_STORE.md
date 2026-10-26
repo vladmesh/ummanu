@@ -339,7 +339,8 @@ CREATE TABLE tasks (
                      CHECK (review IS NULL OR review IN ('required','skipped')),  -- NULL reads as required
     live_impact    boolean NOT NULL DEFAULT false,    -- research only (task_live_impact_is_research_only)
     state          text NOT NULL CONSTRAINT task_state_in_vocabulary CHECK (state IN
-                     ('issues','ready','in_progress','validate','ci','review','assessment','blocked','done')),
+                     ('issues','ready','in_progress','validate','ci','review','assessment','post_merge_ci',
+                      'blocked','done')),
     archived       boolean NOT NULL DEFAULT false,
     position       integer NOT NULL DEFAULT 0,
     sprint_ref     text REFERENCES sprints(ref) DEFERRABLE INITIALLY DEFERRED,
@@ -823,6 +824,7 @@ Revisions (`src/ummanu/board/migrations/versions/`):
 | `0035_issue_reopened` | additive: `issue.reopened` in the `board_events.kind` CHECK, restated under the name `board_event_kind_in_vocabulary`; no column; the downgrade restores `0001`'s constraint and fails while an `issue.reopened` event exists |
 | `0036_card_ci_review` | additive: widens `tasks.state` to include `ci` and `review` under `task_state_in_vocabulary`; keeps Validate and all existing rows and round metadata; downgrade refuses while either new state exists |
 | `0037_stage_budget_candidates` | additive: rebuilds the budget candidate index with CI/Review restart sources; changes no card rows or lifecycle vocabulary |
+| `0038_card_post_merge_ci` | additive: widens `task_state_in_vocabulary` with `post_merge_ci`; changes no existing row, claim, round or event; downgrade refuses while a card is in that state |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column

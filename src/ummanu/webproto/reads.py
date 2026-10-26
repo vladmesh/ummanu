@@ -50,7 +50,7 @@ from ummanu.webproto.section import read_source
 SCHEMA_VERSION = 1
 
 #: The states a card is "current" in: what the pipeline carries now (not `issues` backlog or `done`).
-CURRENT_TASK_STATES = ("ready", "in_progress", "validate", "ci", "review", "assessment", "blocked")
+CURRENT_TASK_STATES = ("ready", "in_progress", "validate", "ci", "review", "assessment", "post_merge_ci", "blocked")
 
 #: How many of a card's most recent events its task snapshot opens with.
 TASK_SNAPSHOT_EVENTS = 20

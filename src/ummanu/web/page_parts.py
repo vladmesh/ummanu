@@ -594,6 +594,9 @@ def _close_form(ref: str) -> str:
 #: The states a move may name, in the layer's spelling.
 MOVE_TARGETS = ("ready", "in_progress", "done", "blocked", "issues", "validate", "ci", "review", "assessment")
 
+#: States no role may move a card out of, so their card page offers no move.
+UNMOVABLE_STATES = frozenset({"post_merge_ci"})
+
 
 def _entries(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []

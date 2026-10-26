@@ -47,6 +47,7 @@ SEED_COLUMNS = [
     {"id": 8, "title": "CI"},
     {"id": 9, "title": "Review"},
     {"id": 7, "title": "Assessment"},
+    {"id": 10, "title": "Post-merge CI"},
     {"id": 5, "title": "Blocked"},
     {"id": 6, "title": "Done"},
 ]
@@ -59,6 +60,7 @@ SEED_COLUMN = {
     "ci": 8,
     "review": 9,
     "assessment": 7,
+    "post_merge_ci": 10,
     "blocked": 5,
     "done": 6,
 }

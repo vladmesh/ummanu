@@ -227,6 +227,21 @@ class CardOriginTests(PageFixture):
         self.assertEqual(self.po.calls, [])
 
 
+class CardMoveActionTests(PageFixture):
+    def test_a_post_merge_ci_card_offers_no_move_and_keeps_its_comment(self) -> None:
+        html = self.card_page(snapshot(state="post_merge_ci"))
+        self.assertNotIn('data-kind="move"', html)
+        self.assertNotIn("/move", html)
+        self.assertIn('data-kind="comment"', html)
+
+    def test_a_card_in_an_earlier_state_still_offers_the_move(self) -> None:
+        for state in ("assessment", "blocked", "done"):
+            with self.subTest(state=state):
+                html = self.card_page(snapshot(state=state))
+                self.assertIn('data-action="/api/tasks/ummanu-520/move"', html)
+                self.assertIn('data-kind="comment"', html)
+
+
 class CardWaitTests(PageFixture):
     def test_each_target_kind(self) -> None:
         cases = {
