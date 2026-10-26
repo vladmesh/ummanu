@@ -1160,7 +1160,7 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
         except ProductionActivationRefused as exc:
             # The push landed; only the production activation was refused.
             exc.landing = MergeLanding(
-                sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci
+                sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci, branch=branch
             )
             raise
         except HostError:
@@ -1170,7 +1170,7 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
                 raise
         with tick_stage("release_runtime"):
             self._require_production_runtime("release-after")
-        return MergeLanding(sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci)
+        return MergeLanding(sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci, branch=branch)
 
     def _advance_checkout(self, repo: Path, ref: str) -> None:
         """Fast-forward a project checkout to `ref` after a merge."""
@@ -1193,6 +1193,14 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
                 ).stdout.strip()
             except HostError:
                 return ""
+
+    def landed_merge_commit(self, record: DispatcherRecord, *, path: str, branch: str) -> str:
+        """Read the commit of an already landed release without repeating its merge."""
+        if path == "github-pr":
+            return self._landed_pr_commit(record, branch)
+        if path == "push":
+            return self._pushed_branch_head(record, branch)
+        raise HostError(f"unknown release merge path: {path}")
 
     def _landed_pr_commit(self, record: DispatcherRecord, branch: str) -> str:
         """The merge commit a pull request merge just landed, or "" when it cannot be read yet."""

@@ -6,6 +6,7 @@ import contextlib
 import copy
 
 from tests.fakes.board import MemoryAudit
+from ummanu.board.audit_contract import require_claim
 
 
 class MarkerAudit(MemoryAudit):
@@ -30,3 +31,7 @@ class MarkerAudit(MemoryAudit):
 
     def marker_comment_lock(self, reference):
         return contextlib.nullcontext()
+
+    @staticmethod
+    def require_claim(existing, **fields):
+        require_claim(existing, **fields)

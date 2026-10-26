@@ -508,7 +508,9 @@ class RefusedReleaseKeepsTheCheckoutTests(ReleaseFixture, unittest.TestCase):
         # The server's own cause survives the rollback and the unlock.
         self.assertIn('relation "release_canary_missing" does not exist', facts["cause"])
         self.assertNotIn("current transaction is aborted", str(refused))
-        self.assertEqual(facts["remote_merge"], {"sha": target, "base": "main", "path": "push", "branch": ""})
+        self.assertEqual(facts["remote_merge"], {
+            "sha": target, "base": "main", "path": "push", "branch": "pipeline/ummanu-510",
+        })
         # What succeeded is committed; the failing revision left nothing, and no lock or session stays.
         self.assertEqual(self.version(config), [CANARY])
         self.assertTrue(self.column(config, "tasks", "release_canary"))

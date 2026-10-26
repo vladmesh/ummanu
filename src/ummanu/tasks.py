@@ -2425,9 +2425,9 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         if terminal_taxonomy is not None and not isinstance(terminal_taxonomy, dict):
             raise TaskError("validation", "terminal taxonomy must be an object", 2)
         if release_merge is not None and (
-            not isinstance(release_merge, dict) or role != "dispatcher" or target != "done"
+            not isinstance(release_merge, dict) or role != "dispatcher" or target not in {"done", "post_merge_ci"}
         ):
-            raise TaskError("validation", "a release merge marker belongs on a dispatcher Done", 2)
+            raise TaskError("validation", "a release merge marker belongs on a dispatcher release", 2)
         if release_claim and (role != "dispatcher" or target != "blocked"):
             raise TaskError("validation", "a claim release belongs on a dispatcher Blocked", 2)
         if rejected_candidate is not None and role != "dispatcher":
@@ -2532,6 +2532,14 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         )
         source = task["state"]
         _check_execution_record(task)
+        if source == "post_merge_ci" or (target == "post_merge_ci" and source != "assessment"):
+            raise TaskError("transition_forbidden", "the post-merge watch owns this transition", 3)
+        if target == "post_merge_ci":
+            if task.get("type") != "code" or release_merge is None:
+                raise TaskError("transition_forbidden", "Post-merge CI requires a code release merge", 3)
+            self._check_release_merge(release_merge)
+        elif release_merge is not None:
+            raise TaskError("transition_forbidden", "a merged release must enter Post-merge CI", 3)
         if role == "observer" and not override_payload and not self._sprint_holds_project(task["project"]):
             raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
         try:
@@ -2672,7 +2680,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             clear_mark = {**clear_mark, OWNER_ANSWER: ""}
         if clear_mark:
             owner_events.settle_required_wait(str(task.get("ref") or ""), to=self.client)
-        if target in {"ready", "done"} or release_claim:
+        if target in {"ready", "done", "post_merge_ci"} or release_claim:
             self.client.call(
                 "saveTaskMetadata", task_id=_task_number(task), values={**_READY_RESET_METADATA, **clear_mark}
             )
@@ -2695,6 +2703,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         outcome_owed: dict[str, Any] | None = None,
         terminal_taxonomy: dict[str, Any] | None = None,
         release_merge: dict[str, Any] | None = None,
+        post_merge_ci_event: str | None = None,
         wait_outcome: str | None = None,
         po_session: str | None = None,
         rejected_candidate: dict[str, Any] | None = None,
@@ -2741,6 +2750,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                                 else {}
                             ),
                             **({RELEASE_MERGE_KEY: dict(release_merge)} if release_merge is not None else {}),
+                            **({"post_merge_ci_event": post_merge_ci_event} if post_merge_ci_event else {}),
                             # A wait card's outcome, and a dependent it Blocks: never a budget charge.
                             **({WAIT_OUTCOME_KEY: wait_outcome} if wait_outcome else {}),
                             # The PO session whose turn completed the card (`complete`).
@@ -2786,10 +2796,11 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         decision_kind = TaskDecision(decision) if decision else None
         if decision_kind is not None and source != "assessment":
             raise TaskError("validation", "a decision is only carried by a move out of Assessment", 2)
-        if decision_kind is not None and DECISION_TARGETS[decision_kind].value != target:
+        if decision_kind is not None and target not in DECISION_TARGETS[decision_kind]:
             raise TaskError(
                 "decision_mismatch",
-                f"a {decision} decision moves the card to {DECISION_TARGETS[decision_kind].value}, not {target}",
+                f"a {decision} decision moves the card to "
+                f"{', '.join(sorted(DECISION_TARGETS[decision_kind]))}, not {target}",
                 3,
             )
         if (
@@ -2797,7 +2808,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             and target in DECIDED_TARGETS
             and decision_kind is None
             and role in DECISION_BOUND_ROLES
-            and not (target == "done" and self._automatic_code_release(task, automatic_release))
+            and not (target in {"done", "post_merge_ci"} and self._automatic_code_release(task, automatic_release))
         ):
             raise TaskError(
                 "decision_required",

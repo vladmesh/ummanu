@@ -300,7 +300,7 @@ def _delivery(
         ref = event.get("ref")
         if ref not in basis["cards"]:
             continue
-        if is_merged_release(event) and (card_transition_of(event) or (None, None))[1] == "done":
+        if is_merged_release(event) and (card_transition_of(event) or (None, None))[1] in {"done", "post_merge_ci"}:
             fact = event["data"][RELEASE_MERGE_KEY]
             if fact.get("merge_sha") and fact.get("base") == "main":
                 releases[ref] = {"ref": ref, "event_id": event["event_id"], **fact}

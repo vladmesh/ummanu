@@ -26,11 +26,17 @@
     "TaskWriter._finish_pending_cleanup": "88b50521a055baa4f083d457bfc5d1c7e17084198cf89e25c45d88373ddb4ade",
     "TaskWriter._check_archivable": "0f7ab8f86444ad64dffff6b1bc1bbfe451c383eef202a2045387b1dc71e0139f",
     "TaskWriter._check_dispatcher_archivable": "3171143899321f345337102adbe15ec2937bef876e9d01270685354a028da05e",
-    "TaskWriter.move": "38f16b32bc4da2841aa592e4800d4d8d8bce3aa5d6a411aa4ed626744337e99b",
-    "TaskWriter._check_decision": "da4e9349f1617a529480ed0c789ddc82566bdfa48ccc4b1011154a3fa7bb3836",
-    "TaskWriter._reset_transition_metadata": "7530b5613003cb0f9fd469cb9372735dc748a5a87faefe38fbd5d54a8f163233"
+    "TaskWriter.move": "dc365e3346f78f4687bde6dd31edca6b50a04b9b70f6e926af8749529a2a4848",
+    "TaskWriter._check_decision": "d9041ddae4c967bd6173f2bd43c1310d020c87bbad74a987e4ee8496bc2ab9f6",
+    "TaskWriter._reset_transition_metadata": "3c6ea7737d5ded163069941bab750ba831eedc0e8a17ab23149c104340f27c75",
+    "TaskWriter._transition_card": "dd5cff44456c9d27c43a9fe00c401d86844557a66c6ac1e2a16e11ff6e6ef54f",
+    "TaskWriter._finish_pending_transition": "55359e35006cb557fdd65afec918d89da97953364cb77bcb0dcd686d1e6b1f29",
+    "is_merged_release": "16340605e63a9788bb226111906af6a74b6d744dc1a40da952f350db20dfe7dd",
+    "is_significant_card_event": "3d30ec0699cf32c02c84fba674ec651ad35cf5c653d2a2196eba236030fe88a7"
   },
   "definitions": {
+    "TaskWriter.settle_post_merge_ci": {"owner": "src/ummanu/board/task_protocol/dispatcher.py", "line": 52, "baseline_ast_sha256": "97288ed0ca6bc3af5b91b6fb67fc6e0cadb5e9e52c11cf107ed563f30a2e8cbc"},
+    "TaskWriter._check_release_merge": {"owner": "src/ummanu/board/task_protocol/dispatcher.py", "line": 46, "baseline_ast_sha256": "e7b69ffe4cc6c7cfaec62a68427e370192b7f6ecc55ebeb3cedb058a55366a70"},
     "TaskWriter.head_changed": {"owner": "src/ummanu/board/task_protocol/dispatcher.py", "line": 629, "baseline_ast_sha256": "9a1c7a94b9e241f6cadc962cef80c8f3091c921242a4e9affd024d6d15e90bae"},
     "TaskWriter.bind_dod": {"owner": "src/ummanu/board/task_protocol/sprint_guard.py", "line": 30, "baseline_ast_sha256": "4bb6e7b64a1f11f1b97fece88f16b5b120f50977c52928c230314b44fa44ee78"},
     "MASQUERADE": {"old_owner": "src/ummanu/tasks.py", "old_line": 148, "owner": "src/ummanu/board/task_protocol/rows.py", "line": 39, "baseline_ast_sha256": "b63627f81c5ab1f58911aac0beb27e14dbd386a6aa28a19c44305cb5e33f8f60", "signature": null, "returns": null, "decorators": [], "old_globals": {"Role": "ummanu.board.roles.Role"}, "owning_globals": {"Role": "ummanu.board.roles.Role"}, "lexical_imports": [], "consumers": ["src/ummanu/board/task_protocol/rows.py:46:global"]},

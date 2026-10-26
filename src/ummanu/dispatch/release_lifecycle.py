@@ -461,14 +461,9 @@ def release_effect(
     decision: str = "",
     verdict: str = "green",
 ) -> dict[str, Any]:
-    """Merge the reviewed branch, tear the round down and move the card to Done.
+    """Release the admitted candidate and tear down its round.
 
-    This is the only way a card reaches Done, so the completion evidence check sits here: every
-    release, automatic or decided, first taken or replayed after a lost tick, goes through it.
-
-    A merge that landed a commit opens the post-merge CI watch and saves it before anything else
-    happens, so a crash between the merge and Done cannot lose it; the Done then carries the
-    `release_merge` marker, and the observer is woken on the watch's result instead of on the move.
+    A landed merge enters Post-merge CI with a durable watch; other releases finish Done.
     """
     ref = task["ref"]
     if record.activation_recovery is not None:
@@ -486,10 +481,20 @@ def release_effect(
         automatic_release=automatic_release,
     )
     release_merge: dict[str, Any] | None = None
+    watch = post_merge.watches(payload).get(ref)
+    release = {"attempt_id": record.attempt_id, "attempt_round": record.attempt_round,
+               "report_generation": record.report_generation}
+    if watch is not None and (not record.attempt_id or watch.get("release") != release):
+        return block_merge_path(
+            runtime, task, record, records, payload, attempt_id,
+            blocked_reason="implementation", action="post-merge-watch-release-mismatch",
+            reason="post-merge watch release identity does not match this candidate round; old merge cannot authorize release",
+            step=step, outcome="post-merge watch release identity mismatch",
+        )
     if has_candidate(task):
         try:
             # Its runtime fence, delivery, refresh and landed-commit read are each their own stage.
-            landing = runtime.host.complete_green(task, record)
+            landing = None if watch is not None else runtime.host.complete_green(task, record)
         except ProductionActivationRefused as exc:
             # Delivered to the remote, not activated on production: its own reason, one operation
             # for the PO, and the card Blocked (secretary-1824).
@@ -514,9 +519,18 @@ def release_effect(
             )
         if isinstance(landing, MergeLanding):
             with tick_stage("release_landed"):
-                watch = post_merge.open_watch(task, payload, landing, workspace=record.workspace)
+                watch = post_merge.open_watch(task, payload, landing, workspace=record.workspace, release=release)
                 runtime.save_records(payload, records)
-                release_merge = post_merge.release_merge_marker(watch)
+        if watch is not None:
+            if not watch.get("merge_sha"):
+                watch["merge_sha"] = runtime.host.landed_merge_commit(
+                    record, path=watch["merge_path"], branch=watch["branch"]
+                )
+                runtime.save_records(payload, records)
+            if not watch.get("merge_sha"):
+                return {"status": "pending", "step": step, "pilot_ref": ref,
+                        "reason": "landed merge commit is not readable yet"}
+            release_merge = post_merge.release_merge_marker(watch)
     blocked = require_completion_evidence(runtime, task, record, records, payload, attempt_id, step=step)
     if blocked is not None:
         return blocked
@@ -541,10 +555,11 @@ def release_effect(
             outcome="release cleanup refused",
         )
     with tick_stage("release_terminal"):
+        target = "post_merge_ci" if release_merge is not None else "done"
         attempt_accounting.terminal_effect(runtime,
             task,
             record,
-            target="done",
+            target=target,
             reason=move_reason,
             decision=decision,
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-green", ref),
@@ -556,7 +571,7 @@ def release_effect(
         )
         records.pop(ref, None)
         runtime.save_records(payload, records)
-    return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "done",
+    return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": target,
             **({"cleanup": cleanup_receipt} if isinstance(cleanup_receipt, dict) else {})}
 
 

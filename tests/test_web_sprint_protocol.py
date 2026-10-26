@@ -1448,6 +1448,16 @@ class WaitingSourceIsolationTests(SprintWorkFixture):
         waiting = self._entry(self.reads().sprint_list(), reference)["waiting"]
         self.assertIn("cut the next card", waiting["reason"])
 
+    def test_post_merge_ci_waits_without_a_worker_or_live_watch(self) -> None:
+        reference, card = self._sprint_on_a_card()
+        self._move(card, "Post-merge CI")
+        self._production({}, {})
+        for operation, work in self._work(reference):
+            with self.subTest(operation=operation):
+                self.assertEqual(work["waiting"]["state"], sprint_reads_module.WAITING_WAITING)
+                self.assertIn("waiting for exact green merge CI completion", work["waiting"]["reason"])
+                self.assertEqual(work["waiting"]["card"], card)
+
     def test_an_active_column_with_no_record_still_prefers_what_the_board_settled(self) -> None:
         """The dispatcher answered, and holds no record: the column is the better answer where it
         has one, and the bare "no record" is what is left where it does not."""

@@ -201,6 +201,15 @@ TRANSITIONS: dict[EntityKind, dict[TransitionKey, Transition]] = {
         (CardState.ASSESSMENT, CardState.DONE): Transition(
             CardState.ASSESSMENT, CardState.DONE, EventKind.CARD_RELEASED
         ),
+        (CardState.ASSESSMENT, CardState.POST_MERGE_CI): Transition(
+            CardState.ASSESSMENT, CardState.POST_MERGE_CI, EventKind.CARD_RELEASED
+        ),
+        (CardState.POST_MERGE_CI, CardState.DONE): Transition(
+            CardState.POST_MERGE_CI, CardState.DONE, EventKind.CARD_MOVED
+        ),
+        (CardState.DONE, CardState.POST_MERGE_CI): Transition(
+            CardState.DONE, CardState.POST_MERGE_CI, EventKind.CARD_MOVED
+        ),
         (CardState.ASSESSMENT, CardState.BLOCKED): Transition(
             CardState.ASSESSMENT, CardState.BLOCKED, EventKind.CARD_BLOCKED
         ),

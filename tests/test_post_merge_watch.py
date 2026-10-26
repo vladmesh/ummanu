@@ -19,19 +19,29 @@ from typing import Any
 from unittest import mock
 
 from tests import source_trees
+from tests.fakes.marker_audit import MarkerAudit
+from tests.fakes.tick_board import CountingStore
+from tests.observer_identity import bind_observer
 from tests.production_runtime_fixtures import registered_production_runtime
-from ummanu.board.models import Actor, CardState, EntityKind, Event
+from ummanu.board.backend import record_key
+from ummanu.board.budget_candidates import is_candidate
+from ummanu.board.models import Actor, CardState, EntityKind, Event, EventKind
+from ummanu.board.observer_routing import AUTOMATIC_ASSESSMENT_REASON
+from ummanu.board.origin_outbox import owed_target
 from ummanu.board.transitions import transition_for
 from ummanu.dispatch import post_merge, release_lifecycle
+from ummanu.dispatch.gate_receipt import mint_gate_receipt
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.observer import render_observer_wake_context
-from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.state import DispatcherRecord, PersistedGateReceipt
 from ummanu.dispatch.types import HostError, MergeLanding
 from ummanu.tasks import (
     RELEASE_MERGE_KEY,
     TaskError,
+    TaskWriter,
     is_significant_card_event,
     is_significant_observer_event,
+    recorded_card_transition,
 )
 
 REF = "ummanu-9001"
@@ -80,6 +90,12 @@ class _Writer:
         self.events: list[dict] = []
         self.by_request: dict[str, dict] = {}
         self.fail_next: BaseException | None = None
+
+    def settle_post_merge_ci(self, *, actor, reference, merge, result_request_id, request_id, complete=False):
+        if complete:
+            event = self.by_request[result_request_id]
+            assert event["payload"]["post_merge_ci"]["result"] == "green"
+        return {"action": "unchanged"}
 
     def post_merge_ci(self, *, actor, reference, body, fact, request_id) -> dict:
         if self.fail_next is not None:
@@ -234,6 +250,7 @@ def _runtime(host: Any) -> SimpleNamespace:
         catalog=host.catalog,
         owner="ummanu-dispatcher",
         writer=_Writer(),
+        reader=SimpleNamespace(show=lambda ref: {"state": "done"}),
         sprint_writer=_SprintWriter(),
         saved=[],
     )
@@ -255,7 +272,8 @@ PUSH_MAIN = "on:\n  pull_request:\n  push:\n    branches: [main]\njobs: {}\n"
 def _watch(payload: dict, *, ci: str = "github", workspace: str = "", sha: str = SHA, now: float = 1000.0) -> dict:
     landing = MergeLanding(sha=sha, base="main", path="github-pr", ci=ci, branch=BRANCH)
     task = {"ref": REF, "project": "sample", "sprint": SPRINT}
-    return post_merge.open_watch(task, payload, landing, workspace=workspace, now=now)
+    return post_merge.open_watch(task, payload, landing, workspace=workspace,
+                                release={"attempt_id": "attempt-1", "attempt_round": 1, "report_generation": 1}, now=now)
 
 
 def _significant(events: list[dict]) -> list[dict]:
@@ -330,12 +348,12 @@ class ReleaseOpensTheWatchTests(unittest.TestCase):
             step="assessment", move_reason="Observer decision: accept.", decision="accept",
         )
 
-    def test_a_merge_records_a_durable_watch_before_done_and_marks_the_done(self) -> None:
+    def test_a_merge_records_a_durable_watch_before_pending_and_marks_the_release(self) -> None:
         self.runtime.host.complete_green.return_value = MergeLanding(
             sha=SHA, base="main", path="github-pr", ci="github", branch=BRANCH
         )
         outcome = self.release({"ref": REF, "type": "code", "project": "sample", "sprint": SPRINT})
-        self.assertEqual(outcome["to"], "done")
+        self.assertEqual(outcome["to"], "post_merge_ci")
         watch = self.payload[post_merge.WATCHES_KEY][REF]
         self.assertEqual(
             {key: watch[key] for key in ("ref", "project", "base", "merge_sha", "sprint", "absent_reason")},
@@ -346,6 +364,7 @@ class ReleaseOpensTheWatchTests(unittest.TestCase):
         self.assertEqual(self.order[0], f"save:{REF}")
         self.assertLess(self.order.index(f"save:{REF}"), self.order.index("done"))
         kwargs = self.accounting.terminal_effect.call_args.kwargs
+        self.assertEqual((kwargs["target"], kwargs["terminal_state"]), ("post_merge_ci", "done"))
         self.assertEqual(kwargs["release_merge"], {"base": "main", "merge_sha": SHA, "path": "github-pr"})
         self.assertNotIn(REF, self.records)
 
@@ -369,12 +388,341 @@ class ReleaseOpensTheWatchTests(unittest.TestCase):
         self.assertEqual(self.payload.get(post_merge.WATCHES_KEY) or {}, {})
         self.assertIsNone(self.accounting.terminal_effect.call_args.kwargs.get("release_merge"))
 
+    def test_an_unreadable_landed_commit_retains_the_round_without_repeating_the_merge(self) -> None:
+        self.runtime.host.complete_green.return_value = MergeLanding(
+            sha="", base="main", path="github-pr", ci="github", branch=BRANCH
+        )
+        self.runtime.host.landed_merge_commit.return_value = ""
+        task = {"ref": REF, "type": "code", "project": "sample", "sprint": SPRINT}
+        self.assertEqual(self.release(task)["status"], "pending")
+        self.runtime.host.teardown.assert_not_called()
+        self.assertIn(REF, self.records)
+        self.assertEqual(post_merge.reconcile_post_merge_watches(self.runtime, self.payload, self.records), [])
+        self.runtime.writer.post_merge_ci.assert_not_called()
+        self.runtime.host.landed_merge_commit.return_value = SHA
+        self.assertEqual(self.release(task)["to"], "post_merge_ci")
+        self.runtime.host.complete_green.assert_called_once()
+        self.runtime.host.teardown.assert_called_once()
+        self.runtime.host.landed_merge_commit.assert_called_with(self.record, path="github-pr", branch=BRANCH)
+
+    def test_another_or_unproven_release_cannot_reuse_a_landed_watch(self) -> None:
+        for changed in ({"attempt_id": "another-attempt"}, {"attempt_round": 1},
+                        {"report_generation": 1}, {"legacy": True}):
+            with self.subTest(changed=changed):
+                self.payload, self.records = {}, {REF: self.record}
+                self.runtime.host.complete_green.return_value = MergeLanding(SHA, "main", "github-pr", "github", BRANCH)
+                task = {"ref": REF, "type": "code", "project": "sample", "sprint": SPRINT}
+                self.release(task)
+                watch = self.payload[post_merge.WATCHES_KEY][REF]
+                if "legacy" in changed:
+                    del watch["release"]
+                else:
+                    watch["release"].update(changed)
+                before = json.loads(json.dumps(watch))
+                self.runtime.host.reset_mock()
+                self.accounting.reset_mock()
+                outcome = self.release(task)
+                self.assertEqual((outcome["status"], outcome["reason"]),
+                                 ("blocked", "post-merge watch release identity mismatch"))
+                self.runtime.host.complete_green.assert_not_called()
+                self.runtime.host.teardown.assert_not_called()
+                self.assertEqual(self.accounting.terminal_effect.call_args.kwargs["target"], "blocked")
+                self.assertEqual(self.payload[post_merge.WATCHES_KEY][REF], before)
+
     def test_a_research_release_opens_no_watch(self) -> None:
         with mock.patch.object(release_lifecycle, "missing_completion_evidence", return_value=""):
             self.release({"ref": REF, "type": "research", "project": "sample", "sprint": SPRINT})
         self.runtime.host.complete_green.assert_not_called()
         self.assertEqual(self.payload.get(post_merge.WATCHES_KEY) or {}, {})
         self.assertIsNone(self.accounting.terminal_effect.call_args.kwargs.get("release_merge"))
+
+
+class PostMergeLifecycleTests(unittest.TestCase):
+    def prepare(self, *, managed=False, reviewed=True, path="github-pr"):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        store = CountingStore(root)
+        store.meta[1].update(sprint_ref="sprint:1" if managed else "", review="required" if reviewed else "skipped",
+                             claim='{"worker":"worker"}', resolved_head="worker", resolved_review_head="reviewer")
+        store.meta[record_key("sprint", "sprint:1")]["sprint_reservations"] = '["alpha"]'
+        audit = MarkerAudit(root)
+        self.enterContext(mock.patch("ummanu.board.sql_audit.SqlTaskAudit", return_value=audit))
+        runtime = _runtime(_GhHost(check_runs=[_check("unit", status="in_progress", conclusion=None)]))
+        runtime.writer = TaskWriter(store, data_dir=root)
+        runtime.reader = runtime.writer.reader
+        runtime.audit = audit
+        for role, kind, marker in (("worker", "card.reported", "report:done"),
+                                   ("reviewer", "card.verdict", "review:green")):
+            if role == "reviewer" and not reviewed:
+                continue
+            audit.append(role, Event(role, EventKind(kind), EntityKind.CARD, "demo-1", Actor(role, role),
+                                     "candidate evidence", datetime.now(UTC), data={
+                                         "marker": marker, "body": "candidate evidence", "status": marker.split(":")[1],
+                                     }).to_record(role))
+        writer = runtime.writer
+        writer.move(role="dispatcher", actor=runtime.owner, reference="demo-1", target="ci",
+                    reason="report ready", request_id="ci")
+        if reviewed:
+            writer.move(role="dispatcher", actor=runtime.owner, reference="demo-1", target="review",
+                        reason="gate green", request_id="review")
+        writer.move(role="dispatcher", actor=runtime.owner, reference="demo-1", target="assessment",
+                    reason="wait for observer" if managed else AUTOMATIC_ASSESSMENT_REASON, request_id="park")
+        if managed:
+            bind_observer(self, "sprint:1")
+            writer.decide(role="observer", actor="observer", reference="demo-1", kind="accept",
+                          body="release the candidate", request_id="accept")
+        runtime.host.complete_green = mock.Mock(return_value=MergeLanding(SHA, "main", path, "github", BRANCH))
+        runtime.host.teardown = mock.Mock(return_value={"status": "ok"})
+        runtime.host.mode = "real"
+        runtime.host.head_commit = mock.Mock(return_value=SHA)
+        runtime.host.stop = mock.Mock()
+        record = DispatcherRecord.from_json({
+            "worker": "worker", "head": "worker", "review_head": "reviewer" if reviewed else "", "state": "assessment",
+            "attempt_id": "release-round", "workspace": _workspace(root, PUSH_MAIN), "gate_state": "green",
+        })
+        record.gate_attestation = PersistedGateReceipt.from_value(mint_gate_receipt(
+            validated_sha=SHA, base_sha=OTHER_SHA, gate_mode="github", check_set_identity="unit",
+            required_checks=[{"name": "unit", "conclusion": "SUCCESS"}],
+        ))
+        self.runtime, self.store, self.record = runtime, store, record
+        self.payload, self.records = {}, {"demo-1": record}
+        self.decision = "accept" if managed else ""
+        return runtime
+
+    def release(self):
+        return release_lifecycle.release_effect(
+            self.runtime, self.runtime.reader.show("demo-1"), self.record, self.records, self.payload, "tick",
+            step="assessment", move_reason="release admitted", decision=self.decision,
+            verdict="green" if self.record.review_head else "missing",
+        )
+
+    def reconcile(self, now=1100):
+        watch = self.payload[post_merge.WATCHES_KEY].get("demo-1")
+        if watch is not None:
+            watch["started_at"] = 1000
+        return post_merge.reconcile_post_merge_watches(self.runtime, self.payload, self.records, now=now)
+
+    def transitions(self):
+        return [event for event in self.runtime.audit.events("demo-1") if recorded_card_transition(event)]
+
+    def test_managed_automatic_and_skipped_merges_wait_without_a_round_then_finish_exact_green(self):
+        for managed, reviewed, path in ((True, True, "github-pr"), (True, False, "push"),
+                                        (False, True, "push"), (False, False, "github-pr")):
+            with self.subTest(managed=managed, reviewed=reviewed, path=path):
+                runtime = self.prepare(managed=managed, reviewed=reviewed, path=path)
+                self.assertEqual(self.release()["to"], "post_merge_ci")
+                task = runtime.reader.show("demo-1")
+                self.assertIsNone(task["claim"]["worker"])
+                self.assertNotIn("demo-1", [card["ref"] for card in runtime.reader.capacity_peers()])
+                self.assertEqual(self.records, {})
+                release = self.transitions()[-1]
+                self.assertEqual((release["kind"], owed_target(release)), ("card.released", ""))
+                self.assertEqual(release["data"]["release_merge"], {"base": "main", "merge_sha": SHA, "path": path})
+                self.assertFalse(is_significant_card_event(release, linked_refs={"demo-1"}))
+                self.assertFalse(is_candidate(release))
+                self.assertEqual(self.reconcile(), [])
+                self.assertEqual(runtime.reader.show("demo-1")["state"], "post_merge_ci")
+                runtime.host.check_runs = [_check("unit")]
+                if managed:
+                    self.store.meta[record_key("sprint", "sprint:1")]["sprint_status"] = "stopped"
+                self.assertEqual(self.reconcile()[0]["result"], "green")
+                done = self.transitions()[-1]
+                self.assertEqual((done["kind"], owed_target(done)), ("card.moved", "done"))
+                self.assertEqual(runtime.reader.show("demo-1")["state"], "done")
+                facts = [event for event in runtime.audit.events("demo-1") if event.get("kind") == "commented"]
+                self.assertEqual(done["data"]["post_merge_ci_event"], facts[-1]["event_id"])
+                self.assertFalse(is_significant_card_event(done, linked_refs={"demo-1"}))
+                self.assertEqual(self.payload[post_merge.WATCHES_KEY], {})
+                runtime.host.complete_green.assert_called_once()
+                runtime.host.teardown.assert_called_once()
+
+    def test_manual_moves_and_uncommitted_or_wrong_green_cannot_complete(self):
+        runtime = self.prepare()
+        self.release()
+        for role in ("po", "observer", "steward", "worker", "reviewer", "dispatcher"):
+            with self.subTest(role=role), self.assertRaises(TaskError):
+                runtime.writer.move(role=role, actor=role, reference="demo-1", target="done",
+                                    reason="manual completion", request_id="manual-" + role)
+        watch = self.payload[post_merge.WATCHES_KEY]["demo-1"]
+        arguments = {"actor": runtime.owner, "reference": "demo-1", "merge": post_merge.release_merge_marker(watch),
+                     "result_request_id": "result", "request_id": "finish", "complete": True}
+        with self.assertRaises(TaskError):
+            runtime.writer.settle_post_merge_ci(**arguments)
+        staged = _comment(ref="demo-1", fact={"card": "demo-1", "base": "main", "merge_sha": SHA, "result": "green"})
+        staged["request_id"] = "result"
+        runtime.audit.stage("result", staged)
+        with self.assertRaises(TaskError):
+            runtime.writer.settle_post_merge_ci(**arguments)
+        runtime.audit.discard("result")
+        runtime.writer.post_merge_ci(actor=runtime.owner, reference="demo-1", body="wrong merge",
+                                     fact={"card": "demo-1", "base": "main", "merge_sha": OTHER_SHA, "result": "green"},
+                                     request_id="result")
+        with self.assertRaises(TaskError):
+            runtime.writer.settle_post_merge_ci(**arguments)
+        self.assertEqual(runtime.reader.show("demo-1")["state"], "post_merge_ci")
+
+    def test_non_green_results_remain_pending_with_actionable_single_wakes(self):
+        for result in ("red", "absent", "timeout"):
+            with self.subTest(result=result):
+                runtime = self.prepare(managed=True)
+                self.release()
+                if result == "red":
+                    runtime.host.check_runs = [_check("unit", conclusion="failure", run="901")]
+                    runtime.host.logs = {"901": "unit\tRun tests\t##[error]boom\n"}
+                if result == "absent":
+                    self.payload[post_merge.WATCHES_KEY]["demo-1"]["absent_reason"] = "no push workflow"
+                outcomes = self.reconcile(4600 if result == "timeout" else 1100)
+                self.assertEqual(outcomes[-1]["result"], result)
+                self.assertEqual(runtime.reader.show("demo-1")["state"], "post_merge_ci")
+                wakes = [event for event in runtime.audit.events("demo-1")
+                         if event.get("kind") == "commented" and is_significant_card_event(event, linked_refs={"demo-1"})]
+                self.assertEqual(len(wakes), 1)
+                fact = wakes[0]["payload"]["post_merge_ci"]
+                if result == "red":
+                    self.assertEqual((fact["failed_checks"], fact["classification"]), (["unit"], "product"))
+                    self.assertIn("901", fact["runs"][0]["url"])
+                else:
+                    self.assertTrue(fact["reason"])
+                self.assertEqual(len(runtime.sprint_writer.events), 1)
+                self.assertEqual(self.records, {})
+
+    def test_published_green_survives_finalizer_failure_and_effect_reply_loss(self):
+        for after_effect in (False, True):
+            with self.subTest(after_effect=after_effect):
+                runtime = self.prepare()
+                self.release()
+                runtime.host.check_runs = [_check("unit")]
+                settle = runtime.writer.settle_post_merge_ci
+
+                def interrupted(*, after_effect=after_effect, settle=settle, **kwargs):
+                    if after_effect:
+                        settle(**kwargs)
+                    raise OSError("finalizer reply lost")
+
+                with (mock.patch.object(runtime.writer, "settle_post_merge_ci", side_effect=interrupted),
+                      mock.patch("ummanu.dispatch.e2e_after_merge.enqueue") as enqueue):
+                    self.assertEqual(self.reconcile()[0]["status"], "degraded")
+                    enqueue.assert_not_called()
+                self.payload = json.loads(json.dumps(runtime.saved[-1]))
+                self.assertTrue(self.payload[post_merge.WATCHES_KEY]["demo-1"]["published"])
+                self.assertEqual(self.reconcile()[0]["result"], "green")
+                self.assertEqual(runtime.reader.show("demo-1")["state"], "done")
+                self.assertEqual(sum(recorded_card_transition(event)[1] == "done" for event in self.transitions()), 1)
+                self.assertEqual(sum(event.get("kind") == "commented" for event in runtime.audit.events("demo-1")), 1)
+                watch = runtime.saved[-2][post_merge.WATCHES_KEY]["demo-1"]
+                with self.assertRaises(TaskError):
+                    runtime.writer.settle_post_merge_ci(
+                        actor=runtime.owner, reference="demo-1", merge={**post_merge.release_merge_marker(watch), "path": "push"},
+                        result_request_id=post_merge._request_id(watch, "card"),
+                        request_id=post_merge._request_id(watch, "done"), complete=True,
+                    )
+
+    def test_failed_teardown_watch_cannot_release_a_reworked_candidate(self):
+        runtime = self.prepare(managed=True)
+        runtime.host.teardown.side_effect = HostError("cleanup provenance refused")
+        self.assertEqual(self.release()["status"], "blocked")
+        self.assertEqual(runtime.reader.show("demo-1")["state"], "blocked")
+        self.assertEqual(self.records, {})
+        watch = self.payload[post_merge.WATCHES_KEY]["demo-1"]
+        watch["result"] = {"card": "demo-1", "base": "main", "merge_sha": SHA, "result": "green"}
+        post_merge.publish(runtime, watch)
+        watch["published"] = True
+
+        runtime.writer.decide(role="observer", actor="observer", reference="demo-1", kind="rework",
+                              body="implement another candidate", request_id="rework")
+        runtime.writer.move(role="dispatcher", actor=runtime.owner, reference="demo-1", target="in_progress",
+                            reason="rework candidate", request_id="resume")
+        self.record = DispatcherRecord.from_json({**self.record.to_json(), "attempt_id": "rework-round",
+                                                 "attempt_round": 2, "report_generation": 2})
+        self.records = {"demo-1": self.record}
+        self.record.gate_attestation = PersistedGateReceipt.from_value(mint_gate_receipt(
+            validated_sha=OTHER_SHA, base_sha=SHA, gate_mode="github", check_set_identity="unit",
+            required_checks=[{"name": "unit", "conclusion": "SUCCESS"}],
+        ))
+        runtime.host.head_commit.return_value = OTHER_SHA
+        for state in ("ci", "review", "assessment"):
+            runtime.writer.move(role="dispatcher", actor=runtime.owner, reference="demo-1", target=state,
+                                reason="reviewed rework", request_id="rework-" + state)
+        runtime.writer.decide(role="observer", actor="observer", reference="demo-1", kind="accept",
+                              body="release new candidate", request_id="accept-rework")
+        runtime.host.teardown.side_effect = None
+        runtime.host.complete_green.reset_mock()
+        runtime.host.teardown.reset_mock()
+        self.assertEqual(self.release()["reason"], "post-merge watch release identity mismatch")
+        self.assertEqual(runtime.reader.show("demo-1")["state"], "blocked")
+        runtime.host.complete_green.assert_not_called()
+        runtime.host.teardown.assert_not_called()
+        self.assertEqual(self.payload[post_merge.WATCHES_KEY]["demo-1"], watch)
+        with (mock.patch.object(runtime.writer, "settle_post_merge_ci") as settle,
+              mock.patch("ummanu.dispatch.e2e_after_merge.enqueue") as enqueue):
+            self.assertEqual(self.reconcile()[0]["action"], "post-merge-ci-release-superseded")
+            self.assertEqual(self.reconcile(), [])
+            settle.assert_not_called()
+            enqueue.assert_not_called()
+        self.assertFalse(any(recorded_card_transition(event)[1] in {"post_merge_ci", "done"}
+                             for event in self.transitions()))
+        facts = [event["payload"]["post_merge_ci"] for event in runtime.audit.events("demo-1")
+                 if event.get("payload", {}).get("post_merge_ci")]
+        self.assertEqual(facts, [watch["result"]])
+
+    def test_blocked_release_publishes_once_after_pending_and_publication_retry_without_settling(self):
+        runtime = self.prepare(managed=True)
+        runtime.host.teardown.side_effect = HostError("cleanup provenance refused")
+        self.release()
+        with (mock.patch.object(runtime.writer, "settle_post_merge_ci") as settle,
+              mock.patch("ummanu.dispatch.e2e_after_merge.enqueue") as enqueue):
+            self.assertEqual(self.reconcile(), [])
+            runtime.host.check_runs = [_check("unit")]
+            runtime.sprint_writer.fail_next = HostError("sprint reply unavailable")
+            self.assertEqual(self.reconcile()[0]["status"], "degraded")
+            self.payload = json.loads(json.dumps(runtime.saved[-1]))
+            self.assertEqual(self.reconcile()[0]["action"], "post-merge-ci-release-superseded")
+            self.assertEqual(self.reconcile(), [])
+            settle.assert_not_called()
+            enqueue.assert_not_called()
+        self.assertEqual(runtime.reader.show("demo-1")["state"], "blocked")
+        facts = [event for event in runtime.audit.events("demo-1") if event.get("payload", {}).get("post_merge_ci")]
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0]["payload"]["post_merge_ci"]["merge_sha"], SHA)
+        self.assertEqual(len(runtime.sprint_writer.events), 1)
+        self.assertEqual(self.payload[post_merge.WATCHES_KEY], {})
+
+    def test_live_released_done_watch_upgrade_uses_committed_result_without_rewriting_history(self):
+        for recorded, published in ((None, False), ("green", False), ("green", True), ("red", False), ("red", True)):
+            with self.subTest(recorded=recorded, published=published):
+                runtime = self.prepare()
+                self.release()
+                release = self.transitions()[-1]
+                request = release["request_id"]
+                runtime.audit._committed[request]["transition"]["target"] = "done"
+                self.store.rows[1]["column_id"] = 7
+                before = runtime.audit.events("demo-1")
+                watch = self.payload[post_merge.WATCHES_KEY]["demo-1"]
+                del watch["release"]
+                if recorded is not None:
+                    watch["result"] = {"card": "demo-1", "base": "main", "merge_sha": SHA, "result": recorded}
+                if published:
+                    post_merge.publish(runtime, watch)
+                    watch["published"] = True
+                self.reconcile()
+                self.assertEqual(runtime.audit.events("demo-1")[:len(before)], before)
+                self.assertEqual(runtime.reader.show("demo-1")["state"], "done" if recorded == "green" else "post_merge_ci")
+                if recorded == "green":
+                    self.assertEqual(len(self.transitions()), 4)
+                elif recorded is None:
+                    runtime.host.check_runs = [_check("unit")]
+                    self.reconcile()
+                    self.assertEqual(runtime.reader.show("demo-1")["state"], "done")
+                runtime.host.complete_green.assert_called_once()
+                runtime.host.teardown.assert_called_once()
+
+    def test_historical_done_without_a_live_watch_keeps_its_history(self):
+        runtime = self.prepare()
+        runtime.host.complete_green.return_value = None
+        self.assertEqual(self.release()["to"], "done")
+        before = runtime.audit.events("demo-1")
+        self.assertEqual(self.reconcile(), [])
+        self.assertEqual(runtime.audit.events("demo-1"), before)
+        self.assertEqual(runtime.reader.show("demo-1")["state"], "done")
 
 
 class ResolutionTests(unittest.TestCase):
@@ -449,6 +797,7 @@ class ResolutionTests(unittest.TestCase):
                 self.assertIn("not a plain Done", text)
                 self.assertIn(f"classification: {classification}", text)
                 self.assertIn(fact["runs"][0]["id"], text)
+                self.assertIn(f"https://github.com/{REPO}/commit/{SHA}", text)
 
     def test_absent_is_decided_at_once_without_asking_github(self) -> None:
         table = [
@@ -782,7 +1131,7 @@ class MergePathLandingTests(unittest.TestCase):
     def test_every_merge_path_reports_what_landed(self) -> None:
         table = [
             ("github pull request", "github", False, MergeLanding(SHA, "main", "github-pr", "github", BRANCH)),
-            ("local-CI push", "local", False, MergeLanding(OTHER_SHA, "main", "push", "local")),
+            ("local-CI push", "local", False, MergeLanding(OTHER_SHA, "main", "push", "local", BRANCH)),
         ]
         for label, ci, instance, expected in table:
             with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
@@ -793,6 +1142,16 @@ class MergePathLandingTests(unittest.TestCase):
                 record = SimpleNamespace(workspace=str(root / "ws"))
                 landing = host.complete_green({"ref": REF, "project": "sample", "workspace": {}}, record)
                 self.assertEqual(landing, expected)
+
+    def test_landed_commit_recovery_only_reads_the_original_merge_identity(self) -> None:
+        for path, expected, command in (
+            ("github-pr", SHA, ["gh", "pr", "view", BRANCH, "--json", "mergeCommit", "-q", ".mergeCommit.oid"]),
+            ("push", OTHER_SHA, ["git", "-C", "/candidate", "rev-parse", BRANCH]),
+        ):
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as tmp:
+                host = _MergeHost(Path(tmp), ci="github" if path == "github-pr" else "local")
+                actual = host.landed_merge_commit(SimpleNamespace(workspace="/candidate"), path=path, branch=BRANCH)
+                self.assertEqual((actual, host.runs), (expected, [command]))
 
     def test_a_card_on_the_live_root_lands_nothing(self) -> None:
         """The instance-repository landing was the third path; it is gone, on either CI mode."""

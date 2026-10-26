@@ -23,7 +23,7 @@ old CON-12 audit phrase “event-id without payload” is stale: `_event_id` inc
 payload. The three other `MemoryAudit` classes in `po_handover_fakes.py`, `test_web_codex_reset.py`
 and `test_tick_board_snapshot.py` have different interfaces and policies and remain independent.
 
-`tests.fakes.marker_audit.MarkerAudit` extends `MemoryAudit` with a board directory, generic staging and kind-filtered reads
+`tests.fakes.marker_audit.MarkerAudit` extends `MemoryAudit` with a board directory, generic staging, shared claim validation and kind-filtered reads
 for in-process writer tests. Marker locks are no-ops and pending marker arbitration returns no owner;
 it supplies no SQL persistence, concurrent marker reservation or cross-process locking evidence.
 

@@ -646,7 +646,7 @@ class SprintSections(SectionSet):
           once handed over;
         * the dispatcher: `working`, degraded `blocked`, or no record. A column alone is not evidence a
           head runs (`docs/OPERATIONS.md`);
-        * a Done card whose post-merge CI the dispatcher still watches: `waiting` on that CI;
+        * a merged card whose post-merge CI the dispatcher still watches: `waiting` on that CI;
         * otherwise the board's `waiting` for Ready, Issues or Done.
 
         `card` is the sprint's current card, or null.
@@ -721,7 +721,7 @@ class SprintSections(SectionSet):
             since = f" since {sources.isoformat(float(started))}" if isinstance(started, int | float) else ""
             return {
                 "state": WAITING_WAITING,
-                "reason": f"{current} is done: the dispatcher is watching the CI of {sha} on {base}{since}",
+                "reason": f"{current} is merged: the dispatcher is watching the CI of {sha} on {base}{since}",
                 "card": current,
             }
 
@@ -1815,6 +1815,8 @@ def _board_wait(reference: str, card: dict[str, Any] | None) -> tuple[str, str] 
             WAITING_WAITING,
             f"{reference} is done: the sprint is waiting for its observer to cut the next card",
         )
+    if state == "post_merge_ci":
+        return WAITING_WAITING, f"{reference} stands in Post-merge CI: waiting for exact green merge CI completion"
     return None
 
 

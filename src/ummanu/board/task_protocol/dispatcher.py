@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import re
 import uuid
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
@@ -21,21 +22,79 @@ from ummanu.board.completion_evidence import is_wait
 from ummanu.board.events import AnalyticsOutcomeConflict, BoardEventCanon
 from ummanu.board.head_changes import HEAD_CHANGED_KIND, head_change_payload
 from ummanu.board.legacy_codec import text as _text
-from ummanu.board.models import Actor, EntityKind, Event, EventKind
+from ummanu.board.models import Actor, CardState, EntityKind, Event, EventKind
 from ummanu.board.outcome_round_context import OutcomeRoundContext
 from ummanu.board.roles import Role
 from ummanu.board.task_protocol.rows import (
+    RELEASE_MERGE_KEY,
     _charge_time,
     _check_execution_record,
     _now,
     _task_number,
+    is_merged_release,
     post_merge_ci_fact,
+    recorded_card_transition,
 )
 from ummanu.board.task_routing import ROUTING_PHASE_VALUES, RoutingPhase, TaskType
+from ummanu.dispatch.ownership import reference_lock
 from ummanu.kernel.errors import TaskError as TaskError
 
 
 class DispatcherTaskWrites:
+
+    @staticmethod
+    def _check_release_merge(merge: dict[str, Any]) -> None:
+        """A release identifies the integration base, full landed commit and merge path."""
+        if (not re.fullmatch(r"[0-9a-f]{40}", str(merge.get("merge_sha") or ""))
+                or not merge.get("base") or merge.get("path") not in {"github-pr", "push"}):
+            raise TaskError("validation", "a release merge needs a base, full commit SHA and merge path", 2)
+
+    def settle_post_merge_ci(
+        self, *, actor: str, reference: str, merge: dict[str, Any],
+        result_request_id: str, request_id: str, complete: bool = False,
+    ) -> dict[str, Any]:
+        """Settle a live watch against its committed merge and exact green result.
+        A released Done enters Post-merge CI unless its green fact already completes it.
+        Historical events remain immutable.
+        """
+        self._role("dispatcher", {Role.DISPATCHER}, actor=actor)
+        self._check_release_merge(merge)
+        with reference_lock(self.data_dir, reference), self._mutation():
+            task = self.reader.show(reference)
+            events = self.audit.events(reference)
+            result_event = next((event for event in events if event.get("request_id") == result_request_id), None)
+            fact = post_merge_ci_fact(result_event) if result_event is not None else None
+            if fact is not None and (
+                fact.get("card") != reference or fact.get("base") != merge["base"]
+                or fact.get("merge_sha") != merge["merge_sha"]
+            ):
+                raise TaskError("validation", "post-merge result does not match the release merge", 2)
+            green = fact is not None and fact["result"] == "green"
+            if complete and not green:
+                raise TaskError("transition_forbidden", "completion requires a committed exact green CI fact", 3)
+            target = CardState.DONE if green else CardState.POST_MERGE_CI
+            reason = (f"Post-merge CI green for {merge['merge_sha']}." if green
+                      else f"Awaiting post-merge CI completion for {merge['merge_sha']}.")
+            existing = self._typed_event(request_id)
+            if existing is None:
+                latest = next((event for event in reversed(events) if recorded_card_transition(event)), None)
+                stored = latest.get("data", {}).get(RELEASE_MERGE_KEY) if latest is not None else None
+                if (task["state"] not in {"done", "post_merge_ci"}
+                        or latest is None or not is_merged_release(latest) or stored != merge
+                        or recorded_card_transition(latest)[1] != task["state"]):
+                    raise TaskError("transition_forbidden", "watch has no matching current release merge", 3)
+                if task["state"] == target.value:
+                    return {"action": "unchanged", "task": task}
+            result = self._transition_card(
+                reference=reference, target=target, role="dispatcher", actor=actor,
+                reason=reason, request_id=request_id,
+                release_merge=merge,
+                post_merge_ci_event=str(result_event["event_id"]) if green else None,
+                finish=self._transition_cleanup(task, source=task["state"], target=target.value,
+                                                reason="", role="dispatcher"),
+            )
+            return {"action": "moved", "task": self.reader.show(reference),
+                    "event_id": result.event.event_id, "replayed": existing is not None}
 
     def record_wait_state(self, *, role: str, actor: str, reference: str, state: str) -> None:
         """The dispatcher's one write of a wait card's `wait_state`. A state field, not

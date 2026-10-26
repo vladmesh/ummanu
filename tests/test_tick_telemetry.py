@@ -964,7 +964,7 @@ class ReleaseStageTests(unittest.TestCase):
 
     def test_an_ordinary_release_splits_into_its_effect_sites(self):
         outcome, card, telemetry = self.tick(self.assess())
-        self.assertEqual(outcome["to"], "done")
+        self.assertEqual(outcome["to"], "post_merge_ci")
         self.assertEqual(self.host.calls, [
             "gate", "runtime:release-before", "merge pr base", "merge pr", "post-merge fetch",
             "post-merge fast-forward", "runtime:release-after", "post-merge commit", "teardown",
@@ -995,7 +995,7 @@ class ReleaseStageTests(unittest.TestCase):
     def test_a_push_release_names_the_push_as_its_merge(self):
         self.host = self.runtime.host = _ReleaseHost(self.root, self.clock, ci="local")
         outcome, card, _ = self.tick(self.assess())
-        self.assertEqual(outcome["to"], "done")
+        self.assertEqual(outcome["to"], "post_merge_ci")
         self.assertEqual(self.host.calls[2:6], ["merge push", "post-merge fetch", "post-merge fast-forward",
                                                 "runtime:release-after"])
         self.assertEqual({name: card["stages"][name] for name in (
@@ -1051,7 +1051,7 @@ class ReleaseStageTests(unittest.TestCase):
                 )
 
         outcome, card, _ = self.tick(automatic)
-        self.assertEqual(outcome["to"], "done")
+        self.assertEqual(outcome["to"], "post_merge_ci")
         self.assertEqual(card["stages"], {
             "lifecycle": 0.0, "flush": 0.0, "flush_lock": 0.0, "flush_write": 100.0,
             "release_runtime": 300.0, "release_merge": 6201.0, "release_refresh": 2000.0,
@@ -1072,5 +1072,5 @@ class ReleaseStageTests(unittest.TestCase):
 
     def test_a_release_outside_a_card_reads_no_clock(self):
         outcome = self.assess()()
-        self.assertEqual(outcome["to"], "done")
+        self.assertEqual(outcome["to"], "post_merge_ci")
         self.assertEqual(self.reads, 0)

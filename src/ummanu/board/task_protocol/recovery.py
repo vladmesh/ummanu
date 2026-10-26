@@ -696,7 +696,7 @@ class RecoveryMixin:
                 source=str(transition.get("source") or ""),
                 target=target,
             )
-            if target in {"ready", "done"} and _ready_cleanup_incomplete(self.reader.show(ref)):
+            if target in {"ready", "done", "post_merge_ci"} and _ready_cleanup_incomplete(self.reader.show(ref)):
                 raise TaskError("backend_error", "pending Ready cleanup remains incomplete", 1)
         self.board_host.recover_transition(str(event["request_id"]))
 

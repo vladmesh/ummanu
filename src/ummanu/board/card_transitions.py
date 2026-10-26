@@ -30,7 +30,8 @@ _CARD_STATES = tuple(CardState)
 
 #: The stages of a round. Only the dispatcher moves a card into one.
 DISPATCHER_STAGES: frozenset[CardState] = frozenset(
-    {CardState.IN_PROGRESS, CardState.VALIDATE, CardState.CI, CardState.REVIEW, CardState.ASSESSMENT}
+    {CardState.IN_PROGRESS, CardState.VALIDATE, CardState.CI, CardState.REVIEW, CardState.ASSESSMENT,
+     CardState.POST_MERGE_CI}
 )
 
 #: Roles whose exits out of Assessment require a recorded decision.
@@ -43,6 +44,7 @@ CARD_TRANSITIONS: dict[Role, frozenset[CardTransitionKey]] = {
         for source in _CARD_STATES
         for target in _CARD_STATES
         if (source, target) in TRANSITIONS[EntityKind.CARD] and target not in DISPATCHER_STAGES
+        and source is not CardState.POST_MERGE_CI
     ),
     Role.DISPATCHER: frozenset(
         {
@@ -71,6 +73,9 @@ CARD_TRANSITIONS: dict[Role, frozenset[CardTransitionKey]] = {
             (CardState.VALIDATE, CardState.ASSESSMENT),
             (CardState.ASSESSMENT, CardState.IN_PROGRESS),
             (CardState.ASSESSMENT, CardState.DONE),
+            (CardState.ASSESSMENT, CardState.POST_MERGE_CI),
+            (CardState.POST_MERGE_CI, CardState.DONE),
+            (CardState.DONE, CardState.POST_MERGE_CI),
             (CardState.ASSESSMENT, CardState.BLOCKED),
         }
     ),
@@ -81,6 +86,7 @@ CARD_TRANSITIONS: dict[Role, frozenset[CardTransitionKey]] = {
         for target in _CARD_STATES
         if (source, target) in TRANSITIONS[EntityKind.CARD]
         and source is not CardState.ASSESSMENT
+        and source is not CardState.POST_MERGE_CI
         and target not in DISPATCHER_STAGES
     ),
     Role.WORKER: frozenset(),

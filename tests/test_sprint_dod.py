@@ -25,6 +25,15 @@ def release(ref: str, *, base: str = "main", sha: str = "a" * 40) -> dict:
 
 
 class DeliveryTests(unittest.TestCase):
+    def test_post_merge_wait_proves_delivery_before_final_done(self):
+        items = sprint_dod.new_items(["ship"])
+        cards = [{"ref": "demo-1", "dod_item": "d1", "state": "post_merge_ci"}]
+        merged = release("demo-1")
+        merged["transition"]["target"] = "post_merge_ci"
+        view = sprint_dod.section(items, cards=cards, events=[merged])
+        self.assertEqual((view["in_main"], view["met"]), (1, 0))
+        self.assertEqual(view["items"][0]["delivery"]["merged"][0]["merge_sha"], "a" * 40)
+
     def test_every_linked_card_needs_a_release_and_a_new_card_takes_delivery_back(self):
         items = sprint_dod.new_items(["ship", "verify"])
         cards = [{"ref": "demo-1", "dod_item": "d1", "state": "done"}]

@@ -281,6 +281,20 @@ class ReturnCase(unittest.TestCase):
 
 
 class DeliveryTests(ReturnCase):
+    def test_a_merged_card_returns_only_after_final_done(self) -> None:
+        self.arrange(delegated())
+        self.board.move(REF, "in_progress", "claimed")
+        self.board.report(REF, "done", f"Shipped.\n\nPR: {PR}")
+        self.board.move(REF, "assessment", "review green")
+        marker = {"base": "main", "merge_sha": "a" * 40, "path": "github-pr"}
+        self.board.move(REF, "post_merge_ci", "merged; awaiting CI", release_merge=marker)
+        self.assertEqual(self.tick(), [])
+        self.assertEqual(self.po.inputs, {})
+        final = self.board.move(REF, "done", "post-merge CI green", release_merge=marker)
+        [outcome] = self.tick()
+        self.assertEqual((outcome["action"], outcome["event_id"]), ("origin-returned", final))
+        self.assertEqual(self.tick(), [])
+
     def test_a_done_card_returns_its_report_once_and_writes_no_owner_event(self) -> None:
         self.arrange(delegated())
         event_id = self.done_code_card()
