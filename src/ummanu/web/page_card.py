@@ -11,6 +11,7 @@ from urllib.parse import quote
 from ummanu.web import markdown
 from ummanu.web.page_assets import _ACTIONS_SCRIPT, _TASK_SCRIPT
 from ummanu.web.page_parts import (
+    UNMOVABLE_STATES,
     _chip,
     _comment_form,
     _effort,
@@ -110,7 +111,11 @@ def task(snapshot: dict[str, Any], *, runs: dict[str, Any], sessions: dict[str, 
                     if handed
                     else "A comment the head reads on its next turn",
                 )
-                + f'<details class="more-actions"><summary>Move this card…</summary>{_move_form(ref)}</details>',
+                + (
+                    ""
+                    if value.get("state") in UNMOVABLE_STATES
+                    else f'<details class="more-actions"><summary>Move this card…</summary>{_move_form(ref)}</details>'
+                ),
             ),
             _panel("Product runs", _runs(ref, runs), open_=False),
             "</div></div>",
