@@ -2626,10 +2626,16 @@ After a release, the observer is woken on the post-merge CI result, not on the m
 merges a card (either merge path: the GitHub pull request or the fast-forward push of a local-CI
 project), the dispatcher records a post-merge watch in its own
 production state (`post_merge_watches`: card ref, project, integration base, the commit that actually
-landed on the base, start time) before the Assessment → Post-merge CI release, which carries a
+landed on the base, attempt id, attempt round, report generation, start time) before the Assessment → Post-merge CI release, which carries a
 `release_merge` marker. The watch survives a restart outside head records. Teardown and the release
 writer clear the round and claim; Post-merge CI takes no worker slot or new round and does not hold
 the sprint's one-card rule. The merge fact counts toward DoD delivery before final Done.
+
+A release may reuse a landed watch only when its persisted attempt id, attempt round and report
+generation match the releasing record. A missing or different identity blocks the release before
+merge, teardown or use of the old marker. The same round retries an unreadable landed SHA without
+merging twice. A watch without this identity can still settle its committed Done release, but
+cannot authorize a new candidate.
 
 Each tick reads the base's CI for that exact commit (every check-runs page and the combined status) and
 judges it in one place, `post_merge.read_merge_ci`, with the gate's rollup narrowed to
@@ -2666,6 +2672,10 @@ result against the release's base and full merge SHA. Only green moves Post-merg
 under a stable watch request id; the `card.moved` event retains `release_merge` and links the result
 with `post_merge_ci_event`. It needs no new accept, review, merge or teardown and creates no second
 observer wake. The release into Post-merge CI emits `card.released`.
+
+If the current card is outside Done and Post-merge CI, the watch keeps reading and publishing its
+actual merge result, then retires without settlement or after-merge enqueue. The committed result
+remains evidence; a Blocked or reworked card receives no completion authority from that watch.
 
 Pending stays Post-merge CI. Red, absent and timeout publish their result and leave the card there
 without a worker, automatic rework, hotfix or ignore. No role can use generic `task move` to enter

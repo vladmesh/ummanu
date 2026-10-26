@@ -482,6 +482,15 @@ def release_effect(
     )
     release_merge: dict[str, Any] | None = None
     watch = post_merge.watches(payload).get(ref)
+    release = {"attempt_id": record.attempt_id, "attempt_round": record.attempt_round,
+               "report_generation": record.report_generation}
+    if watch is not None and (not record.attempt_id or watch.get("release") != release):
+        return block_merge_path(
+            runtime, task, record, records, payload, attempt_id,
+            blocked_reason="implementation", action="post-merge-watch-release-mismatch",
+            reason="post-merge watch release identity does not match this candidate round; old merge cannot authorize release",
+            step=step, outcome="post-merge watch release identity mismatch",
+        )
     if has_candidate(task):
         try:
             # Its runtime fence, delivery, refresh and landed-commit read are each their own stage.
@@ -510,7 +519,7 @@ def release_effect(
             )
         if isinstance(landing, MergeLanding):
             with tick_stage("release_landed"):
-                watch = post_merge.open_watch(task, payload, landing, workspace=record.workspace)
+                watch = post_merge.open_watch(task, payload, landing, workspace=record.workspace, release=release)
                 runtime.save_records(payload, records)
         if watch is not None:
             if not watch.get("merge_sha"):

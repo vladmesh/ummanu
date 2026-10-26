@@ -1,6 +1,6 @@
-"""Headless exact-merge CI waiting, immutable result publication and green completion.
+"""Exact-merge CI waiting and immutable result publication.
 
-The watch outlives publication until the strict board finalizer and after-merge enqueue settle.
+Only the current release can settle; superseded watches retire after publication.
 """
 
 from __future__ import annotations
@@ -78,16 +78,14 @@ def open_watch(
     landing: MergeLanding,
     *,
     workspace: str,
+    release: dict[str, Any],
     now: float | None = None,
 ) -> dict[str, Any]:
     """Record a landed merge once, reading base CI triggers before checkout teardown."""
     ref = task["ref"]
     live = watches(payload)
-    existing = live.get(ref)
-    if isinstance(existing, dict) and not existing.get("result"):
-        if not existing.get("merge_sha") and landing.sha:
-            existing["merge_sha"] = landing.sha
-        return existing
+    if ref in live:
+        raise HostError(f"post-merge watch already exists for {ref}; preserve its result before another merge")
     if landing.ci != "github":
         absent = (
             f"the project validates with `validation.ci = {landing.ci}`, not GitHub CI, so the "
@@ -106,6 +104,7 @@ def open_watch(
         "merge_sha": landing.sha,
         "merge_path": landing.path,
         "branch": landing.branch,
+        "release": dict(release),
         "ci": landing.ci,
         "started_at": started,
         "absent_reason": absent,
@@ -154,6 +153,17 @@ def reconcile_post_merge_watches(
                 publish(runtime, watch)
                 watch["published"] = True
                 runtime.save_records(payload, records)
+            state = runtime.reader.show(ref)["state"]
+            if state not in {"post_merge_ci", "done"}:
+                # A failed release or rework cannot inherit this merge's completion authority.
+                if watch.get("published"):
+                    del live[ref]
+                    runtime.save_records(payload, records)
+                    outcomes.append({"status": "ok", "step": "post-merge-ci", "pilot_ref": ref,
+                                     "action": "post-merge-ci-release-superseded", "state": state,
+                                     "result": watch["result"]["result"],
+                                     "merge_sha": watch["result"].get("merge_sha", "")})
+                continue
             green = bool(watch.get("result") and watch["result"]["result"] == "green")
             runtime.writer.settle_post_merge_ci(
                 actor=runtime.owner, reference=ref, merge=release_merge_marker(watch),
