@@ -516,8 +516,8 @@ class PostMergeLifecycleTests(unittest.TestCase):
                 runtime.writer.move(role=role, actor=role, reference="demo-1", target="done",
                                     reason="manual completion", request_id="manual-" + role)
         watch = self.payload[post_merge.WATCHES_KEY]["demo-1"]
-        arguments = dict(actor=runtime.owner, reference="demo-1", merge=post_merge.release_merge_marker(watch),
-                         result_request_id="result", request_id="finish", complete=True)
+        arguments = {"actor": runtime.owner, "reference": "demo-1", "merge": post_merge.release_merge_marker(watch),
+                     "result_request_id": "result", "request_id": "finish", "complete": True}
         with self.assertRaises(TaskError):
             runtime.writer.settle_post_merge_ci(**arguments)
         staged = _comment(ref="demo-1", fact={"card": "demo-1", "base": "main", "merge_sha": SHA, "result": "green"})
@@ -566,7 +566,7 @@ class PostMergeLifecycleTests(unittest.TestCase):
                 runtime.host.check_runs = [_check("unit")]
                 settle = runtime.writer.settle_post_merge_ci
 
-                def interrupted(**kwargs):
+                def interrupted(*, after_effect=after_effect, settle=settle, **kwargs):
                     if after_effect:
                         settle(**kwargs)
                     raise OSError("finalizer reply lost")

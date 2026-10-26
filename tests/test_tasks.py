@@ -3812,8 +3812,8 @@ class AssessmentStateTests(CardStoreCase):
         marker = {"base": "main", "merge_sha": "a" * 40, "path": "github-pr"}
         self.writer.move(role="dispatcher", actor="d", reference="ummanu-468", target="post_merge_ci",
                          reason="release merged", decision="accept", release_merge=marker, request_id="release")
-        arguments = dict(actor="d", reference="ummanu-468", merge=marker, result_request_id="green",
-                         request_id="finish", complete=True)
+        arguments = {"actor": "d", "reference": "ummanu-468", "merge": marker, "result_request_id": "green",
+                     "request_id": "finish", "complete": True}
         with self.assertRaises(TaskError):
             self.writer.settle_post_merge_ci(**arguments)
         self.writer.post_merge_ci(actor="d", reference="ummanu-468", body="merge CI green", request_id="green",
