@@ -4410,9 +4410,11 @@ Non-code cards have `not_applicable` and keep their own board stage.
 `previous` is null or `{status: red|not_run, sha, failure_class, reason, evidence}`, copied from
 `rejected_sha`, `rejected_failure_class`, `rejected_failure_reason` and `rejected_gate_evidence`.
 A reviewer rejection is excluded. During the recorded `gate_red` return intent in CI, that
-result is current `ci.status`; after the move to In progress it is previous and the caption
-names rework. A new report or pending candidate keeps the previous result's SHA without
-inheriting its red status. Publication refusal is `not_run`, explicitly "CI did not run".
+result is current `ci.status`; after the move to In progress it is historical `previous`.
+The In progress caption names only the stage: retained rejection fields do not establish the
+cause of the current return or the latest CI result after a later green round. A new report or
+pending candidate keeps the historical rejection's SHA without inheriting its red status.
+Publication refusal is `not_run`, explicitly "CI did not run" in the rejection details.
 The source uses the existing availability contract: unavailable does not mean empty or green.
 Card reads reuse their single dispatcher read; native `task show` adds one guarded dispatcher
 read. The projection never reads Git, GitHub, heads or reports, and writes no state or audit.

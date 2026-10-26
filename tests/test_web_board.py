@@ -403,7 +403,7 @@ class PipelineDisplayTests(unittest.TestCase):
             ("returning", "ci", "code", {**red, "worker_continuation": {
                 "stage": "red_transition_pending", "phase": "gate", "verdict_outcome": "gate_red",
             }}, "red", "CI red; returning to worker", None),
-            ("rework", "in_progress", "code", red, "unknown", "In progress; reworking after CI red", "red"),
+            ("rework", "in_progress", "code", red, "unknown", "In progress", "red"),
             ("new report", "ci", "code", red, "waiting", "CI waiting", "red"),
             ("new pending", "ci", "code", {**red, "gate_pending_since": 1,
                 "gate_published_ref": {"branch": "pipeline/sample-1", "sha": "c" * 40}},
@@ -416,7 +416,7 @@ class PipelineDisplayTests(unittest.TestCase):
             ("stale green in new pending", "ci", "code", {**green, "gate_pending_since": 1},
                 "pending", "CI pending", None),
             ("publication", "in_progress", "code", publication,
-                "unknown", "In progress; publication failed, CI did not run", "not_run"),
+                "unknown", "In progress", "not_run"),
             ("publication returning", "ci", "code", {**publication, "worker_continuation": {
                 "stage": "red_transition_pending", "phase": "gate", "verdict_outcome": "gate_red",
             }}, "not_run", "Publication failed; CI did not run", None),
@@ -459,6 +459,68 @@ class PipelineDisplayTests(unittest.TestCase):
                     self.assertIn("&lt;reason&gt;", hero)
                 if stage == "ci":
                     self.assertIsNone(tile["head"])
+
+    def test_later_rework_keeps_rejection_as_history_without_a_causal_caption(self) -> None:
+        rejected_sha, accepted_sha = "a" * 40, "c" * 40
+        receipt = mint_gate_receipt(
+            validated_sha=accepted_sha, base_sha="b" * 40, gate_mode="github",
+            required_checks=[{"name": "unit", "conclusion": "SUCCESS"}], check_set_identity="unit",
+        )
+        for failure, return_kind in (("substantive", "observer"), ("publication", "recovery")):
+            rejection = {
+                "rejected_sha": rejected_sha, "rejected_failure_class": failure,
+                "rejected_failure_reason": "earlier rejection <reason>", "rejected_gate_evidence": [],
+            }
+            rejected_status = "not_run" if failure == "publication" else "red"
+            green = {**rejection, "gate_state": "green", "gate_attestation": receipt,
+                     "review_commit": accepted_sha}
+            returned = {**rejection, "worker_continuation": {
+                "stage": "delivery_confirmed", "phase": "review", "verdict_outcome": "green", "decision": "rework",
+            }} if return_kind == "observer" else rejection
+            sequence = [
+                ("ci", {**rejection, "worker_continuation": {
+                    "stage": "red_transition_pending", "phase": "gate", "verdict_outcome": "gate_red",
+                }}, rejected_status, "Publication failed; CI did not run" if failure == "publication"
+                    else "CI red; returning to worker"),
+                ("in_progress", rejection, "unknown", "In progress"),
+                ("ci", {**rejection, "gate_pending_since": 1}, "pending", "CI pending"),
+                ("review", green, "green", "Review; CI passed"),
+                ("assessment", green, "green", "Assessment"),
+                ("in_progress", returned, "unknown", "In progress"),
+            ]
+            if return_kind == "recovery":
+                sequence.insert(-1, ("blocked", green, "unknown", "Blocked"))
+            for index, (stage, record, status, label) in enumerate(sequence):
+                with self.subTest(failure=failure, return_kind=return_kind, step=index, stage=stage):
+                    card = row("sample-1", stage, moved=NOW - HOUR)
+                    self.write([card], {"sample-1": record})
+                    document = self.reads.board_view()
+                    tile = next(tile for column in document["columns"] for tile in column["cards"])
+                    snapshot = self.reads.task_snapshot("sample-1")
+                    summary = tile["pipeline"]
+                    self.assertEqual(summary, snapshot["pipeline"])
+                    self.assertEqual(summary, self.native()["pipeline"])
+                    self.assertEqual((summary["label"], summary["ci"]["status"]), (label, status))
+                    self.assertEqual(summary["ci"]["sha"], accepted_sha if status == "green"
+                                     else rejected_sha if index == 0 else None)
+                    if index == 0:
+                        self.assertIsNone(summary["previous"])
+                    else:
+                        self.assertEqual(summary["previous"], {
+                            "status": rejected_status, "sha": rejected_sha, "failure_class": failure,
+                            "reason": rejection["rejected_failure_reason"], "evidence": [],
+                        })
+                    board_html = page(self.client, instance=str(self.instance))[1]
+                    hero = task_page(snapshot, runs={}).split('<div class="grid">')[0]
+                    for rendered in (tile_of(board_html, "sample-1"), hero):
+                        self.assertEqual(re.findall(
+                            r'<span title="[^"]*"><span class="chip[^"]*">([^<]*)</span></span>', rendered,
+                        ), [label])
+                        self.assertIn(rejected_sha, rendered)
+                        self.assertIn("earlier rejection &lt;reason&gt;", rendered)
+                        if index:
+                            detail = "CI did not run" if failure == "publication" else "CI red"
+                            self.assertIn(f"Previous {detail}: {rejected_sha}", rendered)
 
     def test_board_batches_production_read_and_never_reads_individual_cards(self) -> None:
         cards = [row(f"sample-{index}", "ci", moved=NOW - HOUR) for index in range(1, 51)]

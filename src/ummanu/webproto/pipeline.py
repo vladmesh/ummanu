@@ -76,13 +76,6 @@ def pipeline_summary(
             "not_run": "Publication failed; CI did not run",
         }.get(status, "CI status unknown")
         result["tone"] = "bad" if status in {"red", "not_run"} else "warn"
-    elif stage == "in_progress" and result["previous"]:
-        previous = result["previous"]
-        result["label"] = (
-            "In progress; publication failed, CI did not run"
-            if previous["status"] == "not_run" else "In progress; reworking after CI red"
-        )
-        result["tone"] = "warn"
     elif stage == "review":
         result["label"] = "Review" + ("; CI passed" if status == "green" else "; CI status unknown")
         result["tone"] = "accent"
