@@ -1,36 +1,6 @@
-"""The post-merge CI watch: a release is finished when the base's CI for its merge has answered.
+"""Headless exact-merge CI waiting, immutable result publication and green completion.
 
-A release merge starts a CI run on the integration base. The dispatcher owns all waiting for CI, so
-it records a watch the moment the merge has landed (card ref, project, base, the merge commit that
-actually landed, start time) in its own production state, beside the card records and never among
-them: a watched card is Done and holds no claim. Each tick reads the base's CI for that exact commit
-with the gate's own machinery and resolves the watch to exactly one of four results:
-
-- `green`: every selected check finished successfully;
-- `red`: at least one failed, with the run ids, failed check names and the gate's
-  infrastructure/product classification;
-- `absent`: the project validates without GitHub CI, or no workflow triggers on a push to the base,
-  decided when the watch is opened, without waiting;
-- `timeout`: no terminal result within `UMMANU_POST_MERGE_CI_CEILING_SECONDS` (default 3600).
-
-`read_merge_ci` is the one place the answers become green or red, and only from a reading that is
-complete and exact: every answer well-formed, every check run and the status naming the full merge
-commit, all check-run pages read up to `total_count`. The check runs
-of GitHub-managed `dynamic` workflow runs (Dependabot Updates and the like) are not the merge's CI
-and are left out before anything is judged. Anything else
-(a transport error, an unreadable or malformed `gh` answer, a partial page set, a check for another
-commit, a completed check with no conclusion, a run that has not started) is pending until the
-ceiling, whatever the other answer says.
-
-The result is written to the watch before anything is published, so a replayed tick publishes the
-same fact under the same request ids: one card event (the observer wake, see
-`ummanu.tasks.is_significant_card_event`) and, for a sprint card, one dispatcher comment on the
-sprint. The watch is dropped only after both are on the board. A `green` watch of a project whose e2e
-stage is declared `placement: after_merge` queues its card for that project's next after-merge e2e run
-(`dispatch/e2e_after_merge.py`); no other result queues anything. Such a watch is dropped only once the
-card is queued, or its project is established not to be `after_merge`: while the adapter or its
-declaration cannot be read it is kept, marked `published` so its fact is not published again, and the
-next pass retries the enqueue alone.
+The watch outlives publication until the strict board finalizer and after-merge enqueue settle.
 """
 
 from __future__ import annotations
@@ -110,11 +80,7 @@ def open_watch(
     workspace: str,
     now: float | None = None,
 ) -> dict[str, Any]:
-    """Record the watch for a merge that has just landed; a replay keeps the first one.
-
-    The absence of any base CI is decided here, from the merged checkout, while it still exists:
-    the checkout is torn down before Done.
-    """
+    """Record a landed merge once, reading base CI triggers before checkout teardown."""
     ref = task["ref"]
     live = watches(payload)
     existing = live.get(ref)
@@ -152,7 +118,7 @@ def open_watch(
 
 
 def release_merge_marker(watch: dict[str, Any]) -> dict[str, Any]:
-    """The Done transition's `release_merge` data: what landed, and that its CI result follows."""
+    """The release transition's merge identity, awaiting its exact CI result."""
     return {
         "base": str(watch.get("base") or ""),
         "merge_sha": str(watch.get("merge_sha") or ""),
@@ -175,31 +141,32 @@ def reconcile_post_merge_watches(
         if not isinstance(watch, dict):
             del live[ref]
             continue
+        if ref in records:
+            continue
         if not watch.get("result"):
             result = resolve(runtime, watch, now=now)
-            if result is None:
-                continue
-            # Durable before it is published: a replay publishes this fact, never a re-read one.
-            watch["result"] = result
-            runtime.save_records(payload, records)
-        if not watch.get("published"):
-            try:
+            if result is not None:
+                # Durable before publication: a replay publishes this fact, never a re-read one.
+                watch["result"] = result
+                runtime.save_records(payload, records)
+        try:
+            if watch.get("result") and not watch.get("published"):
                 publish(runtime, watch)
-            except (TaskError, HostError, OSError, ValueError, TypeError) as exc:
-                outcomes.append(
-                    {
-                        "status": "degraded",
-                        "step": "post-merge-ci",
-                        "action": "post-merge-ci-publish-failed",
-                        "pilot_ref": ref,
-                        "reason": f"{type(exc).__name__}: {exc}",
-                    }
-                )
-                continue
-            watch["published"] = True
-        # A green merge of a project whose e2e runs after the merge joins that project's pending set
-        # (secretary-1807). The watch outlives an enqueue that could not establish the project's
-        # placement: it is kept, published, and the next pass retries the enqueue alone.
+                watch["published"] = True
+                runtime.save_records(payload, records)
+            green = bool(watch.get("result") and watch["result"]["result"] == "green")
+            runtime.writer.settle_post_merge_ci(
+                actor=runtime.owner, reference=ref, merge=release_merge_marker(watch),
+                result_request_id=_request_id(watch, "card"),
+                request_id=_request_id(watch, "done" if green else "await"), complete=green,
+            )
+        except (TaskError, HostError, OSError, ValueError, TypeError) as exc:
+            outcomes.append({"status": "degraded", "step": "post-merge-ci",
+                             "action": "post-merge-ci-publish-failed", "pilot_ref": ref,
+                             "reason": f"{type(exc).__name__}: {exc}"})
+            continue
+        if not watch.get("result"):
+            continue
         from ummanu.dispatch.e2e_after_merge import enqueue
 
         queued = enqueue(runtime, payload, watch)
@@ -263,6 +230,8 @@ def _fact(
         "merge_sha": str(watch.get("merge_sha") or ""),
         "waited_seconds": waited,
     }
+    if watch.get("repo") and watch.get("merge_sha"):
+        fact["merge_url"] = f"https://github.com/{watch['repo']}/commit/{watch['merge_sha']}"
     if reason:
         fact["reason"] = safe_one_line(reason)
     if runs is not None:
@@ -554,6 +523,8 @@ def render_fact(fact: dict[str, Any]) -> str:
     elif result == "timeout":
         lines.append("The base's CI gave no terminal result for the merge commit within the ceiling.")
     lines.append("- run(s): " + (run_text or "none"))
+    if fact.get("merge_url"):
+        lines.append(f"- merge: {fact['merge_url']}")
     if fact.get("reason"):
         lines.append(f"- reason: {fact['reason']}")
     return "\n".join(lines)

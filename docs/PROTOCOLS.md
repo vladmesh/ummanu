@@ -96,7 +96,7 @@ The public path to the board is `ummanu task`. A card carries a `ref`, project, 
 dependency, claim, routing, workspace, retry and audit metadata:
 
 ```text
-Code: Ready → In progress → CI → Review → Assessment → Done
+Code: Ready → In progress → CI → Review → Assessment → Post-merge CI → Done
                             └─────────→ Assessment (review skipped)
 Research/infra: Ready → In progress → Validate → Assessment → Done
 ```
@@ -106,8 +106,9 @@ Blocked, Done`.
 
 `post_merge_ci` (Post-merge CI) is a persisted Card state for a merged card waiting on its exact
 merge commit's CI. The board store, `task show`, `task list --state` and the board and read views
-carry it. No producer enters it yet and no role holds a move into or out of it: the release still
-moves Assessment to Done and resolves the [post-merge watch](#post-merge-ci) off the card.
+carry it. A real code merge enters it through the release writer, with no claim or worker round.
+Only the [post-merge watch](#post-merge-ci) can finish it on committed exact green CI evidence.
+Releases that merge nothing retain their supported Done path.
 
 A code report:done enters CI before the mechanical gate runs. Pending checks and transport retries
 remain in CI. An accepted green gate for the current SHA permits Review when review is required,
@@ -150,7 +151,8 @@ admits a move through its one entry point, `admit_card_move`.
 - Only the dispatcher moves a card into In progress, Validate, CI, Review or Assessment: a claim, a report, a
   verdict, a gate outcome or a decision it performs. Its other edges are Blocked moves out of its
   stages, the live Validate migration to CI/Review, Validate or Assessment to Done, In progress to Ready, and the two
-  [wait card](#wait-cards) edges.
+  [wait card](#wait-cards) edges. A code merge releases Assessment to Post-merge CI; the watch alone
+  completes Post-merge CI to Done or resumes a confirmed live Done+watch obligation in Post-merge CI.
 - The PO moves a card along declared lifecycle edges to Issues, Ready, Blocked or Done;
   CI and Review allow Ready or Blocked.
 - The observer has the PO's edges except any out of Assessment. A move out of Blocked needs a reason.
@@ -158,7 +160,7 @@ admits a move through its one entry point, `admit_card_move`.
   to Done, each with a reason, from Blocked to Ready, and its own report card from In progress to Done.
 - Workers, reviewers and retro move nothing.
 
-Blocked is the emergency stop for the PO, the observer and the steward from every column but Done. A
+Blocked is the emergency stop for the PO, the observer and the steward from every round column but Done. A
 refused move names the role, the edge and the handle to use instead: `task decide` for a parked card;
 for a Blocked card, a return to Ready, which continues the round at the stage it stopped
 ([Return from Blocked](#return-from-blocked)), or `task decide --kind rework`; `task cancel` or
@@ -1518,10 +1520,11 @@ write moves the card Blocked -> Ready as the observer; the next claim opens a wo
 [Return from Blocked](#return-from-blocked)). `accept` and `reslice` on a Blocked card, and any decision
 on a card in neither Assessment nor Blocked, are refused with `transition_forbidden`.
 
-A move out of Assessment carries the decision it performs, with one destination each: `accept` →
-Done, `rework` → In progress, `reslice` → Blocked. A `--decision` the card's audit does not hold since
+A move out of Assessment carries the decision it performs: `accept` releases a merged code card to
+Post-merge CI, or finishes a release without a merge in Done; `rework` → In progress;
+`reslice` → Blocked. A `--decision` the card's audit does not hold since
 it entered the column, or paired with the wrong destination, is refused whoever passes it. The
-dispatcher must carry a decision: its ordinary move to Done or In progress without `--decision` is refused.
+dispatcher must carry a decision: its ordinary release or move to In progress without `--decision` is refused.
 The finite automatic code release described above supplies accepted gate policy and rechecks actual
 no-observer routing, report and verdict facts; a general move without a decision gains no exception.
 Also refused are `assessment -> ready`, `-> validate` and `-> issues`. The PO is not bound by this: its escape hatch
@@ -2623,9 +2626,10 @@ After a release, the observer is woken on the post-merge CI result, not on the m
 merges a card (either merge path: the GitHub pull request or the fast-forward push of a local-CI
 project), the dispatcher records a post-merge watch in its own
 production state (`post_merge_watches`: card ref, project, integration base, the commit that actually
-landed on the base, start time) before the Done move, and the Done carries a `release_merge` marker.
-The watch survives a restart and holds no claim: the card is Done and is not active for claims or for
-the sprint's one-card rule.
+landed on the base, start time) before the Assessment → Post-merge CI release, which carries a
+`release_merge` marker. The watch survives a restart outside head records. Teardown and the release
+writer clear the round and claim; Post-merge CI takes no worker slot or new round and does not hold
+the sprint's one-card rule. The merge fact counts toward DoD delivery before final Done.
 
 Each tick reads the base's CI for that exact commit (every check-runs page and the combined status) and
 judges it in one place, `post_merge.read_merge_ci`, with the gate's rollup narrowed to
@@ -2657,9 +2661,28 @@ wake, the post-merge result is. A Done with no merge (research and infra cards, 
 operation card the PO completed, a release that merged nothing, automerge off, a manual PO or steward
 Done) wakes as before. The wake text states the result
 with its runs, and for `red` the failed checks and classification; a red result is never worded as a
-plain Done. A `green` result of a project whose e2e stage is declared `placement: after_merge` also
-queues the card for that project's next after-merge e2e run ([After merge](#after-merge)); such a watch
-is dropped only once the card is queued, or its project is established not to be `after_merge`.
+plain Done. After publication, `TaskWriter.settle_post_merge_ci` verifies the committed dispatcher
+result against the release's base and full merge SHA. Only green moves Post-merge CI → Done,
+under a stable watch request id; the `card.moved` event retains `release_merge` and links the result
+with `post_merge_ci_event`. It needs no new accept, review, merge or teardown and creates no second
+observer wake. The release into Post-merge CI emits `card.released`.
+
+Pending stays Post-merge CI. Red, absent and timeout publish their result and leave the card there
+without a worker, automatic rework, hotfix or ignore. No role can use generic `task move` to enter
+or leave this wait, except the admitted dispatcher release into it. Manual non-green disposition
+has no supported handle. A published non-green watch can be dropped; the state and immutable result
+remain the unfinished obligation.
+
+A live watch from a released Done is settled by the same owner against its committed merge marker.
+Unresolved and non-green obligations move Done → Post-merge CI with `card.moved`; an exact committed
+green completes the already released Done without reconstructing intermediate history. Watches with
+a saved result reuse it; published watches retry settlement and enqueue without republishing.
+Historical Done cards without a live watch remain unchanged.
+
+After green completion, a project whose e2e stage declares `placement: after_merge` queues the card
+for that project's next after-merge e2e run ([After merge](#after-merge)). The watch survives a failed
+finalization or enqueue and is dropped only once the card is queued, or its project is established
+not to be `after_merge`. After-merge e2e retains its separate admission, budget and red-result policy.
 
 An Assessment entry is one decision visit. The first observer `task decide` is canonical for that
 visit; a redelivered turn repeating the same kind returns that decision without another comment, and

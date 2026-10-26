@@ -25,6 +25,7 @@ from ummanu._fsutil import file_lock
 from ummanu.board import po_execution, po_origin as origin_field
 from ummanu.board.e2e_disposition import completion_identity
 from ummanu.board.e2e_record import AfterMergeMark, e2e_state
+from ummanu.board.models import Actor, EntityKind, Event, EventKind
 from ummanu.board.owner_events import READ_ONLY_KINDS, OwnerEventStore
 from ummanu.dispatch import e2e_after_merge
 from ummanu.dispatch.e2e_after_merge import queues, reconcile_after_merge
@@ -249,6 +250,14 @@ class AfterMergeFixture(E2eStageFixture):
         """The post-merge watch of `ref` resolved with `result`, published on the next tick."""
         self.merged_at += 60
         card = self.reader.show(ref)
+        request = f"fixture-release-{ref}-{sha}"
+        if self.writer.audit.committed_event(request) is None:
+            self.writer.audit.append(request, Event(
+                request, EventKind.CARD_RELEASED, EntityKind.CARD, ref, Actor("dispatcher", self.runtime.owner),
+                "release merged", datetime.fromtimestamp(self.merged_at, UTC),
+                source_state="assessment", target_state="done",
+                data={"release_merge": {"base": "main", "merge_sha": sha, "path": "github-pr"}},
+            ).to_record(request))
         with file_lock(self.runtime.production_state.tick_lock):
             payload = self.runtime.production_state.load()
             records = self.runtime.production_state.records(payload)
@@ -260,7 +269,7 @@ class AfterMergeFixture(E2eStageFixture):
                 "sprint": str(card.get("sprint") or ""),
                 "base": "main",
                 "merge_sha": sha,
-                "merge_path": "pr",
+                "merge_path": "github-pr",
                 "branch": f"pipeline/{ref}",
                 "ci": "github",
                 "started_at": self.merged_at,

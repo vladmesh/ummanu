@@ -402,7 +402,7 @@ def recorded_card_transition(event: dict[str, Any]) -> tuple[str, str] | None:
     return card_transition_of(event)
 
 
-#: The data key a dispatcher release puts on the Done transition when its release merged a commit
+#: The data key a dispatcher release puts on its transition when its release merged a commit
 #: onto the integration base. Its presence says "the post-merge CI result will follow".
 RELEASE_MERGE_KEY = "release_merge"
 #: The data key a dispatcher move carries when it acts on a red review or a substantive red gate:
@@ -461,11 +461,7 @@ def is_dispatcher_hotfix(event: dict[str, Any]) -> bool:
 
 
 def is_merged_release(event: dict[str, Any]) -> bool:
-    """Whether a Done transition is a dispatcher release whose merge landed on the base.
-
-    Such a Done is not yet the release's last word: the post-merge CI result is, and that is the
-    event the observer is woken on.
-    """
+    """Whether a dispatcher transition records a release merge onto the base."""
     if not is_protocol_event(event):
         return False
     actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
@@ -496,7 +492,7 @@ def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -
     if moved is None:
         return False
     source, target = moved
-    if target == "done" and is_merged_release(event):
+    if target == "done" and (is_merged_release(event) or source == "post_merge_ci"):
         return False
     # Assessment requires a decision; Blocked requires classification.
     if target in {"assessment", "blocked", "done"}:

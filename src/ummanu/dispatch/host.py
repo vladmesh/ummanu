@@ -1160,7 +1160,7 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
         except ProductionActivationRefused as exc:
             # The push landed; only the production activation was refused.
             exc.landing = MergeLanding(
-                sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci
+                sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci, branch=branch
             )
             raise
         except HostError:
@@ -1170,7 +1170,7 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
                 raise
         with tick_stage("release_runtime"):
             self._require_production_runtime("release-after")
-        return MergeLanding(sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci)
+        return MergeLanding(sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci, branch=branch)
 
     def _advance_checkout(self, repo: Path, ref: str) -> None:
         """Fast-forward a project checkout to `ref` after a merge."""

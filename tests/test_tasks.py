@@ -3733,10 +3733,8 @@ class AssessmentStateTests(CardStoreCase):
             1,
         )
 
-    def test_a_merged_release_wakes_on_its_post_merge_result_not_on_done(self) -> None:
-        """secretary-1736: the Done of a release that merged carries `release_merge`, which the wake
-        predicate reads as "not yet"; the post-merge CI result is one dispatcher card event that is
-        the wake, and a replay of either writes nothing new."""
+    def test_a_merged_release_wakes_on_its_post_merge_result_not_on_the_merge(self) -> None:
+        """A merge enters headless CI waiting; only its result wakes the observer."""
         self._park()
         self._decide("accept")
         marker = {"base": "main", "merge_sha": "a" * 40, "path": "github-pr"}
@@ -3744,7 +3742,7 @@ class AssessmentStateTests(CardStoreCase):
             role="dispatcher",
             actor="d",
             reference="ummanu-468",
-            target="done",
+            target="post_merge_ci",
             reason="Observer decision: accept.",
             decision="accept",
             request_id="merged-release",
@@ -3754,7 +3752,7 @@ class AssessmentStateTests(CardStoreCase):
             role="dispatcher",
             actor="d",
             reference="ummanu-468",
-            target="done",
+            target="post_merge_ci",
             reason="Observer decision: accept.",
             decision="accept",
             request_id="merged-release",
@@ -3781,15 +3779,16 @@ class AssessmentStateTests(CardStoreCase):
                 request_id="post-merge-ci-card",
             )
         events = self.writer.audit.events("ummanu-468")
-        [done] = [event for event in events if (recorded_card_transition(event) or ("", ""))[1] == "done"]
-        self.assertEqual(done["data"]["release_merge"], marker)
+        [pending] = [event for event in events if (recorded_card_transition(event) or ("", ""))[1] == "post_merge_ci"]
+        self.assertEqual(pending["data"]["release_merge"], marker)
         woken = [
             event
             for event in events
             if is_significant_observer_event(event, linked_refs={"ummanu-468"}, sprint_ref=SPRINT)
         ]
         self.assertEqual([event["payload"]["post_merge_ci"] for event in woken[-1:]], [fact])
-        self.assertNotIn(done, woken)
+        self.assertNotIn(pending, woken)
+        self.assertEqual(self.writer.reader.show("ummanu-468")["state"], "post_merge_ci")
         self.assertEqual(
             len([c for c in self.client.comments(12) if "Post-merge CI RED" in c["comment"]]), 1
         )
@@ -3803,6 +3802,25 @@ class AssessmentStateTests(CardStoreCase):
                 request_id="po-with-marker",
                 release_merge=marker,
             )
+
+    def test_exact_green_finalization_is_replayable_and_has_no_second_decision(self) -> None:
+        self._park()
+        self._decide("accept")
+        marker = {"base": "main", "merge_sha": "a" * 40, "path": "github-pr"}
+        self.writer.move(role="dispatcher", actor="d", reference="ummanu-468", target="post_merge_ci",
+                         reason="release merged", decision="accept", release_merge=marker, request_id="release")
+        arguments = dict(actor="d", reference="ummanu-468", merge=marker, result_request_id="green",
+                         request_id="finish", complete=True)
+        with self.assertRaises(TaskError):
+            self.writer.settle_post_merge_ci(**arguments)
+        self.writer.post_merge_ci(actor="d", reference="ummanu-468", body="merge CI green", request_id="green",
+                                  fact={"result": "green", "card": "ummanu-468", "base": "main", "merge_sha": "a" * 40})
+        first = self.writer.settle_post_merge_ci(**arguments)
+        replay = self.writer.settle_post_merge_ci(**arguments)
+        self.assertEqual((first["task"]["state"], replay["event_id"], replay["replayed"]),
+                         ("done", first["event_id"], True))
+        self.assertIsNone(first["task"]["claim"]["worker"])
+        self.assertEqual(recorded_card_transition(self.writer.audit.event("finish")), ("post_merge_ci", "done"))
 
     def test_a_stale_round_record_is_one_dispatcher_comment_whose_fact_wakes_the_observer(self) -> None:
         fact = {

@@ -48,14 +48,14 @@ class TaskRoutingVocabularyTests(unittest.TestCase):
         self.assertEqual(
             DECISION_TARGETS,
             {
-                TaskDecision.ACCEPT: CardState.DONE,
-                TaskDecision.REWORK: CardState.IN_PROGRESS,
-                TaskDecision.RESLICE: CardState.BLOCKED,
+                TaskDecision.ACCEPT: {CardState.DONE, CardState.POST_MERGE_CI},
+                TaskDecision.REWORK: {CardState.IN_PROGRESS},
+                TaskDecision.RESLICE: {CardState.BLOCKED},
             },
         )
         self.assertEqual(EDITABLE_STATES, {CardState.ISSUES, CardState.READY, CardState.BLOCKED})
         self.assertEqual(ACTIVE_STATES, {CardState.IN_PROGRESS, CardState.VALIDATE, CardState.CI, CardState.REVIEW, CardState.ASSESSMENT})
-        self.assertEqual(DECIDED_TARGETS, {CardState.DONE, CardState.IN_PROGRESS})
+        self.assertEqual(DECIDED_TARGETS, {CardState.DONE, CardState.POST_MERGE_CI, CardState.IN_PROGRESS})
         self.assertEqual(UNDECIDED_EXITS, {CardState.READY, CardState.VALIDATE, CardState.ISSUES})
 
     def test_legacy_routing_normalizes_once_and_renders_the_same_document(self) -> None:

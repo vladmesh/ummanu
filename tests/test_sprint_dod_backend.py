@@ -284,9 +284,15 @@ class CardDodStorageTests(SprintFixture):
             for target in ("in_progress", "validate", "assessment"):
                 self.cards.move(role="dispatcher", actor="dispatcher", reference=ref, target=target, reason=target)
             self.cards.decide(role="observer", actor="observer", reference=ref, kind="accept", body="reviewed")
-            self.cards.move(role="dispatcher", actor="dispatcher", reference=ref, target="done", reason="merged",
-                            decision="accept", release_merge={"base": "main", "merge_sha": "a" * 40, "path": "pr"})
+            marker = {"base": "main", "merge_sha": "a" * 40, "path": "github-pr"}
+            self.cards.move(role="dispatcher", actor="dispatcher", reference=ref, target="post_merge_ci", reason="merged",
+                            decision="accept", release_merge=marker)
             self.assertEqual(self.sprint(self.ref, include_cards=True, include_delivery=True)["dod"]["in_main"], index)
+            self.cards.post_merge_ci(actor="dispatcher", reference=ref, body="exact merge CI green",
+                                     fact={"result": "green", "card": ref, "base": "main", "merge_sha": "a" * 40},
+                                     request_id="green-" + ref)
+            self.cards.settle_post_merge_ci(actor="dispatcher", reference=ref, merge=marker,
+                                            result_request_id="green-" + ref, request_id="finish-" + ref, complete=True)
         self.cards.archive(role="po", actor="operator", reference=refs[0], reason="retained merge")
         self.assertEqual(self.sprint(self.ref, include_cards=True, include_delivery=True)["dod"]["in_main"], 1)
         self.create_card()

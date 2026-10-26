@@ -131,12 +131,12 @@ EDITABLE_STATES: frozenset[CardState] = frozenset({CardState.ISSUES, CardState.R
 ACTIVE_STATES: frozenset[CardState] = frozenset(
     {CardState.IN_PROGRESS, CardState.VALIDATE, CardState.CI, CardState.REVIEW, CardState.ASSESSMENT}
 )
-DECIDED_TARGETS: frozenset[CardState] = frozenset({CardState.DONE, CardState.IN_PROGRESS})
+DECIDED_TARGETS: frozenset[CardState] = frozenset({CardState.DONE, CardState.POST_MERGE_CI, CardState.IN_PROGRESS})
 UNDECIDED_EXITS: frozenset[CardState] = frozenset({CardState.READY, CardState.VALIDATE, CardState.ISSUES})
-DECISION_TARGETS: dict[TaskDecision, CardState] = {
-    TaskDecision.ACCEPT: CardState.DONE,
-    TaskDecision.REWORK: CardState.IN_PROGRESS,
-    TaskDecision.RESLICE: CardState.BLOCKED,
+DECISION_TARGETS: dict[TaskDecision, frozenset[CardState]] = {
+    TaskDecision.ACCEPT: frozenset({CardState.DONE, CardState.POST_MERGE_CI}),
+    TaskDecision.REWORK: frozenset({CardState.IN_PROGRESS}),
+    TaskDecision.RESLICE: frozenset({CardState.BLOCKED}),
 }
 
 
