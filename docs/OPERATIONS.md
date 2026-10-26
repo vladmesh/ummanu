@@ -2182,7 +2182,9 @@ on its result (`green`, `red`, `absent` or `timeout`), not on the Done
 ([Protocols](PROTOCOLS.md#post-merge-ci)). `ummanu dispatcher production-observe` lists open watches
 under `post_merge_watches`; each resolution is a `post-merge-ci` tick action, and the result is a
 dispatcher comment on the card and on its sprint. `UMMANU_POST_MERGE_CI_CEILING_SECONDS` (3600)
-bounds the wait.
+bounds the wait. A card whose result is `red`, `absent` or `timeout` stays in Post-merge CI until the
+observer or the PO closes it with `ummanu task dispose-post-merge`
+([Protocols](PROTOCOLS.md#manual-disposition)); its Done keeps the non-green result in history.
 
 Kill switch: `UMMANU_DISPATCHER_AUTOMERGE=off` disables push and fast-forward. The card still reaches
 done and needs a manual merge. Default on.

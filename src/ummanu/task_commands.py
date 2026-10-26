@@ -16,7 +16,7 @@ from ummanu.board.head_changes import HEAD_CHANGED_KIND, head_changes
 from ummanu.board.models import CardState
 from ummanu.board.owner_handover import OWNER, OWNER_ROLE
 from ummanu.board.roles import BOARD_ROLES, CREATE_ROLES, EDIT_ROLES, Role
-from ummanu.board.task_protocol.rows import admit_role
+from ummanu.board.task_protocol.rows import POST_MERGE_DISPOSITIONS, admit_role
 from ummanu.board.task_routing import (
     PO_EXECUTED_TYPES,
     BlockClassification,
@@ -365,6 +365,26 @@ def add_task_subcommands(subparsers) -> None:
         help="the event id of the owner's comment on this card's e2e budget decision card, made after its handover",
     )
     task_e2e.set_defaults(handler=run_task_e2e_budget)
+    dispose = task_subcommands.add_parser(
+        "dispose-post-merge",
+        help="observer or PO: close a Post-merge CI card whose committed result is red, absent or timeout in "
+        "Done; the result stays non-green and the Done records the action, reason and follow-up",
+    )
+    dispose.add_argument("--ref", required=True)
+    # Every board role parses: the writer admits the observer and the PO only.
+    dispose.add_argument("--role", required=True, choices=tuple(role.value for role in Role))
+    dispose.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
+    _add_data_dir_args(dispose)
+    dispose.add_argument("--request-id", required=True, help="repeat it unchanged after a lost reply")
+    dispose.add_argument("--result-event", required=True, help="event id of the card's committed post-merge CI result")
+    dispose.add_argument("--action", required=True, choices=POST_MERGE_DISPOSITIONS)
+    dispose.add_argument("--follow-up", default="", metavar="REF",
+                         help="issue: an open issue of the card's product; hotfix: an open code card of its project")
+    dispose_reason = dispose.add_mutually_exclusive_group(required=True)
+    dispose_reason.add_argument("--reason", help="literal reason, never a filename")
+    dispose_reason.add_argument("--reason-file", help="UTF-8 reason file")
+    _add_sprint_override_args(dispose)
+    dispose.set_defaults(handler=run_task_dispose_post_merge)
     task_edit = task_subcommands.add_parser("edit")
     task_edit.add_argument("--ref", required=True)
     task_edit.add_argument("--role", required=True, choices=_role_choices(EDIT_ROLES))
@@ -891,6 +911,24 @@ def run_task_move(args: argparse.Namespace) -> int:
             sprint_override=args.sprint_override,
             sprint_override_reason=_read_body(args.sprint_override_reason_file),
             request_id=args.request_id,
+        ),
+    )
+
+
+def run_task_dispose_post_merge(args: argparse.Namespace) -> int:
+    return _run_task_write(
+        args,
+        lambda writer, body, actor: writer.dispose_post_merge_ci(
+            role=args.role,
+            actor=actor,
+            reference=args.ref,
+            action=args.action,
+            reason=body,
+            result_event=args.result_event,
+            follow_up=args.follow_up,
+            request_id=args.request_id,
+            sprint_override=args.sprint_override,
+            sprint_override_reason=_read_body(args.sprint_override_reason_file),
         ),
     )
 

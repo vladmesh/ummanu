@@ -581,12 +581,12 @@ def publish(runtime: Any, watch: dict[str, Any]) -> None:
 
 
 def wake_facts(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The post-merge CI facts among a batch of observer wake events, in order."""
+    """The post-merge CI facts among a batch of observer wake events, in order, each with its event id."""
     facts = []
     for event in events:
         fact = post_merge_ci_fact(event)
         if fact is not None:
-            facts.append(fact)
+            facts.append({**fact, "event_id": str(event.get("event_id") or "")})
     return facts
 
 

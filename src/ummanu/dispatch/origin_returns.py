@@ -39,6 +39,7 @@ from typing import Any
 from ummanu.board import po_origin as origin_field
 from ummanu.board.origin_outbox import DELIVERED, SKIPPED, OutboxRow, outbox_for
 from ummanu.board.production_rights import DELEGATED_RESULT_INPUT, card_facts
+from ummanu.board.task_protocol.rows import POST_MERGE_DISPOSITION_KEY
 from ummanu.dispatch.po_delivery import deliver, open_successor
 from ummanu.dispatch.state import request_token
 from ummanu.kernel.errors import TaskError
@@ -237,7 +238,7 @@ def _result_lines(events: list[dict[str, Any]], index: int) -> list[str]:
     """The result of the transition at `index`, from that transition and the audit before it only.
 
     From the transition's own data where it carries one: a completion record (`[completion:...]`),
-    the decision it names, the Blocked reason and classification. Otherwise, for a Done, the worker's
+    the decision it names, a post-merge CI disposition, the Blocked reason and classification. Otherwise, for a Done, the worker's
     last done report before it in its round.
     """
     terminal = events[index]
@@ -246,6 +247,8 @@ def _result_lines(events: list[dict[str, Any]], index: int) -> list[str]:
     decision = str(_data(terminal).get("decision") or "").strip()
     decided = [f"Decision: {decision}", ""] if decision else []
     if event_column(terminal) == "done":
+        if _data(terminal).get(POST_MERGE_DISPOSITION_KEY):
+            decided += ["## Post-merge CI disposition", "", _bounded(reason), ""]
         if reason.startswith("[completion:"):
             return [*decided, "## Completion record", "", _bounded(reason)]
         if (

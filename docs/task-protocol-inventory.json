@@ -13,6 +13,7 @@
     "src/ummanu/board/task_protocol/sprint_guard.py"
   ],
   "ast_deltas": {
+    "TaskWriter.settle_post_merge_ci": "0f3ee4995956030e1d7d3530f9e039a5f1be2a9692c178f47bd7c150b82b6852",
     "TaskWriter._automatic_code_release": "61569f13202ce6d16d1952a23e9f195f8774d0c113bdaf149a8c8dce7da89ed4",
     "TaskWriter._write": "67e7d46f816dfe8bcd943558386571c71af0ef927554cb24d38c8152d1c12694",
     "_create_metadata_values": "1ca17d325b80b5b2dab60a56c7464b3463e2d326f54ef05c7c9229ce3e23d8a7",
@@ -26,15 +27,19 @@
     "TaskWriter._finish_pending_cleanup": "88b50521a055baa4f083d457bfc5d1c7e17084198cf89e25c45d88373ddb4ade",
     "TaskWriter._check_archivable": "0f7ab8f86444ad64dffff6b1bc1bbfe451c383eef202a2045387b1dc71e0139f",
     "TaskWriter._check_dispatcher_archivable": "3171143899321f345337102adbe15ec2937bef876e9d01270685354a028da05e",
-    "TaskWriter.move": "dc365e3346f78f4687bde6dd31edca6b50a04b9b70f6e926af8749529a2a4848",
+    "TaskWriter.move": "33d0000e9a5415c8f292c5e1eba6be58bf72bb5031b1c6e4794a659224b2378f",
     "TaskWriter._check_decision": "d9041ddae4c967bd6173f2bd43c1310d020c87bbad74a987e4ee8496bc2ab9f6",
     "TaskWriter._reset_transition_metadata": "3c6ea7737d5ded163069941bab750ba831eedc0e8a17ab23149c104340f27c75",
-    "TaskWriter._transition_card": "dd5cff44456c9d27c43a9fe00c401d86844557a66c6ac1e2a16e11ff6e6ef54f",
+    "TaskWriter._transition_card": "1289518ecc261aa1a7bf11dcea553681824f0d5332cdc22f0b51d5ea1e6b98ab",
     "TaskWriter._finish_pending_transition": "55359e35006cb557fdd65afec918d89da97953364cb77bcb0dcd686d1e6b1f29",
     "is_merged_release": "16340605e63a9788bb226111906af6a74b6d744dc1a40da952f350db20dfe7dd",
     "is_significant_card_event": "3d30ec0699cf32c02c84fba674ec651ad35cf5c653d2a2196eba236030fe88a7"
   },
   "definitions": {
+    "TaskWriter.dispose_post_merge_ci": {"owner": "src/ummanu/board/task_protocol/dispatcher.py", "line": 106, "baseline_ast_sha256": "1f024c68b59275e5b67930dd0135e4ed00908988c2a1404e38ff5bd2e68e9ab8"},
+    "TaskWriter._check_disposition_follow_up": {"owner": "src/ummanu/board/task_protocol/dispatcher.py", "line": 177, "baseline_ast_sha256": "06d57fe20e49754acf049036e8d02866671cfa3a90002707dd193ddf91d09d4e"},
+    "POST_MERGE_DISPOSITION_KEY": {"owner": "src/ummanu/board/task_protocol/rows.py", "line": 415, "baseline_ast_sha256": "51f15e47154f2ebfe0b6a69bbcb517dae7873d5d075473b1da3d8acf1edebef5"},
+    "POST_MERGE_DISPOSITIONS": {"owner": "src/ummanu/board/task_protocol/rows.py", "line": 417, "baseline_ast_sha256": "c19ad8a1c69272a62f151e0fd1b4b68be0f3d8dc51f09729b379df38c3462360"},
     "TaskWriter.settle_post_merge_ci": {"owner": "src/ummanu/board/task_protocol/dispatcher.py", "line": 52, "baseline_ast_sha256": "97288ed0ca6bc3af5b91b6fb67fc6e0cadb5e9e52c11cf107ed563f30a2e8cbc"},
     "TaskWriter._check_release_merge": {"owner": "src/ummanu/board/task_protocol/dispatcher.py", "line": 46, "baseline_ast_sha256": "e7b69ffe4cc6c7cfaec62a68427e370192b7f6ecc55ebeb3cedb058a55366a70"},
     "TaskWriter.head_changed": {"owner": "src/ummanu/board/task_protocol/dispatcher.py", "line": 629, "baseline_ast_sha256": "9a1c7a94b9e241f6cadc962cef80c8f3091c921242a4e9affd024d6d15e90bae"},
