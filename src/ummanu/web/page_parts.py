@@ -277,6 +277,26 @@ def _compact_sprint_card(item: dict[str, Any]) -> str:
 GATE_TONES: dict[str, str] = {"green": "ok", "red": "bad", "pending": "", "running": "accent"}
 
 
+def _pipeline(summary: dict[str, Any], *, details: bool = False) -> str:
+    """The shared stage label, with identities and reasons escaped as ordinary text."""
+    if not summary:
+        return ""
+    ci = _mapping(summary.get("ci"))
+    previous = _mapping(summary.get("previous"))
+    facts = [str(value) for value in (ci.get("sha"), ci.get("reason")) if value]
+    if previous:
+        status = "CI did not run" if previous.get("status") == "not_run" else "CI red"
+        facts.append(f"Previous {status}: {previous.get('sha') or 'SHA unknown'}")
+        if previous.get("reason"):
+            facts.append(str(previous["reason"]))
+    title = " · ".join(facts)
+    chip = _chip(str(summary.get("label") or "Stage unknown"), str(summary.get("tone") or ""))
+    return (
+        f'<span title="{escape(title)}">{chip}</span>'
+        + (f'<p class="muted">{escape(title)}</p>' if details and title else "")
+    )
+
+
 def _current_card_box(item: dict[str, Any]) -> str:
     """The card a sprint is on: where it stands, whether its gate passed, and what it is called."""
     current = _mapping(item.get("current_task"))

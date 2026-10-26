@@ -45,7 +45,8 @@ from ummanu.webproto.errors import (
     installation_refusal,
 )
 from ummanu.webproto.journal import DEFAULT_LIMIT, CommittedAudit, EventPage
-from ummanu.webproto.section import read_source
+from ummanu.webproto.pipeline import pipeline_summary, records_from
+from ummanu.webproto.section import Reading, read_source
 
 SCHEMA_VERSION = 1
 
@@ -226,6 +227,7 @@ class ReadLayer(ProtocolBoundary):
             "card": {"source": card_source.to_json(), "value": _card_value(card)},
             "project": self._project_of(report, project),
             "attempt": {"source": attempt_source.to_json(), "value": attempt},
+            "pipeline": pipeline_summary(card, record, attempt_source),
             "agents": {"source": attempt_source.to_json(), "items": rows},
             "heads": heads,
             "work": _work(card),
@@ -295,17 +297,31 @@ class ReadLayer(ProtocolBoundary):
         unreadable rather than refused. The skips are a source of their own and fail apart.
         """
         now = self._clock()
-        skips = read_source(
-            "ready_skips",
-            lambda: ready_skip_reasons(
-                json.loads(self._production_path(self.data_dir()).read_text(encoding="utf-8"))
-            ),
-            refusal=lambda exc: f"the dispatcher's Ready skips could not be read: {_reason(exc)}",
+        production = read_source(
+            "production",
+            lambda: json.loads(self._production_path(self.data_dir()).read_text(encoding="utf-8")),
+            refusal=lambda exc: f"the dispatcher production state could not be read: {_reason(exc)}",
             now=now,
             evidence=None,
         )
+        if production.answered:
+            skips = read_source(
+                "ready_skips", lambda: ready_skip_reasons(production.value),
+                refusal=lambda exc: f"the dispatcher's Ready skips could not be read: {_reason(exc)}",
+                now=now, evidence=None,
+            )
+            records = read_source(
+                "records", lambda: records_from(production.value),
+                refusal=lambda exc: f"the dispatcher production state could not be read: {_reason(exc)}",
+                now=now, evidence=None,
+            )
+        else:
+            skips = Reading("ready_skips", production.source)
+            records = Reading("records", production.source)
         try:
-            return board_reads.board_document(self._client(), now=now, project=project, sprint=sprint, skips=skips)
+            return board_reads.board_document(
+                self._client(), now=now, project=project, sprint=sprint, skips=skips, records=records,
+            )
         except Exception as exc:  # noqa: BLE001 -- the board read's one guard
             return board_reads.unreadable(
                 f"the board could not be read: {_reason(exc)}", now=now, project=project, sprint=sprint,
@@ -604,15 +620,7 @@ class ReadLayer(ProtocolBoundary):
 
     def _records(self, data_dir: Path) -> dict[str, DispatcherRecord]:
         payload = json.loads(self._production_path(data_dir).read_text(encoding="utf-8"))
-        records = payload.get("records") if isinstance(payload, dict) else None
-        if not isinstance(records, dict):
-            # An unrecognised state file proves nothing about the agents: report the source unavailable.
-            raise TypeError("the dispatcher production state carries no records object")
-        return {
-            reference: DispatcherRecord.from_json(record)
-            for reference, record in sorted(records.items())
-            if isinstance(reference, str) and isinstance(record, dict)
-        }
+        return records_from(payload)
 
     def _agents(self, data_dir: Path, *, now: float, projects_by_ref: dict[str, str]) -> dict[str, Any]:
         """Every head the dispatcher holds, with liveness from process state.

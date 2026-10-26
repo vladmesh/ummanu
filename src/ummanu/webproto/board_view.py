@@ -19,6 +19,7 @@ from ummanu.board.owner_handover import waiting_owner
 from ummanu.board.sql_rows import comment_marker
 from ummanu.dispatch.worker_report import BLOCKED_RELAY
 from ummanu.webproto import sources
+from ummanu.webproto.pipeline import pipeline_summary
 from ummanu.webproto.section import Reading
 
 SCHEMA_VERSION = 1
@@ -61,7 +62,7 @@ UNREADABLE = "unreadable"
 
 
 def board_document(
-    client: Any, *, now: float, project: str | None, sprint: str | None, skips: Reading
+    client: Any, *, now: float, project: str | None, sprint: str | None, skips: Reading, records: Reading
 ) -> dict[str, Any]:
     """The board read from `client.board_cards`, every card placed in its column, oldest move first.
 
@@ -82,6 +83,8 @@ def board_document(
         if state not in placed:
             raise ValueError(f"card {row.get('ref')!r} is in state {state!r}, which no board column shows")
         tile = _tile(row, state, now=now)
+        record = records.value.get(row.get("ref")) if records.answered else None
+        tile["pipeline"] = pipeline_summary(row, record, records.source)
         tile["ready_skip"] = skips.value.get(row.get("ref")) if state == "ready" and skips.answered else None
         placed[state].append(tile)
     return _document(

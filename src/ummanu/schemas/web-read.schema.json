@@ -297,6 +297,36 @@
           "required": ["source", "value"],
           "properties": {"source": {"$ref": "#/$defs/source"}, "value": {"type": ["object", "null"]}}
         },
+        "pipeline": {
+          "type": "object",
+          "required": ["stage", "label", "tone", "ci", "previous", "source"],
+          "properties": {
+            "stage": {"type": ["string", "null"]},
+            "label": {"type": "string"},
+            "tone": {"enum": ["", "accent", "warn", "bad"]},
+            "source": {"$ref": "#/$defs/source"},
+            "ci": {
+              "type": "object",
+              "required": ["status", "sha", "reason"],
+              "properties": {
+                "status": {"enum": ["unknown", "not_applicable", "waiting", "pending", "green", "red", "not_run"]},
+                "sha": {"type": ["string", "null"]},
+                "reason": {"type": ["string", "null"]}
+              }
+            },
+            "previous": {
+              "type": ["object", "null"],
+              "required": ["status", "sha", "failure_class", "reason", "evidence"],
+              "properties": {
+                "status": {"enum": ["red", "not_run"]},
+                "sha": {"type": "string"},
+                "failure_class": {"type": "string"},
+                "reason": {"type": ["string", "null"]},
+                "evidence": {"type": "array", "items": {"type": "object"}}
+              }
+            }
+          }
+        },
         "agents": {
           "type": "object",
           "required": ["source", "items"],

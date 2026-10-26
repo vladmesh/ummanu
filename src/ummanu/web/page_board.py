@@ -7,7 +7,7 @@ from typing import Any
 from urllib.parse import quote
 
 from ummanu.web.page_assets import _BOARD_SCRIPT
-from ummanu.web.page_parts import _age, _link, _or_dash
+from ummanu.web.page_parts import _age, _link, _or_dash, _pipeline
 from ummanu.web.page_shell import _page
 from ummanu.web.page_values import _mapping
 from ummanu.webproto import board_view
@@ -105,6 +105,7 @@ def _tile(tile: dict[str, Any], *, blocked: bool) -> str:
             f'<div class="tile-head">{reference}{age}</div>',
             f'<p class="tile-title" title="{escape(str(title or NO_TITLE))}">{escape(str(title or NO_TITLE))}</p>',
             f'<p class="tile-meta">{meta}</p>',
+            _pipeline(_mapping(tile.get("pipeline"))),
             reason,
             skipped,
             "</li>",
