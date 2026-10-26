@@ -3503,6 +3503,9 @@ class AssessmentStateTests(CardStoreCase):
                 (CardState.VALIDATE, CardState.ASSESSMENT),
                 (CardState.ASSESSMENT, CardState.IN_PROGRESS),
                 (CardState.ASSESSMENT, CardState.DONE),
+                (CardState.ASSESSMENT, CardState.POST_MERGE_CI),
+                (CardState.POST_MERGE_CI, CardState.DONE),
+                (CardState.DONE, CardState.POST_MERGE_CI),
                 (CardState.ASSESSMENT, CardState.BLOCKED),
             },
         )

@@ -390,17 +390,18 @@ class ReleaseOpensTheWatchTests(unittest.TestCase):
         self.runtime.host.complete_green.return_value = MergeLanding(
             sha="", base="main", path="github-pr", ci="github", branch=BRANCH
         )
-        self.runtime.host._run.return_value = _completed("")
+        self.runtime.host.landed_merge_commit.return_value = ""
         task = {"ref": REF, "type": "code", "project": "sample", "sprint": SPRINT}
         self.assertEqual(self.release(task)["status"], "pending")
         self.runtime.host.teardown.assert_not_called()
         self.assertIn(REF, self.records)
         self.assertEqual(post_merge.reconcile_post_merge_watches(self.runtime, self.payload, self.records), [])
         self.runtime.writer.post_merge_ci.assert_not_called()
-        self.runtime.host._run.return_value = _completed(SHA)
+        self.runtime.host.landed_merge_commit.return_value = SHA
         self.assertEqual(self.release(task)["to"], "post_merge_ci")
         self.runtime.host.complete_green.assert_called_once()
         self.runtime.host.teardown.assert_called_once()
+        self.runtime.host.landed_merge_commit.assert_called_with(self.record, path="github-pr", branch=BRANCH)
 
     def test_a_research_release_opens_no_watch(self) -> None:
         with mock.patch.object(release_lifecycle, "missing_completion_evidence", return_value=""):
@@ -1043,6 +1044,16 @@ class MergePathLandingTests(unittest.TestCase):
                 record = SimpleNamespace(workspace=str(root / "ws"))
                 landing = host.complete_green({"ref": REF, "project": "sample", "workspace": {}}, record)
                 self.assertEqual(landing, expected)
+
+    def test_landed_commit_recovery_only_reads_the_original_merge_identity(self) -> None:
+        for path, expected, command in (
+            ("github-pr", SHA, ["gh", "pr", "view", BRANCH, "--json", "mergeCommit", "-q", ".mergeCommit.oid"]),
+            ("push", OTHER_SHA, ["git", "-C", "/candidate", "rev-parse", BRANCH]),
+        ):
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as tmp:
+                host = _MergeHost(Path(tmp), ci="github" if path == "github-pr" else "local")
+                actual = host.landed_merge_commit(SimpleNamespace(workspace="/candidate"), path=path, branch=BRANCH)
+                self.assertEqual((actual, host.runs), (expected, [command]))
 
     def test_a_card_on_the_live_root_lands_nothing(self) -> None:
         """The instance-repository landing was the third path; it is gone, on either CI mode."""

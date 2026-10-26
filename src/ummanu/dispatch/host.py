@@ -1194,6 +1194,14 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
             except HostError:
                 return ""
 
+    def landed_merge_commit(self, record: DispatcherRecord, *, path: str, branch: str) -> str:
+        """Read the commit of an already landed release without repeating its merge."""
+        if path == "github-pr":
+            return self._landed_pr_commit(record, branch)
+        if path == "push":
+            return self._pushed_branch_head(record, branch)
+        raise HostError(f"unknown release merge path: {path}")
+
     def _landed_pr_commit(self, record: DispatcherRecord, branch: str) -> str:
         """The merge commit a pull request merge just landed, or "" when it cannot be read yet."""
         with tick_stage("release_landed"):

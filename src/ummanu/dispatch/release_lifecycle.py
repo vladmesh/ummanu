@@ -514,12 +514,9 @@ def release_effect(
                 runtime.save_records(payload, records)
         if watch is not None:
             if not watch.get("merge_sha"):
-                if watch["merge_path"] == "github-pr":
-                    watch["merge_sha"] = post_merge.pr_merge_commit(
-                        runtime.host._run, watch["branch"], Path(record.workspace)
-                    )
-                else:
-                    watch["merge_sha"] = runtime.host._pushed_branch_head(record, watch["branch"])
+                watch["merge_sha"] = runtime.host.landed_merge_commit(
+                    record, path=watch["merge_path"], branch=watch["branch"]
+                )
                 runtime.save_records(payload, records)
             if not watch.get("merge_sha"):
                 return {"status": "pending", "step": step, "pilot_ref": ref,

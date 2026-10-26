@@ -654,6 +654,7 @@ class FakeHost:
         # caller has to read for more than its message, e.g. a head pane that was not ready.
         self.fail_restart_error: Exception | None = None
         self.fail_complete_reason = ""
+        self.landed_commit = ""
         self.worker_status_result: dict | None = None
         self.review_status_result: dict | None = None
         self.worker_status_error: Exception | None = None
@@ -1538,6 +1539,12 @@ class FakeHost:
         if self.fail_complete_reason:
             raise HostError(self.fail_complete_reason)
         self.completed.append(task["ref"])
+
+    def landed_merge_commit(self, record, *, path: str, branch: str) -> str:
+        self.calls.append("landed_merge_commit")
+        if path not in {"github-pr", "push"}:
+            raise HostError(f"unknown release merge path: {path}")
+        return self.landed_commit
 
     def stop(self, record) -> None:
         self.calls.append("stop")
