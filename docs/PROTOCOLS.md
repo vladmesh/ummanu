@@ -4393,6 +4393,32 @@ also carries the card's `origin` ([PO delegation](#po-delegation), with its `ret
 ([Wait cards](#wait-cards)) and `e2e` ([The e2e stage](#the-e2e-stage)) blocks as `task show` gives them,
 each null for a card without one.
 
+`task_snapshot.pipeline`, native `task show.pipeline` and each board tile's `pipeline` share
+`webproto.pipeline.pipeline_summary`. The read-only shape is
+`{stage, label, tone, ci: {status, sha, reason}, previous, source}`. `stage` is the board state;
+`label` is the compact stage/CI caption rendered above the card's task and on its board tile,
+with existing chip tones. The card shows identities and reasons beneath it; the tile keeps them
+in its tooltip. Native `task show` retains its card fields and committed `head_changes`.
+`ci.status` is `waiting` for a code card in CI before an answer, `pending` when
+`gate_pending_since` records a nonterminal answer, or `unknown` for missing/unreadable records
+and transport errors. Review is labelled Review, never CI waiting. `green` requires the record's
+`gate_state` plus a valid executed `gate_attestation`; a recorded review commit must match it.
+That receipt describes only its `validated_sha`, not an inspected checkout or a new admission.
+Pending/waiting has `sha: null`: a published ref is not a round-bound pending candidate identity.
+Non-code cards have `not_applicable` and keep their own board stage.
+
+`previous` is null or `{status: red|not_run, sha, failure_class, reason, evidence}`, copied from
+`rejected_sha`, `rejected_failure_class`, `rejected_failure_reason` and `rejected_gate_evidence`.
+A reviewer rejection is excluded. During the recorded `gate_red` return intent in CI, that
+result is current `ci.status`; after the move to In progress it is historical `previous`.
+The In progress caption names only the stage: retained rejection fields do not establish the
+cause of the current return or the latest CI result after a later green round. A new report or
+pending candidate keeps the historical rejection's SHA without inheriting its red status.
+Publication refusal is `not_run`, explicitly "CI did not run" in the rejection details.
+The source uses the existing availability contract: unavailable does not mean empty or green.
+Card reads reuse their single dispatcher read; native `task show` adds one guarded dispatcher
+read. The projection never reads Git, GitHub, heads or reports, and writes no state or audit.
+
 **`task_events(ref, cursor, limit)`** — the history, one page at a time, with `next_cursor`.
 
 **`po_delegated(session)`** — the cards whose `origin.po_session` is this PO session (`relation:
@@ -4412,7 +4438,7 @@ cards in its state; `done` holds the Done cards moved in the last 48 hours and e
 archived ones included, of an open sprint. `project` keeps that project's cards of this window,
 `sprint` that sprint's, and `sprint="none"` the cards of no sprint; both together intersect, and a
 value no card matches is empty columns. The document echoes them as `filter: {project, sprint}`.
-A tile is `{ref, title, type, project, sprint, head, moved, blocked_reason, waiting_owner, ready_skip}`: `sprint`
+A tile is `{ref, title, type, project, sprint, head, moved, blocked_reason, waiting_owner, ready_skip, pipeline}`: `sprint`
 is `{state: linked|none|unreadable, ref}`; `head` is the chosen head else the resolved one, the worker's in `in_progress` and the reviewer's in `validate` or `review`; CI names no running reviewer,
 null elsewhere; `moved` is `{at, age_seconds}`, null for a missing, future or out-of-range
 `date_moved`; `blocked_reason` comes from the comment the move into Blocked wrote: the earliest
@@ -4426,8 +4452,11 @@ heading marks, a leading `classification: <value>` clause and a leading `Blocker
 stripped. It is null when no such line is left; `waiting_owner` is the PO's handover mark;
 `ready_skip` is `{reason, since}` from the dispatcher's `production-state.json` for a Ready card its
 claim pass skipped (as in a sprint's [`ready_skips`](#what-a-sprint-is-doing)), and null for any other
-card. That file is the document's `ready_skips.source`, read apart: when it cannot be read every
-`ready_skip` is null and the board stands.
+card. One production-state file read supplies both ready skips and dispatcher records for all
+tiles, without per-card filesystem, GitHub, head or TaskReader calls. Skip and record decoding
+fail apart. That file supplies `ready_skips.source` and each tile's `pipeline.source`: when it
+cannot be read every `ready_skip` is null, CI is unknown, and the board stands. Malformed
+dispatcher records leave tiles and skips readable with unavailable pipeline evidence.
 A text value that is missing or not a string is null. Any failure of the read is the document's
 unavailable `source` with its reason and `columns` null, never a refusal.
 

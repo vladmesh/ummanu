@@ -7,6 +7,8 @@ board store statement returns; which rows the store selects is `tests/test_web_b
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import re
 import tempfile
@@ -16,12 +18,18 @@ from decimal import Decimal
 from html import unescape
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from tests.support.instance import status_instance
 from tests.web_fakes import Recording, system_snapshot
 from ummanu.board import sprint_dod
 from ummanu.board.owner_handover import WAITING_OWNER, WAITING_OWNER_BY, WAITING_OWNER_REASON
+from ummanu.cli import main
+from ummanu.config import validate
+from ummanu.dispatch.gate_receipt import mint_gate_receipt
+from ummanu.dispatch.state import REVIEW_REJECTION_REASON
 from ummanu.web.app import WebApp
+from ummanu.web.page_card import task as task_page
 from ummanu.webproto.reads import ReadLayer
 
 NOW = 1_800_000_000.0
@@ -345,6 +353,231 @@ class ReadySkipTests(unittest.TestCase):
         self.assertEqual(document["source"]["state"], "available")
         self.assertEqual(document["ready_skips"]["source"]["state"], "unavailable")
         self.assertIsNone(self.tiles(document)["u-1"]["ready_skip"])
+
+
+class PipelineDisplayTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.instance = status_instance(self.root).instance_path
+        self.data_dir = self.root / "data"
+        self.path = self.data_dir / "dispatcher" / "production-state.json"
+        self.path.parent.mkdir(parents=True)
+        self.client = BoardClient()
+        self.cards = {}
+        self.enterContext(mock.patch("ummanu.task_commands.card_client", return_value=self.client))
+        self.show = self.enterContext(mock.patch("ummanu.tasks.TaskReader.show", side_effect=lambda ref: self.cards[ref]))
+        self.audit = mock.Mock(spec=["events"])
+        self.audit.events.return_value = []
+        self.enterContext(mock.patch("ummanu.tasks.task_audit_for", return_value=self.audit))
+        self.enterContext(mock.patch("ummanu.webproto.reads.task_audit_for", return_value=self.audit))
+        self.enterContext(mock.patch("time.time", return_value=NOW))
+        self.reads = ReadLayer(self.instance, board_client=self.client, clock=lambda: NOW, data_dir=self.data_dir)
+
+    def write(self, cards, records) -> None:
+        self.cards = {card["ref"]: card for card in cards}
+        self.client.rows = cards
+        self.path.write_text(json.dumps({"records": records}), encoding="utf-8")
+
+    def native(self, ref="sample-1"):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = main(["task", "show", "--ref", ref, "--instance", str(self.instance)])
+        self.assertEqual(code, 0, output.getvalue())
+        return json.loads(output.getvalue())
+
+    def test_stage_facts_agree_in_all_consumers_and_render_on_board_and_card(self) -> None:
+        sha = "a" * 40
+        receipt = mint_gate_receipt(
+            validated_sha=sha, base_sha="b" * 40, gate_mode="github",
+            required_checks=[{"name": "unit", "conclusion": "SUCCESS"}], check_set_identity="unit",
+        )
+        red = {"rejected_sha": sha, "rejected_failure_class": "substantive",
+               "rejected_failure_reason": "unit failed <reason>",
+               "rejected_gate_evidence": [{"run_id": "42", "suite": "unit", "artifact": "suite.log"}]}
+        publication = {**red, "rejected_failure_class": "publication",
+                       "rejected_failure_reason": "branch lease refused <reason>", "rejected_gate_evidence": []}
+        green = {"gate_state": "green", "gate_attestation": receipt, "review_commit": sha}
+        cases = [
+            ("waiting", "ci", "code", {}, "waiting", "CI waiting", None),
+            ("pending", "ci", "code", {"gate_pending_since": 1}, "pending", "CI pending", None),
+            ("returning", "ci", "code", {**red, "worker_continuation": {
+                "stage": "red_transition_pending", "phase": "gate", "verdict_outcome": "gate_red",
+            }}, "red", "CI red; returning to worker", None),
+            ("rework", "in_progress", "code", red, "unknown", "In progress", "red"),
+            ("new report", "ci", "code", red, "waiting", "CI waiting", "red"),
+            ("new pending", "ci", "code", {**red, "gate_pending_since": 1,
+                "gate_published_ref": {"branch": "pipeline/sample-1", "sha": "c" * 40}},
+                "pending", "CI pending", "red"),
+            ("review", "review", "code", green, "green", "Review; CI passed", None),
+            ("review missing receipt", "review", "code", {"gate_state": "green"},
+                "unknown", "Review; CI status unknown", None),
+            ("review mismatched receipt", "review", "code", {**green, "review_commit": "c" * 40},
+                "unknown", "Review; CI status unknown", None),
+            ("stale green in new pending", "ci", "code", {**green, "gate_pending_since": 1},
+                "pending", "CI pending", None),
+            ("publication", "in_progress", "code", publication,
+                "unknown", "In progress", "not_run"),
+            ("publication returning", "ci", "code", {**publication, "worker_continuation": {
+                "stage": "red_transition_pending", "phase": "gate", "verdict_outcome": "gate_red",
+            }}, "not_run", "Publication failed; CI did not run", None),
+            ("transport", "ci", "code", {"gate_pending_since": 1, "gate_transport_error": "API <unavailable>"},
+                "unknown", "CI status unknown", None),
+            ("non-code", "in_progress", "research", green, "not_applicable", "In progress", None),
+            ("finished", "done", "code", None, "unknown", "Done", None),
+            ("missing", "ci", "code", None, "unknown", "CI status unknown", None),
+            ("review rejection", "in_progress", "code", {**red, "rejected_failure_reason": REVIEW_REJECTION_REASON},
+                "unknown", "In progress", None),
+        ]
+        for name, stage, kind, record, status, label, previous in cases:
+            with self.subTest(name=name):
+                card = row("sample-1", stage, type=kind, moved=NOW - HOUR)
+                self.write([card], {} if record is None else {"sample-1": record})
+                document = self.reads.board_view()
+                tile = next(tile for col in document["columns"] for tile in col["cards"])
+                snapshot = self.reads.task_snapshot("sample-1")
+                native = self.native()
+                summary = tile["pipeline"]
+                self.assertEqual(summary, snapshot["pipeline"])
+                self.assertEqual(summary, native["pipeline"])
+                self.assertEqual((summary["ci"]["status"], summary["label"]), (status, label))
+                if previous:
+                    self.assertEqual(summary["previous"]["status"], previous)
+                    self.assertEqual(summary["previous"]["sha"], sha)
+                    self.assertEqual(summary["previous"]["evidence"], record["rejected_gate_evidence"])
+                else:
+                    self.assertIsNone(summary["previous"])
+                self.assertEqual(summary["ci"]["sha"], sha if status in {"green", "red", "not_run"} else None)
+                self.assertEqual(validate(snapshot, "web-read", "task"), [])
+                board_html = page(self.client, instance=str(self.instance))[1]
+                card_html = task_page(snapshot, runs={})
+                self.assertIn(label, text(tile_of(board_html, "sample-1")))
+                hero = card_html.split('<div class="grid">')[0]
+                self.assertIn(label, text(hero))
+                if previous or status in {"red", "not_run"}:
+                    self.assertIn(sha, tile_of(board_html, "sample-1"))
+                    self.assertIn(sha, hero)
+                    self.assertIn("&lt;reason&gt;", hero)
+                if stage == "ci":
+                    self.assertIsNone(tile["head"])
+
+    def test_later_rework_keeps_rejection_as_history_without_a_causal_caption(self) -> None:
+        rejected_sha, accepted_sha = "a" * 40, "c" * 40
+        receipt = mint_gate_receipt(
+            validated_sha=accepted_sha, base_sha="b" * 40, gate_mode="github",
+            required_checks=[{"name": "unit", "conclusion": "SUCCESS"}], check_set_identity="unit",
+        )
+        for failure, return_kind in (("substantive", "observer"), ("publication", "recovery")):
+            rejection = {
+                "rejected_sha": rejected_sha, "rejected_failure_class": failure,
+                "rejected_failure_reason": "earlier rejection <reason>", "rejected_gate_evidence": [],
+            }
+            rejected_status = "not_run" if failure == "publication" else "red"
+            green = {**rejection, "gate_state": "green", "gate_attestation": receipt,
+                     "review_commit": accepted_sha}
+            returned = {**rejection, "worker_continuation": {
+                "stage": "delivery_confirmed", "phase": "review", "verdict_outcome": "green", "decision": "rework",
+            }} if return_kind == "observer" else rejection
+            sequence = [
+                ("ci", {**rejection, "worker_continuation": {
+                    "stage": "red_transition_pending", "phase": "gate", "verdict_outcome": "gate_red",
+                }}, rejected_status, "Publication failed; CI did not run" if failure == "publication"
+                    else "CI red; returning to worker"),
+                ("in_progress", rejection, "unknown", "In progress"),
+                ("ci", {**rejection, "gate_pending_since": 1}, "pending", "CI pending"),
+                ("review", green, "green", "Review; CI passed"),
+                ("assessment", green, "green", "Assessment"),
+                ("in_progress", returned, "unknown", "In progress"),
+            ]
+            if return_kind == "recovery":
+                sequence.insert(-1, ("blocked", green, "unknown", "Blocked"))
+            for index, (stage, record, status, label) in enumerate(sequence):
+                with self.subTest(failure=failure, return_kind=return_kind, step=index, stage=stage):
+                    card = row("sample-1", stage, moved=NOW - HOUR)
+                    self.write([card], {"sample-1": record})
+                    document = self.reads.board_view()
+                    tile = next(tile for column in document["columns"] for tile in column["cards"])
+                    snapshot = self.reads.task_snapshot("sample-1")
+                    summary = tile["pipeline"]
+                    self.assertEqual(summary, snapshot["pipeline"])
+                    self.assertEqual(summary, self.native()["pipeline"])
+                    self.assertEqual((summary["label"], summary["ci"]["status"]), (label, status))
+                    self.assertEqual(summary["ci"]["sha"], accepted_sha if status == "green"
+                                     else rejected_sha if index == 0 else None)
+                    if index == 0:
+                        self.assertIsNone(summary["previous"])
+                    else:
+                        self.assertEqual(summary["previous"], {
+                            "status": rejected_status, "sha": rejected_sha, "failure_class": failure,
+                            "reason": rejection["rejected_failure_reason"], "evidence": [],
+                        })
+                    board_html = page(self.client, instance=str(self.instance))[1]
+                    hero = task_page(snapshot, runs={}).split('<div class="grid">')[0]
+                    for rendered in (tile_of(board_html, "sample-1"), hero):
+                        self.assertEqual(re.findall(
+                            r'<span title="[^"]*"><span class="chip[^"]*">([^<]*)</span></span>', rendered,
+                        ), [label])
+                        self.assertIn(rejected_sha, rendered)
+                        self.assertIn("earlier rejection &lt;reason&gt;", rendered)
+                        if index:
+                            detail = "CI did not run" if failure == "publication" else "CI red"
+                            self.assertIn(f"Previous {detail}: {rejected_sha}", rendered)
+
+    def test_board_batches_production_read_and_never_reads_individual_cards(self) -> None:
+        cards = [row(f"sample-{index}", "ci", moved=NOW - HOUR) for index in range(1, 51)]
+        self.write(cards, {card["ref"]: {"gate_pending_since": 1} for card in cards})
+        read_text = Path.read_text
+        with mock.patch.object(Path, "read_text", autospec=True, side_effect=read_text) as reads:
+            document = self.reads.board_view()
+        self.assertEqual([call.args[0] for call in reads.call_args_list], [self.path])
+        self.assertEqual(len(self.client.asked), 1)
+        self.show.assert_not_called()
+        self.audit.events.assert_not_called()
+        summaries = [tile["pipeline"] for col in document["columns"] for tile in col["cards"]]
+        self.assertEqual(len(summaries), 50)
+        self.assertEqual({summary["ci"]["status"] for summary in summaries}, {"pending"})
+
+    def test_unavailable_records_preserve_cards_and_explain_unknown_ci(self) -> None:
+        card = row("sample-1", "ci", moved=NOW - HOUR)
+        for content in (None, "{", json.dumps({"records": {"sample-1": {"attempt_round": "bad"}}}),
+                        json.dumps({"records": {"sample-1": None}})):
+            with self.subTest(content=content):
+                self.write([card], {})
+                if content is None:
+                    self.path.unlink()
+                else:
+                    self.path.write_text(content, encoding="utf-8")
+                document = self.reads.board_view()
+                tile = next(tile for col in document["columns"] for tile in col["cards"])
+                snapshot = self.reads.task_snapshot("sample-1")
+                native = self.native()
+                self.assertEqual(document["source"]["state"], "available")
+                self.assertEqual(snapshot["card"]["value"]["title"], card["title"])
+                for summary in (tile["pipeline"], snapshot["pipeline"], native["pipeline"]):
+                    self.assertEqual(summary["source"]["state"], "unavailable")
+                    self.assertEqual(summary["ci"]["status"], "unknown")
+                    self.assertIn("could not be read", summary["ci"]["reason"])
+                    self.assertEqual(summary["label"], "CI status unknown")
+                self.assertIn("CI status unknown", text(tile_of(page(self.client, instance=str(self.instance))[1], "sample-1")))
+                self.assertIn("could not be read", text(task_page(snapshot, runs={})))
+
+    def test_task_show_preserves_card_and_committed_head_changes_with_one_record_read(self) -> None:
+        card = row("sample-1", "ci", moved=NOW - HOUR)
+        self.write([card], {"sample-1": {"gate_pending_since": 1}})
+        read_text = Path.read_text
+        with mock.patch.object(Path, "read_text", autospec=True, side_effect=read_text) as reads:
+            self.reads.task_snapshot("sample-1")
+        self.assertEqual([call.args[0] for call in reads.call_args_list].count(self.path), 1)
+        payload = {"role": "worker", "change": "replaced", "reason": "stalled", "before": {"run_id": "old"}}
+        self.audit.events.return_value = [{
+            "kind": "head_changed", "occurred_at": "2026-01-01T00:00:00Z", "request_id": "change-1",
+            "payload": payload,
+        }]
+        with mock.patch.object(Path, "read_text", autospec=True, side_effect=read_text) as reads:
+            result = self.native()
+        self.assertEqual({key: result[key] for key in card}, card)
+        self.assertEqual(result["head_changes"], [{"at": "2026-01-01T00:00:00Z", "request_id": "change-1", **payload}])
+        self.assertEqual([call.args[0] for call in reads.call_args_list].count(self.path), 1)
+        self.assertEqual(result["pipeline"]["ci"]["status"], "pending")
 
 
 class FilterTests(unittest.TestCase):

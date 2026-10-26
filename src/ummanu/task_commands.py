@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import json
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -491,16 +492,30 @@ def run_task_list(args: argparse.Namespace) -> int:
 
 
 def run_task_show(args: argparse.Namespace) -> int:
-    return _run_task_read(args, lambda reader: _show_with_head_changes(reader, args.ref))
+    return _run_task_read(args, lambda reader: _show_with_head_changes(reader, args.ref, args=args))
 
 
-def _show_with_head_changes(reader: TaskReader, reference: str) -> dict[str, object]:
-    """The card, and its head changes read from the card's own committed audit."""
+def _show_with_head_changes(reader: TaskReader, reference: str, *, args: argparse.Namespace) -> dict[str, object]:
+    """The card, its committed head changes and the dispatcher's read-only stage summary."""
+    import time
+
     from ummanu.tasks import task_audit_for
+    from ummanu.webproto.pipeline import pipeline_summary, records_from
+    from ummanu.webproto.section import read_source
 
     card = reader.show(reference)
     events = task_audit_for(reader.client).events(reference, kind=HEAD_CHANGED_KIND)
-    return {**card, "head_changes": head_changes(events)}
+    records = read_source(
+        "records",
+        lambda: records_from(json.loads(
+            (Path(resolve_data_dir(args)) / "dispatcher" / "production-state.json").read_text(encoding="utf-8")
+        )),
+        refusal=lambda exc: f"the dispatcher production state could not be read: {exc}",
+        now=time.time(), evidence=None,
+    )
+    record = records.value.get(reference) if records.answered else None
+    return {**card, "head_changes": head_changes(events),
+            "pipeline": pipeline_summary(card, record, records.source)}
 
 
 def run_task_repair_references_preview(args: argparse.Namespace) -> int:
