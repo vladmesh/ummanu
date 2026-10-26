@@ -712,6 +712,37 @@ class MigrationScriptTests(unittest.TestCase):
             ],
         )
 
+    def test_post_merge_ci_revision_is_additive_and_widens_the_state_check_to_the_card_vocabulary(self) -> None:
+        import io
+        import re
+
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+
+        from ummanu.board.models import CardState
+        from ummanu.board.release_migrations import admit_additive
+
+        script = migrate.script_directory()
+        revision = script.get_revision("0038_card_post_merge_ci")
+        admit_additive(script, (revision.revision,))
+        output = io.StringIO()
+        context = MigrationContext.configure(
+            dialect_name="postgresql", opts={"as_sql": True, "output_buffer": output}
+        )
+        with Operations.context(context):
+            revision.module.upgrade()
+        drop, add = output.getvalue().strip().split(";\n\n")
+        self.assertEqual(drop, "ALTER TABLE tasks DROP CONSTRAINT task_state_in_vocabulary")
+        self.assertTrue(add.startswith("ALTER TABLE tasks ADD CONSTRAINT task_state_in_vocabulary CHECK "))
+        [check] = [
+            constraint
+            for constraint in schema.Base.metadata.tables["tasks"].constraints
+            if constraint.name == "task_state_in_vocabulary"
+        ]
+        vocabulary = {state.value for state in CardState}
+        self.assertEqual(set(re.findall(r"'([a-z_]+)'", add)), vocabulary)
+        self.assertEqual(set(re.findall(r"'([a-z_]+)'", str(check.sqltext))), vocabulary)
+
     def test_the_po_request_vocabulary_is_one_list_in_code_schema_and_head_migration(self) -> None:
         """A `po_requests` operation the CHECK does not admit rolls back every write that records it.
 
@@ -747,6 +778,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0038_card_post_merge_ci",
                 "0037_stage_budget_candidates",
                 "0036_card_ci_review",
                 "0035_issue_reopened",

@@ -429,7 +429,8 @@ class Task(Base):
             name="task_live_impact_is_research_only",
         ),
         sa.CheckConstraint(
-            "state IN ('issues','ready','in_progress','validate','ci','review','assessment','blocked','done')",
+            "state IN ('issues','ready','in_progress','validate','ci','review','assessment','post_merge_ci',"
+            "'blocked','done')",
             name="task_state_in_vocabulary",
         ),
         sa.CheckConstraint("complexity IN ('cheap','standard','hard','frontier')"),

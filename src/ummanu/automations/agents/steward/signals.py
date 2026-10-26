@@ -73,6 +73,7 @@ _STATE_COLUMNS = {
     "ci": "CI",
     "review": "Review",
     "assessment": "Assessment",
+    "post_merge_ci": "Post-merge CI",
     "blocked": "Blocked",
     "done": "Done",
 }

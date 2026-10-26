@@ -161,6 +161,7 @@ class CardState(StrEnum):
     CI = "ci"
     REVIEW = "review"
     ASSESSMENT = "assessment"
+    POST_MERGE_CI = "post_merge_ci"
     BLOCKED = "blocked"
     DONE = "done"
 

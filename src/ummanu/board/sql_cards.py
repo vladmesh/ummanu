@@ -71,6 +71,7 @@ BOARD_COLUMNS = (
     (8, "CI"),
     (9, "Review"),
     (5, "Assessment"),
+    (10, "Post-merge CI"),
     (6, "Blocked"),
     (7, "Done"),
 )
@@ -84,6 +85,7 @@ _COLUMN_ID_BY_STATE = {
     "ci": 8,
     "review": 9,
     "assessment": 5,
+    "post_merge_ci": 10,
     "blocked": 6,
     "done": 7,
 }

@@ -101,7 +101,13 @@ Code: Ready → In progress → CI → Review → Assessment → Done
 Research/infra: Ready → In progress → Validate → Assessment → Done
 ```
 
-Board columns, in order: `Issues, Ready, In progress, Validate, CI, Review, Assessment, Blocked, Done`.
+Board columns, in order: `Issues, Ready, In progress, Validate, CI, Review, Assessment, Post-merge CI,
+Blocked, Done`.
+
+`post_merge_ci` (Post-merge CI) is a persisted Card state for a merged card waiting on its exact
+merge commit's CI. The board store, `task show`, `task list --state` and the board and read views
+carry it. No producer enters it yet and no role holds a move into or out of it: the release still
+moves Assessment to Done and resolves the [post-merge watch](#post-merge-ci) off the card.
 
 A code report:done enters CI before the mechanical gate runs. Pending checks and transport retries
 remain in CI. An accepted green gate for the current SHA permits Review when review is required,
@@ -4305,7 +4311,7 @@ reference, a project its registered id.
 
 **`system_snapshot()`** — installation health (`collect_status`, as `ummanu status --json`), the
 registered projects from validated bindings, the cards in `ready`, `in_progress`, `validate`, `ci`,
-`review`, `assessment` and `blocked`, and every head the dispatcher holds with its card and project.
+`review`, `assessment`, `post_merge_ci` and `blocked`, and every head the dispatcher holds with its card and project.
 
 **`task_snapshot(ref)`** — the card as `ummanu task show` reads it, its project and whether that
 project is registered, what the dispatcher durably holds for it (attempt, round, gate state, workspace,
@@ -4327,7 +4333,7 @@ rows in one read) and nothing per card; `items` is null, never `[]`, with an una
 the board could not be read.
 
 **`board_view(project=None, sprint=None)`** — every work card (a task with a `task_type`) in its
-column (`issues`, `ready`, `in_progress`, `validate`, `ci`, `review`, `assessment`, `blocked`, `done`, in that
+column (`issues`, `ready`, `in_progress`, `validate`, `ci`, `review`, `assessment`, `post_merge_ci`, `blocked`, `done`, in that
 order), each column with its `count` and its `cards`, the oldest `date_moved` first and an unknown
 one counted as oldest. One board store statement (`SqlCardClient.board_cards`) over `tasks`, their
 `task_comments` and `sprints`, whatever the filter and the card count; Product and Issue rows are

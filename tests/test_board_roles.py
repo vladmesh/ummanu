@@ -81,8 +81,9 @@ class DispatcherStageTests(unittest.TestCase):
 
     def test_only_the_dispatcher_moves_a_card_into_its_stages_and_blocked_stays_an_emergency_stop(self) -> None:
         emergency_sources = {
-            Role.PO: set(CardState) - {CardState.BLOCKED, CardState.DONE},
-            Role.OBSERVER: set(CardState) - {CardState.BLOCKED, CardState.DONE, CardState.ASSESSMENT},
+            Role.PO: set(CardState) - {CardState.BLOCKED, CardState.DONE, CardState.POST_MERGE_CI},
+            Role.OBSERVER: set(CardState)
+            - {CardState.BLOCKED, CardState.DONE, CardState.ASSESSMENT, CardState.POST_MERGE_CI},
             Role.STEWARD: {CardState.READY, CardState.IN_PROGRESS, CardState.VALIDATE, CardState.CI, CardState.REVIEW, CardState.ASSESSMENT},
         }
         for role, source, target in product(Role, CardState, CardState):
@@ -131,6 +132,12 @@ class DispatcherStageTests(unittest.TestCase):
             for role in Role:
                 with self.subTest(role=role, source=source), self.assertRaises(CardTransitionForbidden):
                     card_transition(role, source, CardState.DONE)
+
+    def test_no_role_moves_a_card_into_or_out_of_post_merge_ci(self) -> None:
+        for role, other in product(Role, set(CardState) - {CardState.POST_MERGE_CI}):
+            for source, target in ((other, CardState.POST_MERGE_CI), (CardState.POST_MERGE_CI, other)):
+                with self.subTest(role=role.value, source=source.value, target=target.value):
+                    self.assertFalse(self.holds(role, source, target))
 
     def test_the_steward_stops_a_card_under_review_only_with_a_reason(self) -> None:
         def facts(reason: str) -> CardMoveFacts:
