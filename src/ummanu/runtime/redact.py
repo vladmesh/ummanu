@@ -26,22 +26,25 @@ MIN_ENV_VALUE_LEN = 12
 
 REDACTED = "«REDACTED»"
 
+# A key cannot start inside a word: `task-<hex>` must not read as `sk-<hex>`.
+_KEY_START = r"(?<![A-Za-z0-9_-])"
+
 # Most specific first.
 PATTERNS = [
-    (re.compile(r"AGE-SECRET-KEY-1[0-9A-Z]{50,}"), "age-secret-key"),
-    (re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"), "anthropic-key"),
-    (re.compile(r"sk-or-v1-[A-Za-z0-9]{20,}"), "openrouter-key"),
-    (re.compile(r"sk-proj-[A-Za-z0-9_-]{20,}"), "openai-project-key"),
-    (re.compile(r"sk-[A-Za-z0-9]{32,}"), "openai-key"),
-    (re.compile(r"gh[pousr]_[A-Za-z0-9]{36,}"), "github-token"),
-    (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "github-pat"),
-    (re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"), "slack-token"),
+    (re.compile(_KEY_START + r"AGE-SECRET-KEY-1[0-9A-Z]{50,}"), "age-secret-key"),
+    (re.compile(_KEY_START + r"sk-ant-[A-Za-z0-9_-]{20,}"), "anthropic-key"),
+    (re.compile(_KEY_START + r"sk-or-v1-[A-Za-z0-9]{20,}"), "openrouter-key"),
+    (re.compile(_KEY_START + r"sk-proj-[A-Za-z0-9_-]{20,}"), "openai-project-key"),
+    (re.compile(_KEY_START + r"sk-[A-Za-z0-9]{32,}"), "openai-key"),
+    (re.compile(_KEY_START + r"gh[pousr]_[A-Za-z0-9]{36,}"), "github-token"),
+    (re.compile(_KEY_START + r"github_pat_[A-Za-z0-9_]{20,}"), "github-pat"),
+    (re.compile(_KEY_START + r"xox[baprs]-[A-Za-z0-9-]{10,}"), "slack-token"),
     (
         re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+"),
         "slack-webhook",
     ),
-    (re.compile(r"AKIA[0-9A-Z]{16}"), "aws-access-key-id"),
-    (re.compile(r"AIza[0-9A-Za-z_-]{35}"), "google-api-key"),
+    (re.compile(_KEY_START + r"AKIA[0-9A-Z]{16}"), "aws-access-key-id"),
+    (re.compile(_KEY_START + r"AIza[0-9A-Za-z_-]{35}"), "google-api-key"),
     (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{20,}"), "bearer-token"),
     (
         re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
