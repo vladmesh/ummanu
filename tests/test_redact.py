@@ -133,6 +133,18 @@ class ScrubSecretsTests(unittest.TestCase):
         self.assertNotIn(pat, output)
         self.assertNotIn(webhook, output)
 
+    def test_an_id_ending_in_sk_is_not_a_key(self):
+        text = "codegen task-" + "0123456789abcdef" * 2 + " and desk-" + "A1" * 20
+
+        self.assertEqual(redact(text, env_files=[]), text)
+
+    def test_a_key_after_a_separator_is_still_redacted(self):
+        key = "sk-" + "0123456789abcdef" * 2
+
+        for text in (key, f"key {key}", f"'{key}'", f'"{key}"', f"OPENAI={key}"):
+            with self.subTest(text=text):
+                self.assertNotIn(key, redact(text, env_files=[]))
+
     def test_selected_runtime_file_adds_to_the_default_scan(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
