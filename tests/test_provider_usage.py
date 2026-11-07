@@ -3,11 +3,15 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import unittest
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
+from email.message import Message
+from email.utils import format_datetime
 from pathlib import Path
 from unittest import mock
+from urllib.error import HTTPError, URLError
 
 from ummanu.web import provider_usage
 from ummanu.web.provider_usage import CLAUDE_USAGE_URL, CODEX_USAGE_URL, ProviderUsageLayer
@@ -352,7 +356,7 @@ class CurrentRolloutShapeTest(unittest.TestCase):
         def fail(*_args):
             raise TimeoutError
 
-        return ProviderUsageLayer(home=self.home, fetch_json=fail, now=lambda: NOW)._codex(NOW)
+        return ProviderUsageLayer(home=self.home, fetch_json=fail, now=lambda: NOW).codex_live()
 
     def test_the_current_shape_gives_a_reading_when_the_live_source_fails(self) -> None:
         observed = datetime.fromtimestamp(NOW - 60, UTC).isoformat().replace("+00:00", "Z")
@@ -470,7 +474,7 @@ class ResetCreditsTest(unittest.TestCase):
                 raise listing
             return listing
 
-        return ProviderUsageLayer(home=self.home, fetch_json=fetch, now=lambda: NOW)._codex(NOW)
+        return ProviderUsageLayer(home=self.home, fetch_json=fetch, now=lambda: NOW).codex_live()
 
     def test_counts_and_the_nearest_available_expiry_are_one_document(self) -> None:
         codex = self.codex(
@@ -527,7 +531,7 @@ class ResetCreditsTest(unittest.TestCase):
         def fail(*_args):
             raise TimeoutError
 
-        codex = ProviderUsageLayer(home=self.home, fetch_json=fail, now=lambda: NOW)._codex(NOW)
+        codex = ProviderUsageLayer(home=self.home, fetch_json=fail, now=lambda: NOW).codex_live()
         self.assertIn(codex["status"], ("available", "stale"))
         self.assertTrue(codex["windows"])
         self.assertNotIn("reset_credits", codex)
@@ -672,7 +676,7 @@ class InstallationCodexHomeTest(unittest.TestCase):
         layer = ProviderUsageLayer(
             home=self.root, fetch_json=fetch, now=lambda: NOW, codex_home=lambda: self.codex_home
         )
-        codex = layer._codex(NOW)
+        codex = layer.codex_live()
         self.assertEqual(seen, ["Bearer head-login"])
         self.assertEqual(codex["status"], "available")
         self.assertEqual(codex["windows"][0]["name"], "weekly")
@@ -693,7 +697,7 @@ class InstallationCodexHomeTest(unittest.TestCase):
         layer = ProviderUsageLayer(
             home=self.root, fetch_json=fail, now=lambda: NOW, codex_home=self.codex_home
         )
-        codex = layer._codex(NOW)
+        codex = layer.codex_live()
         self.assertEqual(codex["status"], "available")
         self.assertEqual(codex["windows"][0]["remaining_percent"], 90.0)
 
@@ -711,3 +715,174 @@ class InstallationCodexHomeTest(unittest.TestCase):
             self.assertIsNone(installation_codex_dir(data_dir))
             write(self.codex_home / "auth.json", {"tokens": {"access_token": "x"}})
             self.assertEqual(installation_codex_dir(data_dir), self.codex_home)
+
+
+CLAUDE_TOKEN = "claude-token-value"
+
+
+def http_error(code: int, retry_after: str | None = None) -> HTTPError:
+    headers = Message()
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
+    return HTTPError(CLAUDE_USAGE_URL, code, f"refused {CLAUDE_TOKEN}", headers, None)
+
+
+class ProviderStateTest(unittest.TestCase):
+    """Each provider keeps its last success and its own next-attempt moment."""
+
+    def setUp(self) -> None:
+        self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.credentials = self.home / ".claude/.credentials.json"
+        write(self.credentials, {"claudeAiOauth": {"accessToken": CLAUDE_TOKEN}})
+        write(self.home / ".codex/auth.json", {"tokens": {"access_token": "codex-token-value"}})
+        self.clock = NOW
+        self.fetched: list[str] = []
+        self.claude_answers: list[BaseException | None] = []
+        self.layer = ProviderUsageLayer(home=self.home, fetch_json=self.fetch, now=lambda: self.clock)
+
+    def fetch(self, url: str, headers: dict[str, str], timeout: float) -> dict[str, object]:
+        self.fetched.append(url)
+        if url == CLAUDE_USAGE_URL:
+            failure = self.claude_answers.pop(0) if self.claude_answers else None
+            if failure is not None:
+                raise failure
+            return {"five_hour": {"utilization": 30.0}, "seven_day": {"utilization": 60.0}}
+        assert url == CODEX_USAGE_URL
+        return {"rate_limit": {"primary_window": {"used_percent": 10, "window_minutes": 300}}}
+
+    def claude(self) -> dict[str, object]:
+        return self.layer.usage_snapshot()["providers"][0]
+
+    def claude_calls(self) -> int:
+        return self.fetched.count(CLAUDE_USAGE_URL)
+
+    def test_a_rate_limit_after_a_success_is_stale_until_the_retry_after_moment(self) -> None:
+        later = NOW + provider_usage.CACHE_SECONDS
+        retry = later + 3600
+        for header in ("3600", format_datetime(datetime.fromtimestamp(retry, UTC), usegmt=True)):
+            with self.subTest(header=header):
+                self.setUp()
+                success = self.claude()
+                self.clock = later
+                self.claude_answers.append(http_error(429, header))
+                stale = self.claude()
+                retry_iso = datetime.fromtimestamp(retry, UTC).isoformat().replace("+00:00", "Z")
+                self.assertEqual(stale["status"], "stale")
+                self.assertEqual(stale["windows"], success["windows"])
+                self.assertEqual(stale["observed_at"], success["observed_at"])
+                self.assertEqual(stale["age_seconds"], float(provider_usage.CACHE_SECONDS))
+                self.assertEqual(stale["next_attempt_at"], retry_iso)
+                self.assertEqual(stale["reason"], f"Claude is rate limited until {retry_iso}")
+
+    def test_no_claude_request_before_its_next_attempt_even_after_codex_reads(self) -> None:
+        self.claude()
+        self.clock += provider_usage.CACHE_SECONDS
+        self.claude_answers.append(http_error(429, "3600"))
+        self.claude()
+        retry = self.clock + 3600
+        codex_before = self.fetched.count(CODEX_USAGE_URL)
+        self.clock = retry - 1
+        self.layer.invalidate()
+        self.claude()
+        self.layer.codex_live()
+        self.layer.invalidate()
+        self.claude()
+        self.assertEqual(self.claude_calls(), 2)
+        self.assertEqual(self.fetched.count(CODEX_USAGE_URL), codex_before + 3)
+        self.clock = retry
+        self.assertEqual(self.claude()["status"], "available")
+        self.assertEqual(self.claude_calls(), 3)
+
+    def test_a_headerless_rate_limit_backs_off_up_to_its_ceiling_and_a_success_resets_it(self) -> None:
+        expected = []
+        delay = provider_usage.RATE_LIMIT_BACKOFF_START
+        while not expected or expected[-1] < provider_usage.RATE_LIMIT_BACKOFF_CEILING:
+            expected.append(min(delay, provider_usage.RATE_LIMIT_BACKOFF_CEILING))
+            delay *= 2
+        expected.append(provider_usage.RATE_LIMIT_BACKOFF_CEILING)
+
+        def delays(count: int) -> list[float]:
+            seen = []
+            for _ in range(count):
+                self.claude_answers.append(http_error(429))
+                document = self.claude()
+                due = datetime.fromisoformat(document["next_attempt_at"]).timestamp()
+                seen.append(due - self.clock)
+                self.clock = due
+            return seen
+
+        self.assertEqual(delays(len(expected)), expected)
+        self.assertEqual(self.claude()["status"], "available")
+        self.clock += provider_usage.CACHE_SECONDS
+        self.assertEqual(delays(1), [provider_usage.RATE_LIMIT_BACKOFF_START])
+
+    def test_a_rejected_login_has_its_own_reason_and_leaves_the_token_alone(self) -> None:
+        before = self.credentials.read_bytes()
+        reasons = {}
+        for name, failure in (
+            ("401", http_error(401)),
+            ("403", http_error(403)),
+            ("429", http_error(429, "60")),
+            ("timeout", TimeoutError()),
+            ("unreachable", URLError(ConnectionRefusedError())),
+        ):
+            with self.subTest(failure=name):
+                self.clock += provider_usage.RATE_LIMIT_BACKOFF_CEILING
+                self.claude_answers.append(failure)
+                document = self.layer.usage_snapshot()
+                self.assertNotIn(CLAUDE_TOKEN, json.dumps(document))
+                reasons[name] = document["providers"][0]["reason"]
+        self.assertEqual(reasons["401"], "Claude rejected the login (HTTP 401)")
+        self.assertEqual(reasons["403"], "Claude rejected the login (HTTP 403)")
+        self.assertEqual(len(set(reasons.values())), len(reasons))
+        self.assertEqual(self.credentials.read_bytes(), before)
+        self.assertEqual(set(self.fetched), {CLAUDE_USAGE_URL, CODEX_USAGE_URL})
+
+    def test_a_failure_with_no_success_is_unavailable_and_never_replaces_a_success(self) -> None:
+        self.claude_answers.append(TimeoutError())
+        first = self.claude()
+        self.assertEqual((first["status"], first["windows"]), ("unavailable", []))
+        self.assertEqual(first["reason"], "Claude did not answer within 3 s")
+        self.clock += provider_usage.CACHE_SECONDS
+        success = self.claude()
+        for step in (1, 2):
+            self.clock += provider_usage.CACHE_SECONDS
+            self.claude_answers.append(TypeError())
+            stale = self.claude()
+            self.assertEqual(stale["status"], "stale")
+            self.assertEqual(stale["windows"], success["windows"])
+            self.assertEqual(stale["age_seconds"], float(step * provider_usage.CACHE_SECONDS))
+            self.assertEqual(stale["reason"], "Claude's answer was not a JSON object")
+            self.assertNotIn("next_attempt_at", stale)
+
+    def test_concurrent_snapshots_on_a_miss_make_one_request_per_provider(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        plain_fetch = self.fetch
+
+        def blocking_fetch(url: str, headers: dict[str, str], timeout: float) -> dict[str, object]:
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return plain_fetch(url, headers, timeout)
+
+        self.layer.fetch_json = blocking_fetch
+        callers = 6
+        start = threading.Barrier(callers + 1)
+        documents: list[dict[str, object]] = []
+
+        def render() -> None:
+            start.wait(5)
+            documents.append(self.layer.usage_snapshot())
+
+        threads = [threading.Thread(target=render) for _ in range(callers)]
+        for thread in threads:
+            thread.start()
+        start.wait(5)
+        self.assertTrue(entered.wait(5))
+        release.set()
+        for thread in threads:
+            thread.join(5)
+        self.assertEqual(len(documents), callers)
+        self.assertEqual(self.fetched.count(CLAUDE_USAGE_URL), 1)
+        self.assertEqual(self.fetched.count(CODEX_USAGE_URL), 1)
+        self.assertEqual({id(document) for document in documents}, {id(documents[0])})

@@ -2522,7 +2522,13 @@ what is left *now*, so no reading is drawn as words rather than as a figure. An 
 while ago says how old it is. The bar's height is reserved under the page rather than overlaid, so it
 covers nothing, the `/po` composer included.
 
-Its data is the cached provider layer (`ummanu.web.provider_usage`, a five-minute in-process cache).
+Its data is the cached provider layer (`ummanu.web.provider_usage`): each provider keeps in process its
+last successful reading and its own next-attempt moment, five minutes after any read; a `429` moves that
+moment to its `Retry-After` (delta-seconds or an HTTP-date), or without one to a doubling backoff from
+`RATE_LIMIT_BACKOFF_START` up to `RATE_LIMIT_BACKOFF_CEILING` that the next success resets. A failure
+after a success serves that success's windows as `stale` with the failure as its reason, a rate limit
+adds `next_attempt_at`, and concurrent renders on a due provider share one request. A Codex reset
+credit spent from the bar makes only Codex due.
 **Rendering a page never adds a provider
 call**: the transport hands the bar the cached read, so a hundred page loads inside one cache window ask
 each provider once, and JSON routes, which render no page, ask nothing. A process built without the

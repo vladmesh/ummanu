@@ -11,9 +11,12 @@ import json
 import math
 import os
 import socket
+import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -29,6 +32,9 @@ CODEX_RESET_TIMEOUT = 30.0
 CODEX_RESET_CODES = frozenset({"reset", "nothing_to_reset", "no_credit", "already_redeemed"})
 STALE_AFTER_SECONDS = 15 * 60
 CACHE_SECONDS = 5 * 60
+#: A 429 without a usable `Retry-After` waits this long, doubling per repeat up to the ceiling.
+RATE_LIMIT_BACKOFF_START = 10 * 60
+RATE_LIMIT_BACKOFF_CEILING = 2 * 60 * 60
 # The Codex fallback reads a bounded amount however large ~/.codex/sessions grows: it descends the
 # sessions/YYYY/MM/DD directories newest-first, opens at most CODEX_FALLBACK_FILES rollouts and reads
 # only the last CODEX_TAIL_BYTES of each.
@@ -165,6 +171,87 @@ def _without(text: str, *secrets: str | None) -> str:
     return text
 
 
+class _ReadFailure(Exception):
+    """A live provider read that gave no usage windows; `reason` never carries a credential.
+
+    `fallback` is the document served instead of the last success, when the provider has one.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        rate_limited: bool = False,
+        retry_at: float | None = None,
+        fallback: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.rate_limited = rate_limited
+        self.retry_at = retry_at
+        self.fallback = fallback
+
+    def with_fallback(self, fallback: dict[str, Any]) -> _ReadFailure:
+        return _ReadFailure(
+            self.reason, rate_limited=self.rate_limited, retry_at=self.retry_at, fallback=fallback
+        )
+
+
+@dataclass
+class _ProviderState:
+    """One provider's last successful reading, the document it last served and its next-attempt moment."""
+
+    last_success: tuple[float, dict[str, Any]] | None = None
+    document: dict[str, Any] | None = None
+    next_attempt: float = 0.0
+    backoff: float | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+def _retry_after(error: HTTPError, observed: float) -> float | None:
+    """The moment a 429's `Retry-After` names, as delta-seconds or an HTTP-date; `None` if unusable."""
+    value = error.headers.get("Retry-After") if error.headers is not None else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.isdigit():
+        return observed + int(text)
+    try:
+        moment = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    retry_at = moment.timestamp()
+    return retry_at if retry_at > observed else None
+
+
+def _transport_reason(exc: BaseException, subject: str, timeout: float) -> str | None:
+    """The reason for a timeout, unreachable host or non-JSON answer; `None` for any other failure."""
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return f"{subject} did not answer within {timeout:g} s"
+    if isinstance(exc, URLError):
+        if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+            return f"{subject} did not answer within {timeout:g} s"
+        return f"{subject} could not be reached ({type(exc.reason).__name__})"
+    if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError)):
+        return f"{subject}'s answer was not JSON"
+    if isinstance(exc, OSError):
+        return f"{subject} could not be reached ({type(exc).__name__})"
+    return None
+
+
+def _http_failure(error: HTTPError, label: str, observed: float) -> _ReadFailure | None:
+    """The failure a 429, 401 or 403 means; `None` for any other status."""
+    if error.code == 429:
+        return _ReadFailure(
+            f"{label} is rate limited", rate_limited=True, retry_at=_retry_after(error, observed)
+        )
+    if error.code in (401, 403):
+        return _ReadFailure(f"{label} rejected the login (HTTP {error.code})")
+    return None
+
+
 def _fetch_json(url: str, headers: dict[str, str], timeout: float) -> dict[str, Any]:
     request = Request(url, headers=headers, method="GET")
     with urlopen(request, timeout=timeout) as response:
@@ -201,7 +288,9 @@ class ProviderUsageLayer:
         self.post_json = post_json
         self.now = now
         self.timeout = timeout
-        self._cached: tuple[float, dict[str, Any]] | None = None
+        self._states = {"claude": _ProviderState(), "codex": _ProviderState()}
+        self._combined_lock = threading.Lock()
+        self._combined: tuple[tuple[int, ...], dict[str, Any]] | None = None
 
     @property
     def codex_dir(self) -> Path:
@@ -210,12 +299,20 @@ class ProviderUsageLayer:
         return Path(configured) if configured is not None else self.home / ".codex"
 
     def invalidate(self) -> None:
-        """Forget the cached snapshot, so the next render asks the providers again."""
-        self._cached = None
+        """Make Codex due, so the next render asks Codex again; Claude keeps its own next attempt."""
+        state = self._states["codex"]
+        with state.lock:
+            state.next_attempt = 0.0
 
     def codex_live(self) -> dict[str, Any]:
         """The Codex reading as it is now, past the cache and without replacing what the cache holds."""
-        return self._codex(self.now())
+        observed = self.now()
+        try:
+            return self._codex(observed)
+        except _ReadFailure as failure:
+            if failure.fallback is not None:
+                return failure.fallback
+            return self._unavailable("codex", "Codex", failure.reason)
 
     def consume_codex_reset(self, redeem_request_id: str) -> tuple[str, str | None]:
         """Spend one Codex rate-limit reset credit under `redeem_request_id`: `(outcome, reason)`.
@@ -241,18 +338,9 @@ class ProviderUsageLayer:
             )
         except HTTPError as exc:
             return "error", f"the provider answered HTTP {exc.code}"
-        except (TimeoutError, socket.timeout):
-            return "error", f"the provider did not answer within {CODEX_RESET_TIMEOUT:g} s"
-        except URLError as exc:
-            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
-                return "error", f"the provider did not answer within {CODEX_RESET_TIMEOUT:g} s"
-            return "error", f"the provider could not be reached ({type(exc.reason).__name__})"
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return "error", "the provider's answer was not JSON"
-        except OSError as exc:
-            return "error", f"the provider could not be reached ({type(exc).__name__})"
         except Exception as exc:  # noqa: BLE001 -- an injected or future transport failure is still an outcome
-            return "error", f"the consume call failed ({type(exc).__name__})"
+            reason = _transport_reason(exc, "the provider", CODEX_RESET_TIMEOUT)
+            return "error", reason or f"the consume call failed ({type(exc).__name__})"
         if not isinstance(answer, dict):
             return "error", "the provider's answer was not a JSON object"
         code = answer.get("code")
@@ -262,15 +350,71 @@ class ProviderUsageLayer:
         return "error", _without(f"the provider answered an unknown code: {shown!r}", token, account)
 
     def usage_snapshot(self) -> dict[str, Any]:
-        observed = self.now()
-        if self._cached is not None and observed - self._cached[0] < CACHE_SECONDS:
-            return self._cached[1]
-        document = {
-            "kind": "provider_usage",
-            "observed_at": _iso(observed),
-            "providers": [self._claude(observed), self._codex(observed)],
-        }
-        self._cached = (observed, document)
+        """The combined document, assembled from each provider's own state; a provider is asked only when due."""
+        providers = [
+            self._provider("claude", "Claude", self._claude),
+            self._provider("codex", "Codex", self._codex),
+        ]
+        key = tuple(id(item) for item in providers)
+        with self._combined_lock:
+            if self._combined is not None and self._combined[0] == key:
+                return self._combined[1]
+            document = {"kind": "provider_usage", "observed_at": _iso(self.now()), "providers": providers}
+            self._combined = (key, document)
+            return document
+
+    def _provider(
+        self, provider_id: str, label: str, read: Callable[[float], dict[str, Any]]
+    ) -> dict[str, Any]:
+        """The provider's served document, read afresh only once its next-attempt moment has passed.
+
+        The state lock is held across the read, so concurrent callers on a due provider share one request.
+        """
+        state = self._states[provider_id]
+        with state.lock:
+            observed = self.now()
+            if state.document is not None and observed < state.next_attempt:
+                return state.document
+            try:
+                document = read(observed)
+            except _ReadFailure as failure:
+                state.document = self._failed(provider_id, label, state, failure, observed)
+                return state.document
+            state.last_success = (observed, document)
+            state.backoff = None
+            state.next_attempt = observed + CACHE_SECONDS
+            state.document = document
+            return document
+
+    def _failed(
+        self, provider_id: str, label: str, state: _ProviderState, failure: _ReadFailure, observed: float
+    ) -> dict[str, Any]:
+        """Set the next attempt for `failure` and return the stale or unavailable document it leaves."""
+        reason = failure.reason
+        if not failure.rate_limited:
+            state.next_attempt = observed + CACHE_SECONDS
+        elif failure.retry_at is not None:
+            state.next_attempt = failure.retry_at
+        else:
+            delay = RATE_LIMIT_BACKOFF_START if state.backoff is None else state.backoff * 2
+            state.backoff = min(delay, RATE_LIMIT_BACKOFF_CEILING)
+            state.next_attempt = observed + state.backoff
+        if failure.rate_limited:
+            reason = f"{reason} until {_iso(state.next_attempt)}"
+        if failure.fallback is not None:
+            document = dict(failure.fallback)
+        elif state.last_success is None:
+            document = self._unavailable(provider_id, label, reason)
+        else:
+            succeeded, success = state.last_success
+            document = {
+                **self._available(provider_id, label, succeeded, success["windows"]),
+                "status": "stale",
+                "reason": reason,
+                "age_seconds": round(max(0.0, observed - succeeded), 1),
+            }
+        if failure.rate_limited:
+            document["next_attempt_at"] = _iso(state.next_attempt)
         return document
 
     def _auth(self, path: Path, keys: tuple[str, ...]) -> str | None:
@@ -285,54 +429,73 @@ class ProviderUsageLayer:
     def _claude(self, observed: float) -> dict[str, Any]:
         token = self._auth(self.home / ".claude" / ".credentials.json", ("claudeAiOauth", "accessToken"))
         if token is None:
-            return self._unavailable("claude", "Claude", "Claude login is unavailable")
+            raise _ReadFailure("Claude login is unavailable")
+        raw = self._live(
+            "Claude",
+            CLAUDE_USAGE_URL,
+            {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"},
+            observed,
+        )
+        windows = [
+            item
+            for item in (
+                _window("5-hour", raw.get("five_hour"), default_minutes=300),
+                _window("weekly", raw.get("seven_day"), default_minutes=10080),
+            )
+            if item is not None
+        ]
+        if not windows:
+            raise _ReadFailure("Claude did not report usage windows")
+        return self._available("claude", "Claude", observed, windows)
+
+    def _live(self, label: str, url: str, headers: dict[str, str], observed: float) -> dict[str, Any]:
+        """The provider's usage document, or a :class:`_ReadFailure` naming why there is none."""
         try:
-            raw = self.fetch_json(
-                CLAUDE_USAGE_URL,
-                {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"},
-                self.timeout,
-            )
-            windows = [
-                item
-                for item in (
-                    _window("5-hour", raw.get("five_hour"), default_minutes=300),
-                    _window("weekly", raw.get("seven_day"), default_minutes=10080),
-                )
-                if item is not None
-            ]
-            return (
-                self._available("claude", "Claude", observed, windows)
-                if windows
-                else self._unavailable("claude", "Claude", "Claude did not report usage windows")
-            )
-        except (OSError, TypeError, ValueError, HTTPError, URLError, TimeoutError):
-            return self._unavailable("claude", "Claude", "Claude usage is temporarily unavailable")
+            return self.fetch_json(url, headers, self.timeout)
+        except HTTPError as exc:
+            raise _http_failure(exc, label, observed) or _ReadFailure(
+                f"{label} answered HTTP {exc.code}"
+            ) from None
+        except TypeError:
+            raise _ReadFailure(f"{label}'s answer was not a JSON object") from None
+        except (OSError, ValueError) as exc:
+            reason = _transport_reason(exc, label, self.timeout) or f"{label}'s answer was not JSON"
+            raise _ReadFailure(reason) from None
 
     def _codex(self, observed: float) -> dict[str, Any]:
+        """The live Codex reading; a failure carries the session-rollout reading as its fallback."""
         auth = self.codex_dir / "auth.json"
         token = self._auth(auth, ("tokens", "access_token"))
-        if token is not None:
+        if token is None:
+            failure = _ReadFailure("Codex login is unavailable")
+        else:
+            headers = {"Authorization": f"Bearer {token}"}
+            account = self._auth(auth, ("tokens", "account_id"))
+            if account:
+                headers["ChatGPT-Account-Id"] = account
+            failure = _ReadFailure("Codex usage is temporarily unavailable")
             try:
-                headers = {"Authorization": f"Bearer {token}"}
-                account = self._auth(auth, ("tokens", "account_id"))
-                if account:
-                    headers["ChatGPT-Account-Id"] = account
                 raw = self.fetch_json(CODEX_USAGE_URL, headers, self.timeout)
                 windows = self._codex_windows(raw)
+            except HTTPError as exc:
+                failure = _http_failure(exc, "Codex", observed) or failure
+            except (OSError, TypeError, ValueError):
+                pass
+            else:
                 if windows:
                     result = self._available("codex", "Codex", observed, windows)
                     credits = self._codex_reset_credits(raw, headers)
                     if credits is not None:
                         result["reset_credits"] = credits
                     return result
-            except (OSError, TypeError, ValueError, HTTPError, URLError, TimeoutError):
-                pass
+        fallback = self._codex_fallback(observed)
+        raise failure if fallback is None else failure.with_fallback(fallback)
+
+    def _codex_fallback(self, observed: float) -> dict[str, Any] | None:
+        """The reading the newest session rollout carries, stale past STALE_AFTER_SECONDS; `None` if none."""
         fallback = self._latest_codex_event()
         if fallback is None:
-            reason = (
-                "Codex login is unavailable" if token is None else "Codex usage is temporarily unavailable"
-            )
-            return self._unavailable("codex", "Codex", reason)
+            return None
         raw, source_time = fallback
         windows = self._codex_windows(raw)
         age = max(0.0, observed - source_time)
