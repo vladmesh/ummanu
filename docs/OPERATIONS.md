@@ -2516,10 +2516,13 @@ rounded it, with a trailing `.0` dropped: `73%`, and `95.4%` when the reading re
 The exact moment is not lost: it is the hover title of that element, as the ISO
 UTC string the reading carried. The time left is counted from when the page was drawn, not from when
 the reading was taken, so a reading served from the cache does not overstate what is left. The bar is
-the one place the windows are drawn. A provider whose reading is stale or
-unavailable is shown with that word, the reason, and no percentage at all: on a bar a number is read as
-what is left *now*, so no reading is drawn as words rather than as a figure. An available reading taken a
-while ago says how old it is. The bar's height is reserved under the page rather than overlaid, so it
+the one place the windows are drawn. A `stale` reading that carries windows shows its last percentages
+behind a `stale` chip, with the reason, how old it is (`2h old`, counted from its `observed_at` to the
+render, which is its hover title) and, when rate limited, the next try (`next try in 42m`, the ISO moment
+as its title). An unavailable provider, a stale reading with no window and a missing provider show the
+word and the reason and no percentage at all: on a bar a number is read as what is left *now*, so no
+reading is drawn as words rather than as a figure. An available reading taken a while ago says how old
+it is. The bar's height is reserved under the page rather than overlaid, so it
 covers nothing, the `/po` composer included.
 
 Its data is the cached provider layer (`ummanu.web.provider_usage`): each provider keeps in process its

@@ -428,31 +428,64 @@ class BarReadingTests(RouteFixture):
         self.assertIn("30m old", claude)
         self.assertNotIn("old", codex)
 
-    def test_a_stale_provider_shows_its_status_and_reason_and_no_percentage(self) -> None:
-        bar = self.bar(
-            self.section(
-                [
-                    provider(
-                        "claude",
-                        "Claude",
-                        status="stale",
-                        reason="Latest Codex usage observation is stale",
-                        age_seconds=3600.0,
-                        # A stale reading still carries the last windows. They are not drawn: a
-                        # percentage on the bar is read as what is left now, and this one is not.
-                        windows=[window("5-hour", 12.0, "x")],
-                    ),
-                    provider("codex", "Codex", windows=[window("5-hour", 41.0, "x")]),
-                ]
-            )
+    def stale_claude(self, **fields: Any) -> str:
+        document = provider(
+            "claude",
+            "Claude",
+            status="stale",
+            reason="rate limited until 2026-09-20T12:42:00Z",
+            age_seconds=0.0,
+            windows=[window("5-hour", 12.0, "2026-09-20T13:06:00Z")],
         )
-        claude = provider_places(bar)[0]
+        document.update(fields)
+        bar = self.bar(
+            self.section([document, provider("codex", "Codex", windows=[window("5-hour", 41.0, "x")])])
+        )
+        return provider_places(bar)[0]
+
+    def test_a_stale_reading_shows_its_last_percentages_marked_stale_with_its_age_and_next_try(self) -> None:
+        claude = self.stale_claude(observed_at="2026-09-20T10:00:00Z", next_attempt_at="2026-09-20T12:42:00Z")
+        self.assertIn('<span class="chip chip-warn">stale</span>', claude)
+        self.assertIn(
+            '<span class="window"><span class="win-name">5-hour</span><b>12%</b>'
+            '<span class="dot">·</span>'
+            '<span class="resets" title="2026-09-20T13:06:00Z">1h 6m left</span></span>',
+            claude,
+        )
+        self.assertIn("rate limited until 2026-09-20T12:42:00Z", claude)
+        self.assertNotIn("no current reading", claude)
+        # Counted from observed_at to the render, not from the frozen age_seconds of 0.
+        self.assertIn('<span class="age" title="2026-09-20T10:00:00Z">2h old</span>', claude)
+        self.assertIn('<span class="next-try" title="2026-09-20T12:42:00Z">next try in 42m</span>', claude)
+
+    def test_a_stale_window_whose_reset_has_passed_keeps_the_predates_reset_rule(self) -> None:
+        claude = self.stale_claude(
+            observed_at="2026-09-20T06:00:00Z", windows=[window("5-hour", 12.0, "2026-09-20T09:00:00Z")]
+        )
+        self.assertIsNone(PERCENTAGE.search(claude), claude)
+        self.assertIn(">stale</b>", claude)
+
+    def test_a_stale_reading_without_next_attempt_says_no_next_try(self) -> None:
+        claude = self.stale_claude(observed_at="2026-09-20T11:30:00Z")
+        self.assertIn("30m old", claude)
+        self.assertNotIn("next try", claude)
+
+    def test_an_unreadable_observed_at_falls_back_to_age_seconds_then_to_unknown(self) -> None:
+        claude = self.stale_claude(observed_at="not a moment", age_seconds=600.0)
+        self.assertIn('<span class="age">10m old</span>', claude)
+        claude = self.stale_claude(observed_at=None, age_seconds=None)
+        self.assertIn('<span class="age">age unknown</span>', claude)
+        self.assertNotIn("0s", claude)
+
+    def test_a_stale_provider_without_windows_shows_its_status_and_reason_and_no_percentage(self) -> None:
+        claude = self.stale_claude(
+            reason="Latest Codex usage observation is stale", age_seconds=3600.0, windows=[]
+        )
         self.assertIn("stale", claude)
         self.assertIn("Latest Codex usage observation is stale", claude)
         self.assertIn("60m old", claude)
         self.assertIn("no current reading", claude)
         self.assertIsNone(PERCENTAGE.search(claude), claude)
-        self.assertNotIn("12.0", claude)
 
     def test_an_unavailable_provider_shows_its_status_and_reason_and_no_percentage(self) -> None:
         bar = self.bar(
