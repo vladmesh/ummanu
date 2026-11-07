@@ -2532,6 +2532,12 @@ moment to its `Retry-After` (delta-seconds or an HTTP-date), or without one to a
 after a success serves that success's windows as `stale` with the failure as its reason, a rate limit
 adds `next_attempt_at`, and concurrent renders on a due provider share one request. A Codex reset
 credit spent from the bar makes only Codex due.
+The Claude token is the first non-empty one of: `~/.claude/.credentials.json`
+`claudeAiOauth.accessToken`, `CLAUDE_CODE_OAUTH_TOKEN` in the web process environment, and
+`CLAUDE_CODE_OAUTH_TOKEN` under `env` in `~/.claude/settings.json`; an unreadable file or a missing key
+only passes to the next source. All three are read again on every due fetch. The panel never copies,
+logs or refreshes the token: it sends it only in the usage request, and an unavailable or rejected
+login names the source, never the value.
 **Rendering a page never adds a provider
 call**: the transport hands the bar the cached read, so a hundred page loads inside one cache window ask
 each provider once, and JSON routes, which render no page, ask nothing. A process built without the

@@ -13,7 +13,7 @@ import os
 import socket
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -23,6 +23,12 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+#: Where the Claude token is looked for, first non-empty wins; each is read afresh on every due fetch.
+CLAUDE_LOGIN_SOURCES = (
+    ".credentials.json claudeAiOauth.accessToken",
+    "environment CLAUDE_CODE_OAUTH_TOKEN",
+    "settings.json CLAUDE_CODE_OAUTH_TOKEN",
+)
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 CODEX_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 CODEX_RESET_CONSUME_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
@@ -241,14 +247,20 @@ def _transport_reason(exc: BaseException, subject: str, timeout: float) -> str |
     return None
 
 
-def _http_failure(error: HTTPError, label: str, observed: float) -> _ReadFailure | None:
-    """The failure a 429, 401 or 403 means; `None` for any other status."""
+def _http_failure(
+    error: HTTPError, label: str, observed: float, *, login: str | None = None
+) -> _ReadFailure | None:
+    """The failure a 429, 401 or 403 means; `None` for any other status.
+
+    `login` names where the rejected token came from, never the token itself.
+    """
     if error.code == 429:
         return _ReadFailure(
             f"{label} is rate limited", rate_limited=True, retry_at=_retry_after(error, observed)
         )
     if error.code in (401, 403):
-        return _ReadFailure(f"{label} rejected the login (HTTP {error.code})")
+        source = f" from {login}" if login is not None else ""
+        return _ReadFailure(f"{label} rejected the login{source} (HTTP {error.code})")
     return None
 
 
@@ -279,8 +291,10 @@ class ProviderUsageLayer:
         now: Callable[[], float] = time.time,
         timeout: float = 3.0,
         codex_home: str | os.PathLike[str] | Callable[[], Path | None] | None = None,
+        environ: Mapping[str, str] = os.environ,
     ) -> None:
         self.home = Path(home) if home is not None else Path.home()
+        self.environ = environ
         # The CODEX_HOME the installation's heads run with (`<data_dir>/codex-home`): its login is kept
         # refreshed and its `sessions/` written by the heads. `~/.codex` is only the fallback.
         self._codex_home = codex_home
@@ -426,15 +440,31 @@ class ProviderUsageLayer:
         except (OSError, KeyError, TypeError, json.JSONDecodeError):
             return None
 
+    def _claude_login(self) -> tuple[str, str] | None:
+        """The Claude CLI's token and its source name: the first of CLAUDE_LOGIN_SOURCES holding one."""
+        claude = self.home / ".claude"
+        reads: tuple[Callable[[], str | None], ...] = (
+            lambda: self._auth(claude / ".credentials.json", ("claudeAiOauth", "accessToken")),
+            lambda: self.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or None,
+            lambda: self._auth(claude / "settings.json", ("env", "CLAUDE_CODE_OAUTH_TOKEN")),
+        )
+        for source, read in zip(CLAUDE_LOGIN_SOURCES, reads, strict=True):
+            token = read()
+            if token:
+                return token, source
+        return None
+
     def _claude(self, observed: float) -> dict[str, Any]:
-        token = self._auth(self.home / ".claude" / ".credentials.json", ("claudeAiOauth", "accessToken"))
-        if token is None:
-            raise _ReadFailure("Claude login is unavailable")
+        login = self._claude_login()
+        if login is None:
+            raise _ReadFailure(f"Claude login is unavailable (looked in {', '.join(CLAUDE_LOGIN_SOURCES)})")
+        token, source = login
         raw = self._live(
             "Claude",
             CLAUDE_USAGE_URL,
             {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"},
             observed,
+            login=source,
         )
         windows = [
             item
@@ -448,12 +478,14 @@ class ProviderUsageLayer:
             raise _ReadFailure("Claude did not report usage windows")
         return self._available("claude", "Claude", observed, windows)
 
-    def _live(self, label: str, url: str, headers: dict[str, str], observed: float) -> dict[str, Any]:
+    def _live(
+        self, label: str, url: str, headers: dict[str, str], observed: float, *, login: str
+    ) -> dict[str, Any]:
         """The provider's usage document, or a :class:`_ReadFailure` naming why there is none."""
         try:
             return self.fetch_json(url, headers, self.timeout)
         except HTTPError as exc:
-            raise _http_failure(exc, label, observed) or _ReadFailure(
+            raise _http_failure(exc, label, observed, login=login) or _ReadFailure(
                 f"{label} answered HTTP {exc.code}"
             ) from None
         except TypeError:
