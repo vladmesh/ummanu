@@ -437,7 +437,7 @@ class ProviderUsageLayer:
             for key in keys:
                 value = value[key]
             return value if isinstance(value, str) and value else None
-        except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        except (OSError, KeyError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
             return None
 
     def _claude_login(self) -> tuple[str, str] | None:

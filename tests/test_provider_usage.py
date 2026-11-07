@@ -889,6 +889,66 @@ class ProviderStateTest(unittest.TestCase):
         self.assertEqual({id(document) for document in documents}, {id(documents[0])})
 
 
+class DamagedAuthTest(unittest.TestCase):
+    """Invalid UTF-8 auth files behave like missing tokens without changing their bytes."""
+
+    def setUp(self) -> None:
+        self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.fetch = mock.Mock(side_effect=AssertionError("unexpected provider request"))
+        self.layer = ProviderUsageLayer(home=self.home, fetch_json=self.fetch, now=lambda: NOW, environ={})
+
+    def damage(self, source: str) -> Path:
+        path = self.home / source
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\xff")
+        return path
+
+    def test_each_damaged_source_is_unavailable_without_a_request(self) -> None:
+        for source in (".claude/.credentials.json", ".claude/settings.json", ".codex/auth.json"):
+            with self.subTest(source=source):
+                path = self.damage(source)
+                layer = ProviderUsageLayer(home=self.home, fetch_json=self.fetch, now=lambda: NOW, environ={})
+                providers = layer.usage_snapshot()["providers"]
+                self.assertEqual(
+                    [(p["status"], p["windows"]) for p in providers],
+                    [("unavailable", []), ("unavailable", [])],
+                )
+                self.fetch.assert_not_called()
+                self.assertEqual(path.read_bytes(), b"\xff")
+                path.unlink()
+
+    def test_damaged_credentials_fall_through_to_environment_then_settings(self) -> None:
+        path = self.damage(".claude/.credentials.json")
+        write(self.home / ".claude/settings.json", {"env": {"CLAUDE_CODE_OAUTH_TOKEN": "settings-token"}})
+        environ = {"CLAUDE_CODE_OAUTH_TOKEN": "env-token"}
+        self.fetch.side_effect = None
+        self.fetch.return_value = {"five_hour": {"utilization": 30.0}}
+        for token in ("env-token", "settings-token"):
+            with self.subTest(token=token):
+                layer = ProviderUsageLayer(
+                    home=self.home, fetch_json=self.fetch, now=lambda: NOW, environ=environ
+                )
+                document = layer.usage_snapshot()
+                self.assertEqual(document["providers"][0]["status"], "available")
+                self.assertEqual(self.fetch.call_args.args[1]["Authorization"], f"Bearer {token}")
+                self.assertNotIn(token, json.dumps(document))
+                self.assertEqual(path.read_bytes(), b"\xff")
+                environ.clear()
+        self.assertEqual(self.fetch.call_count, 2)
+
+    def test_damaged_codex_auth_falls_back_to_a_session_without_a_request(self) -> None:
+        path = self.damage(".codex/auth.json")
+        write(
+            self.home / ".codex/sessions/2026/01/01/rollout-test.jsonl",
+            rate_limit_event(20, datetime.fromtimestamp(NOW - 60, UTC)),
+        )
+        codex = self.layer.codex_live()
+        self.assertEqual(codex["status"], "available")
+        self.assertEqual(codex["windows"][0]["remaining_percent"], 80.0)
+        self.fetch.assert_not_called()
+        self.assertEqual(path.read_bytes(), b"\xff")
+
+
 class ClaudeLoginSourceTest(unittest.TestCase):
     """The Claude token comes from credentials, then the environment, then settings.json."""
 
