@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import timedelta
 from html import escape
 from typing import Any
@@ -15,6 +16,7 @@ from ummanu.web.page_parts import (
     _duration,
     _percent,
     _render_now,
+    _reset_moment,
     _reset_reading,
 )
 from ummanu.web.page_values import _BELL_SOURCE, _DOCTOR_SOURCE, _FROM_POST, _LIMITS_SOURCE
@@ -167,11 +169,13 @@ def _bar_provider(label: str, provider: dict[str, Any] | None, refused: str) -> 
     status = str(provider.get("status") or "unavailable")
     age = provider.get("age_seconds")
     old = "" if age in (None, 0, 0.0) else f' <span class="age">{_age(age)} old</span>'
+    windows = [window for window in provider.get("windows") or [] if isinstance(window, dict)]
+    if status == "stale" and windows:
+        return _bar_stale(shown, provider, windows)
     if status != "available":
         reason = str(provider.get("reason") or "no reason was recorded")
         mark = _chip(status, "warn")
         return f'<span class="provider"><b>{shown}</b>{mark}{_bar_no_reading(reason)}{old}</span>'
-    windows = [window for window in provider.get("windows") or [] if isinstance(window, dict)]
     if not windows:
         return (
             f'<span class="provider"><b>{shown}</b>'
@@ -180,6 +184,52 @@ def _bar_provider(label: str, provider: dict[str, Any] | None, refused: str) -> 
     drawn = "".join(_bar_window(window) for window in windows)
     credits = _bar_reset_credits(provider.get("reset_credits")) if provider.get("id") == "codex" else ""
     return f'<span class="provider"><b>{shown}</b>{drawn}{credits}{old}</span>'
+
+
+def _bar_stale(shown: str, provider: dict[str, Any], windows: list[dict[str, Any]]) -> str:
+    """A stale reading: its last windows behind a `stale` chip, the reason, its age and the next try.
+
+    The age runs from `observed_at` to this render, because a cached stale document keeps the
+    `age_seconds` of the failure that made it.
+    """
+    reason = str(provider.get("reason") or "no reason was recorded")
+    drawn = "".join(_bar_window(window) for window in windows)
+    observed = provider.get("observed_at")
+    title = f' title="{escape(str(observed))}"' if _reset_moment(observed) is not None else ""
+    age = f' <span class="age"{title}>{escape(_stale_age(provider))}</span>'
+    return (
+        f'<span class="provider"><b>{shown}</b>{_chip("stale", "warn")}{drawn}'
+        f'<span class="reason">{escape(reason)}</span>{age}{_bar_next_try(provider.get("next_attempt_at"))}</span>'
+    )
+
+
+def _stale_age(provider: dict[str, Any]) -> str:
+    """How old a stale reading is: from `observed_at`, else `age_seconds`, else unknown."""
+    moment = _reset_moment(provider.get("observed_at"))
+    if moment is not None:
+        try:
+            seconds = max(0.0, (_render_now() - moment).total_seconds())
+        except OverflowError:
+            seconds = None
+        if seconds is not None:
+            return f"{_age(seconds)} old"
+    age = provider.get("age_seconds")
+    if isinstance(age, (int, float)) and not isinstance(age, bool) and math.isfinite(age) and age >= 0:
+        return f"{_age(age)} old"
+    return "age unknown"
+
+
+def _bar_next_try(value: Any) -> str:
+    """When the provider is next asked, with the carried ISO moment as the title; empty without one."""
+    moment = _reset_moment(value)
+    if moment is None:
+        return ""
+    try:
+        ahead = (moment - _render_now()) // timedelta(microseconds=1)
+    except (OverflowError, ValueError):
+        return ""
+    words = f"next try in {_duration(ahead / 1_000_000)}" if ahead > 0 else "next try due"
+    return f' <span class="next-try" title="{escape(str(value))}">{escape(words)}</span>'
 
 
 def _bar_window(window: dict[str, Any]) -> str:
