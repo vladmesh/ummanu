@@ -83,7 +83,7 @@ def test_old_codex_session_is_truthfully_stale_when_live_read_fails(tmp_path: Pa
 
 def test_missing_or_malformed_auth_is_explicitly_unavailable(tmp_path: Path) -> None:
     write(tmp_path / ".claude/.credentials.json", {"claudeAiOauth": {"accessToken": 3}})
-    document = ProviderUsageLayer(home=tmp_path, now=lambda: NOW).usage_snapshot()
+    document = ProviderUsageLayer(home=tmp_path, now=lambda: NOW, environ={}).usage_snapshot()
     assert [(item["id"], item["status"], item["windows"]) for item in document["providers"]] == [
         ("claude", "unavailable", []),
         ("codex", "unavailable", []),
@@ -832,8 +832,9 @@ class ProviderStateTest(unittest.TestCase):
                 document = self.layer.usage_snapshot()
                 self.assertNotIn(CLAUDE_TOKEN, json.dumps(document))
                 reasons[name] = document["providers"][0]["reason"]
-        self.assertEqual(reasons["401"], "Claude rejected the login (HTTP 401)")
-        self.assertEqual(reasons["403"], "Claude rejected the login (HTTP 403)")
+        source = "from .credentials.json claudeAiOauth.accessToken"
+        self.assertEqual(reasons["401"], f"Claude rejected the login {source} (HTTP 401)")
+        self.assertEqual(reasons["403"], f"Claude rejected the login {source} (HTTP 403)")
         self.assertEqual(len(set(reasons.values())), len(reasons))
         self.assertEqual(self.credentials.read_bytes(), before)
         self.assertEqual(set(self.fetched), {CLAUDE_USAGE_URL, CODEX_USAGE_URL})
@@ -886,3 +887,78 @@ class ProviderStateTest(unittest.TestCase):
         self.assertEqual(self.fetched.count(CLAUDE_USAGE_URL), 1)
         self.assertEqual(self.fetched.count(CODEX_USAGE_URL), 1)
         self.assertEqual({id(document) for document in documents}, {id(documents[0])})
+
+
+class ClaudeLoginSourceTest(unittest.TestCase):
+    """The Claude token comes from credentials, then the environment, then settings.json."""
+
+    def setUp(self) -> None:
+        self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.credentials = self.home / ".claude/.credentials.json"
+        self.settings = self.home / ".claude/settings.json"
+        self.environ: dict[str, str] = {}
+        self.authorizations: list[str] = []
+        self.answer: BaseException | None = None
+        self.clock = NOW
+        self.layer = ProviderUsageLayer(
+            home=self.home, fetch_json=self.fetch, now=lambda: self.clock, environ=self.environ
+        )
+
+    def fetch(self, url: str, headers: dict[str, str], timeout: float) -> dict[str, object]:
+        assert url == CLAUDE_USAGE_URL
+        self.authorizations.append(headers["Authorization"])
+        if self.answer is not None:
+            raise self.answer
+        return {"five_hour": {"utilization": 30.0}}
+
+    def claude(self) -> dict[str, object]:
+        return self.layer.usage_snapshot()["providers"][0]
+
+    def test_an_empty_credentials_file_falls_through_to_settings_and_stays_unchanged(self) -> None:
+        write(self.credentials, {"claudeAiOauth": {"accessToken": "", "expiresAt": 0}})
+        write(self.settings, {"env": {"CLAUDE_CODE_OAUTH_TOKEN": "settings-token"}})
+        before = self.credentials.read_bytes()
+        self.assertEqual(self.claude()["status"], "available")
+        self.assertEqual(self.authorizations, ["Bearer settings-token"])
+        self.assertEqual(self.credentials.read_bytes(), before)
+
+    def test_each_due_fetch_rereads_credentials_then_environment_then_settings(self) -> None:
+        write(self.settings, {"env": {"CLAUDE_CODE_OAUTH_TOKEN": "settings-token"}})
+        self.claude()
+        self.environ["CLAUDE_CODE_OAUTH_TOKEN"] = "env-token"
+        self.clock += provider_usage.CACHE_SECONDS
+        self.claude()
+        write(self.credentials, {"claudeAiOauth": {"accessToken": "credentials-token"}})
+        self.clock += provider_usage.CACHE_SECONDS
+        self.claude()
+        self.assertEqual(
+            self.authorizations, ["Bearer settings-token", "Bearer env-token", "Bearer credentials-token"]
+        )
+
+    def test_a_malformed_credentials_file_falls_through_to_a_later_source(self) -> None:
+        self.credentials.parent.mkdir(parents=True)
+        self.credentials.write_text("{not json", encoding="utf-8")
+        self.environ["CLAUDE_CODE_OAUTH_TOKEN"] = "env-token"
+        self.assertEqual(self.claude()["status"], "available")
+        self.assertEqual(self.authorizations, ["Bearer env-token"])
+
+    def test_no_source_is_unavailable_names_the_sources_and_makes_no_request(self) -> None:
+        write(self.settings, {"env": {}})
+        claude = self.claude()
+        self.assertEqual(claude["status"], "unavailable")
+        self.assertEqual(
+            claude["reason"],
+            "Claude login is unavailable (looked in .credentials.json claudeAiOauth.accessToken, "
+            "environment CLAUDE_CODE_OAUTH_TOKEN, settings.json CLAUDE_CODE_OAUTH_TOKEN)",
+        )
+        self.assertEqual(self.authorizations, [])
+
+    def test_a_rejected_settings_token_names_its_source_and_never_the_token(self) -> None:
+        write(self.settings, {"env": {"CLAUDE_CODE_OAUTH_TOKEN": CLAUDE_TOKEN}})
+        self.answer = http_error(401)
+        claude = self.claude()
+        self.assertEqual(
+            claude["reason"],
+            "Claude rejected the login from settings.json CLAUDE_CODE_OAUTH_TOKEN (HTTP 401)",
+        )
+        self.assertNotIn(CLAUDE_TOKEN, json.dumps(claude))
