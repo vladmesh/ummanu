@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -146,15 +147,113 @@ class RunAndCaptureTests(BroadCheckTestCase):
 
     def test_the_receipt_binds_only_the_effective_tmpdir(self) -> None:
         _, receipt = self._run(
-            "echo timed",
+            "printf '%s' \"$TMPDIR\"",
             env={**os.environ, "TMPDIR": "/tmp", "PRIVATE_TOKEN": "must-not-be-attested"},
         )
 
-        self.assertEqual(receipt["environment_provenance"], {"TMPDIR": "/tmp"})
-        stored = load_receipt(receipt_path(self.root, "echo timed"))
+        self.assertEqual(receipt["environment_provenance"], {"TMPDIR": receipt["tail"]})
+        stored = load_receipt(receipt_path(self.root, "printf '%s' \"$TMPDIR\""))
         self.assertIsNotNone(stored)
-        self.assertEqual(stored["environment_provenance"], {"TMPDIR": "/tmp"})
+        self.assertEqual(stored["environment_provenance"], receipt["environment_provenance"])
 
+
+
+class PrivateCheckTmpdirTests(BroadCheckTestCase):
+    def test_long_workspace_socket_binding_cleanup_and_reuse(self) -> None:
+        self.root = self._init_workspace(Path(self.tmpdir.name) / ("workspace-" + "x" * 100))
+        ignore = self.root / ".gitignore"
+        ignore.write_text(ignore.read_text() + ".ummanu-task-env/\n", encoding="utf-8")
+        inherited = self.root / ".ummanu-task-env" / "tmp"
+        inherited.mkdir(parents=True)
+        suite = self._suite(
+            "socketsuite",
+            "import json, os, pathlib, socket, stat, tempfile\n"
+            "root = pathlib.Path(os.environ['TMPDIR'])\n"
+            "print(json.dumps([str(root), stat.S_IMODE(root.stat().st_mode)]), flush=True)\n"
+            "with tempfile.TemporaryDirectory() as nested:\n"
+            "    path = str(pathlib.Path(nested) / 'head.sock')\n"
+            "    with socket.socket(socket.AF_UNIX) as listener:\n"
+            "        listener.bind(path)\n"
+            "        listener.listen()\n"
+            "        with socket.socket(socket.AF_UNIX) as client:\n"
+            "            client.connect(path)\n"
+            "            conn, _ = listener.accept()\n"
+            "            conn.close()\n",
+        )
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-q", "-m", "socket suite")
+        environment = {**os.environ, "TMPDIR": str(inherited)}
+        roots = []
+        for check in (suite, f"{sys.executable} -m socketsuite"):
+            with self.subTest(shape=check):
+                self.stream = StringIO()
+                with mock.patch.dict(os.environ, environment, clear=True), mock.patch(
+                    "tempfile.tempdir", str(inherited)
+                ):
+                    code, receipt = self._run(check, env=environment)
+                    self.assertEqual(os.environ["TMPDIR"], str(inherited))
+                self.assertEqual(code, 0, receipt["tail"])
+                directory, mode = json.loads(self.stream.getvalue())
+                roots.append(directory)
+                self.assertEqual(mode, stat.S_IRWXU)
+                self.assertLess(len(os.fsencode(directory)), 25)
+                self.assertEqual(receipt["environment_provenance"], {"TMPDIR": directory})
+                self.assertFalse(Path(directory).exists())
+                self.assertEqual(environment["TMPDIR"], str(inherited))
+                self.assertTrue(inherited.is_dir())
+        self.assertNotEqual(*roots)
+        lookup = usable_receipt(self.root, suite)
+        self.assertTrue(lookup.usable, lookup.reason)
+        self.assertEqual(lookup.receipt["environment_provenance"], {"TMPDIR": roots[0]})
+
+    def test_tmpdir_cleanup_on_failure_timeout_and_interruption(self) -> None:
+        for ending in ("raise SystemExit(3)", "time.sleep(30)", "os.kill(os.getpid(), 9)"):
+            with self.subTest(ending=ending):
+                suite = self._suite(
+                    "errorsuite",
+                    "import os, time\nprint(os.environ['TMPDIR'], flush=True)\n" + ending + "\n",
+                )
+                self.stream = StringIO()
+                code, receipt = self._run(suite, timeout_seconds=0.2)
+                self.assertNotEqual(code, 0)
+                directory = self.stream.getvalue().strip()
+                self.assertTrue(directory.startswith("/tmp/"))
+                self.assertFalse(Path(directory).exists())
+                self.assertEqual(receipt["environment_provenance"], {"TMPDIR": directory})
+
+    def test_tmpdir_cleanup_when_interpreter_cannot_start(self) -> None:
+        interpreter = self.root / "missing-python"
+        suite = CheckSpec.for_module("suite", interpreter=str(interpreter))
+        with (
+            mock.patch("ummanu.broad_check.subprocess.Popen", side_effect=OSError("cannot start")) as spawn,
+            self.assertRaises(broad_check.BroadCheckError) as raised,
+        ):
+            self._run(suite)
+        self.assertEqual(raised.exception.code, "interpreter_start_failed")
+        self.assertFalse(Path(spawn.call_args.kwargs["env"]["TMPDIR"]).exists())
+
+    def test_tmpdir_cleanup_when_output_stream_is_interrupted(self) -> None:
+        suite = self._suite("interruptsuite", "print('running', flush=True)\n")
+        sink = mock.Mock()
+        sink.write.side_effect = KeyboardInterrupt
+        with self.assertRaises(KeyboardInterrupt):
+            run_broad_check(suite, root=self.root, stream=sink)
+        receipt = load_receipt(receipt_path(self.root, suite))
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["status"], "incomplete")
+        self.assertFalse(Path(receipt["environment_provenance"]["TMPDIR"]).exists())
+        self.assertFalse(usable_receipt(self.root, suite).usable)
+
+    def test_tmpdir_cleanup_when_receipt_write_fails(self) -> None:
+        suite = self._suite("writesuite", "import os\nprint(os.environ['TMPDIR'])\n")
+        with (
+            mock.patch("ummanu.broad_check._write_receipt", side_effect=OSError("disk full")),
+            self.assertRaises(OSError),
+        ):
+            self._run(suite)
+        directory = self.stream.getvalue().strip()
+        self.assertTrue(directory.startswith("/tmp/"))
+        self.assertFalse(Path(directory).exists())
 
 
 class UnchangedContentReuseTests(BroadCheckTestCase):
