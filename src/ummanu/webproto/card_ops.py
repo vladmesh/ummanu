@@ -14,7 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from ummanu.board.backend import card_client
+from ummanu.board.card_transitions import CARD_TRANSITIONS
+from ummanu.board.models import CardState
 from ummanu.board.owner_handover import OWNER_ROLE, waiting_owner
+from ummanu.board.roles import Role
 from ummanu.config import InstanceReport, validate_instance
 from ummanu.kernel.errors import TaskError
 from ummanu.tasks import TaskWriter
@@ -31,8 +34,8 @@ from ummanu.webproto.errors import (
 
 SCHEMA_VERSION = 1
 
-#: The whole move vocabulary in `TaskWriter.move` spelling, so a client can offer it and a misspelling
-#: is refused before the board; which target a given card may take is the writer's decision.
+#: Request vocabulary for spelling validation only; forms use role/state edges from CARD_TRANSITIONS.
+#: The writer decides whether a requested move is authorized.
 MOVE_TARGETS = ("issues", "ready", "in_progress", "validate", "ci", "review", "assessment", "blocked", "done")
 
 #: The writer's codes as typed failures. `transition_forbidden` refuses on card state, not request
@@ -46,6 +49,17 @@ _CODES: dict[str, Any] = {
     "resource_conflict": OwnerConflict,
     "owner_conflict": OwnerConflict,
 }
+
+
+def card_move_targets(state: str | None, *, role: str = "po") -> tuple[str, ...]:
+    """The viewer's declared move targets; Post-merge CI exits require a disposition."""
+    try:
+        source, viewer = CardState(state), Role(role)
+    except ValueError:
+        return ()
+    if source is CardState.POST_MERGE_CI:
+        return ()
+    return tuple(target.value for target in CardState if (source, target) in CARD_TRANSITIONS[viewer])
 
 
 class CardOperationLayer(ProtocolBoundary):
