@@ -764,11 +764,17 @@ class ProviderStateTest(unittest.TestCase):
         write(self.home / ".codex/auth.json", {"tokens": {"access_token": "codex-token-value"}})
         self.clock = NOW
         self.fetched: list[str] = []
+        self.responses: dict[str, BaseException | dict[str, object]] = {}
         self.claude_answers: list[BaseException | None] = []
         self.layer = ProviderUsageLayer(home=self.home, fetch_json=self.fetch, now=lambda: self.clock)
 
     def fetch(self, url: str, headers: dict[str, str], timeout: float) -> dict[str, object]:
         self.fetched.append(url)
+        if url in self.responses:
+            response = self.responses[url]
+            if isinstance(response, BaseException):
+                raise response
+            return response
         if url == CLAUDE_USAGE_URL:
             failure = self.claude_answers.pop(0) if self.claude_answers else None
             if failure is not None:
@@ -884,17 +890,31 @@ class ProviderStateTest(unittest.TestCase):
             self.assertNotIn("next_attempt_at", stale)
 
     def test_concurrent_snapshots_on_a_miss_make_one_request_per_provider(self) -> None:
-        entered = threading.Event()
-        release = threading.Event()
+        callers = 6
+        contention = {url: threading.Barrier(callers) for url in (CLAUDE_USAGE_URL, CODEX_USAGE_URL)}
+
+        class ContendedLock:
+            def __init__(self, url: str) -> None:
+                self.lock = threading.Lock()
+                self.waiting = contention[url]
+
+            def __enter__(self) -> None:
+                if not self.lock.acquire(blocking=False):
+                    self.waiting.wait(5)
+                    self.lock.acquire()
+
+            def __exit__(self, *args: object) -> None:
+                self.lock.release()
+
+        for name, url in (("claude", CLAUDE_USAGE_URL), ("codex", CODEX_USAGE_URL)):
+            self.layer._states[name].lock = ContendedLock(url)
         plain_fetch = self.fetch
 
         def blocking_fetch(url: str, headers: dict[str, str], timeout: float) -> dict[str, object]:
-            entered.set()
-            self.assertTrue(release.wait(5))
+            contention[url].wait(5)
             return plain_fetch(url, headers, timeout)
 
         self.layer.fetch_json = blocking_fetch
-        callers = 6
         start = threading.Barrier(callers + 1)
         documents: list[dict[str, object]] = []
 
@@ -906,14 +926,85 @@ class ProviderStateTest(unittest.TestCase):
         for thread in threads:
             thread.start()
         start.wait(5)
-        self.assertTrue(entered.wait(5))
-        release.set()
         for thread in threads:
             thread.join(5)
+            self.assertFalse(thread.is_alive())
         self.assertEqual(len(documents), callers)
         self.assertEqual(self.fetched.count(CLAUDE_USAGE_URL), 1)
         self.assertEqual(self.fetched.count(CODEX_USAGE_URL), 1)
         self.assertEqual({id(document) for document in documents}, {id(documents[0])})
+
+    def test_malformed_usage_is_cached_then_preserves_the_last_success(self) -> None:
+        for index, url in enumerate((CLAUDE_USAGE_URL, CODEX_USAGE_URL)):
+            for reset in (253402300800, 1e100):
+                with self.subTest(url=url, reset=reset):
+                    self.setUp()
+                    malformed = (
+                        {"five_hour": {"utilization": 30, "resets_at": reset}}
+                        if index == 0
+                        else {"rate_limit": {"primary_window": {"used_percent": 10, "resets_at": reset}}}
+                    )
+                    self.responses[url] = malformed
+                    first = self.layer.usage_snapshot()["providers"][index]
+                    self.assertEqual((first["status"], first["windows"]), ("unavailable", []))
+                    if index == 0 or reset == 1e100:
+                        self.assertEqual(
+                            first["reason"], f"{first['label']}'s answer was not a valid usage document"
+                        )
+                    self.clock += provider_usage.CACHE_SECONDS - 1
+                    self.assertIs(self.layer.usage_snapshot()["providers"][index], first)
+                    self.assertEqual(self.fetched.count(url), 1)
+                    self.responses.pop(url)
+                    self.clock += 1
+                    success = self.layer.usage_snapshot()["providers"][index]
+                    self.assertEqual(success["status"], "available")
+                    self.responses[url] = malformed
+                    self.clock += provider_usage.CACHE_SECONDS
+                    stale = self.layer.usage_snapshot()["providers"][index]
+                    self.assertEqual(stale["status"], "stale")
+                    self.assertEqual(stale["windows"], success["windows"])
+                    self.assertEqual(stale["observed_at"], success["observed_at"])
+                    self.assertEqual(stale["age_seconds"], provider_usage.CACHE_SECONDS)
+                    self.assertIs(self.layer.usage_snapshot()["providers"][index], stale)
+                    self.assertEqual(self.fetched.count(url), 3)
+
+    def test_invalidate_preserves_codex_retry_after_and_doubling_backoff(self) -> None:
+        for header in ("3600", None):
+            with self.subTest(header=header):
+                self.setUp()
+                self.responses[CODEX_USAGE_URL] = http_error(429, header)
+                for delay in (600, 1200):
+                    document = self.layer.usage_snapshot()["providers"][1]
+                    retry = self.clock + (int(header) if header else delay)
+                    self.assertEqual(document["next_attempt_at"], provider_usage._iso(retry))
+                    self.clock = retry - 1
+                    self.layer.invalidate()
+                    self.assertIs(self.layer.usage_snapshot()["providers"][1], document)
+                    self.clock = retry
+                self.assertEqual(self.fetched.count(CODEX_USAGE_URL), 2)
+                self.responses.pop(CODEX_USAGE_URL)
+                self.assertEqual(self.layer.usage_snapshot()["providers"][1]["status"], "available")
+                self.layer.invalidate()
+                self.layer.usage_snapshot()
+                self.assertEqual(self.fetched.count(CODEX_USAGE_URL), 4)
+                self.responses[CODEX_USAGE_URL] = http_error(429, header)
+                self.clock += provider_usage.CACHE_SECONDS
+                document = self.layer.usage_snapshot()["providers"][1]
+                retry = self.clock + (int(header) if header else provider_usage.RATE_LIMIT_BACKOFF_START)
+                self.assertEqual(document["next_attempt_at"], provider_usage._iso(retry))
+
+    def test_non_ascii_retry_after_uses_rate_limit_backoff(self) -> None:
+        for index, url in enumerate((CLAUDE_USAGE_URL, CODEX_USAGE_URL)):
+            with self.subTest(url=url):
+                self.setUp()
+                self.responses[url] = http_error(429, "²")
+                document = self.layer.usage_snapshot()["providers"][index]
+                retry = self.clock + provider_usage.RATE_LIMIT_BACKOFF_START
+                self.assertEqual(document["next_attempt_at"], provider_usage._iso(retry))
+                self.clock = retry - 1
+                self.layer.invalidate()
+                self.assertIs(self.layer.usage_snapshot()["providers"][index], document)
+                self.assertEqual(self.fetched.count(url), 1)
 
 
 class DamagedAuthTest(unittest.TestCase):
