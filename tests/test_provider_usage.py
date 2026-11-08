@@ -1141,11 +1141,14 @@ class ClaudeStatuslineTest(unittest.TestCase):
             with self.subTest(raw=raw[:20]):
                 self.assertFalse(self.capture(raw, self.home))
                 self.assertEqual(self.cache.read_bytes(), before)
+        self.clock += 1  # A valid changed window must now replace the existing snapshot.
         for value in (True, -1, 101, float("nan"), float("inf"), 10**1000):
             self.assertFalse(self.record({"five_hour": {"used_percentage": value, "resets_at": NOW}}))
         for value in (True, -1, float("nan"), float("inf"), 10**1000, 253402300800):
             self.assertFalse(self.record({"five_hour": {"used_percentage": 0, "resets_at": value}}))
         self.assertEqual(self.cache.read_bytes(), before)
+        self.assertTrue(self.record({"five_hour": {"used_percentage": 50, "resets_at": NOW + 300}}))
+        self.assertEqual(json.loads(self.cache.read_text())["observed_at"], NOW + 1)
 
     def test_bounded_corrupt_and_future_cache_falls_back_to_http(self) -> None:
         self.cache.parent.mkdir(exist_ok=True)
@@ -1278,3 +1281,28 @@ class ClaudeStatuslineTest(unittest.TestCase):
         )
         self.assertEqual(result.stdout, payload)
         self.assertEqual(result.stderr, b"")
+
+    def test_new_response_replaces_existing_snapshot_and_updates_the_bar(self) -> None:
+        transcript = self.home / "turn.jsonl"
+        transcript.write_text("private transcript contents are never read")
+        payload = {"transcript_path": str(transcript), "rate_limits": self.limits}
+        os.utime(transcript, (NOW, NOW))
+        with mock.patch("ummanu.runtime.claude_usage.time.time", return_value=NOW):
+            self.assertTrue(self.capture(json.dumps(payload).encode(), self.home))
+        self.assertEqual(self.claude()["windows"][1]["remaining_percent"], 33)
+        payload["rate_limits"] = {
+            "five_hour": {"used_percentage": 3, "resets_at": NOW + 300},
+            "seven_day": {"used_percentage": 68, "resets_at": NOW + 10080},
+        }
+        self.clock = NOW + 60
+        os.utime(transcript, (self.clock, self.clock))
+        with mock.patch("ummanu.runtime.claude_usage.time.time", return_value=self.clock):
+            self.assertTrue(self.capture(json.dumps(payload).encode(), self.home))
+        data = json.loads(self.cache.read_text())
+        self.assertEqual(data["observed_at"], NOW + 60)
+        self.assertEqual(data["rate_limits"], payload["rate_limits"])
+        reading = self.claude()
+        self.assertEqual(reading["status"], "available")
+        self.assertEqual(reading["observed_at"], provider_usage._iso(NOW + 60))
+        self.assertEqual([w["remaining_percent"] for w in reading["windows"]], [97, 32])
+        self.assertEqual(self.calls, [])
