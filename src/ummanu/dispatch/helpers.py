@@ -8,7 +8,6 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from ummanu.dispatch.review_packet import data_block
 from ummanu.dispatch.state import attempt_request_id, request_token
 
 _ASSIGN_RE = re.compile(r"(?i)\b([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*)\s*=\s*\S+")
@@ -344,9 +343,9 @@ def _task_doc_decision(workspace: str) -> str:
         return ""
 
 
-def _task_doc_decision_id(workspace: str, decision: str) -> str:
-    """Recover only an unambiguous packet source matching the frozen decision text."""
-    if not workspace or not decision:
+def _task_doc_decision_id(workspace: str, block: list[str]) -> str:
+    """Recover only an unambiguous packet source matching the rendered frozen decision."""
+    if not workspace or not block[1]:
         return ""
     try:
         document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
@@ -354,7 +353,6 @@ def _task_doc_decision_id(workspace: str, decision: str) -> str:
         return ""
     # Match the full data block: a source quoted inside arbitrary Markdown cannot
     # replace the source of the instruction stored on the final hidden line.
-    block = data_block(decision)
     pattern = (
         r"^### Applicable observer decision for this round\nsource_event: (\S+)\n\n"
         + re.escape(block[0])
