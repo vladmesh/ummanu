@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,8 +10,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
+from tests.fakes.review_packet import marker_event
 from tests.support.completion_receipt import SHA, TREE, declared_receipt
-from tests.test_review_packet import PacketFixture
 from ummanu.board.audit_contract import PROTOCOL_EVENT_RECORD_TYPE
 from ummanu.board.models import EventKind
 from ummanu.broad_check import admission_snapshot
@@ -31,8 +32,46 @@ class AdoptDecisionTests(unittest.TestCase):
         self.enterContext(
             mock.patch.dict("os.environ", {"UMMANU_DISPATCHER_BODY_DIR": str(self.root / "bodies")})
         )
-        self.fixture = PacketFixture()
-        self.fixture.task["state"] = "in_progress"
+        self.fixture = SimpleNamespace(
+            task={
+                "ref": "sample-1",
+                "project": "ummanu",
+                "type": "code",
+                "state": "in_progress",
+                "description": "Repair the reader",
+                "comments": [],
+            },
+            decision="Repair BLOCKER-reader within the declared boundary.",
+            events=[],
+        )
+        self.fixture.events.extend(
+            [
+                {
+                    "event_id": "spec-1",
+                    "kind": "created",
+                    "payload": {
+                        "description_sha256": hashlib.sha256(
+                            self.fixture.task["description"].encode()
+                        ).hexdigest()
+                    },
+                },
+                {
+                    "event_id": "visit-1",
+                    "kind": "card.moved",
+                    "record_type": "board.protocol_event",
+                    "transition": {"source": "validate", "target": "assessment"},
+                    "data": {},
+                },
+            ]
+        )
+        self.marker(
+            "decision:rework", self.fixture.decision, "observer-decision-1", assessment_visit="visit-1"
+        )
+        self.marker(
+            "report:done",
+            "BLOCKER-reader: fixed; commit: " + "a" * 40,
+            attempt_request_id("attempt-1", "worker-report-done", "sample-1", "3"),
+        )
         self.host = object.__new__(CommandHostRuntime)
         contract = ModuleContract(
             "unused",
@@ -56,13 +95,27 @@ class AdoptDecisionTests(unittest.TestCase):
         self.runtime.catalog.claimed_review_head.return_value = "reviewer"
         self.enterContext(mock.patch("ummanu.dispatch.runtime._head_process_status", return_value={}))
 
+    def marker(self, marker, body, request, **fields):
+        self.fixture.task["comments"].append({"marker": marker, "body": f"[{marker}]\n{body}"})
+        self.fixture.events.append(
+            marker_event(
+                marker,
+                body,
+                request,
+                ref=self.fixture.task["ref"],
+                description=self.fixture.task["description"],
+                revision="spec-1",
+                **fields,
+            )
+        )
+
     def document(self, *, blocked=False):
         if blocked:
-            self.fixture.events[2]["transition"]["target"] = "blocked"
-            data = self.fixture.events[3]["data"]
+            self.fixture.events[1]["transition"]["target"] = "blocked"
+            data = self.fixture.events[2]["data"]
             data["blocked_visit"] = data.pop("assessment_visit")
         self.fixture.events.insert(
-            4,
+            3,
             {
                 "event_id": "started-rework",
                 "kind": "card.started",
@@ -117,9 +170,7 @@ class AdoptDecisionTests(unittest.TestCase):
                 "data": {},
             }
         )
-        self.fixture.marker(
-            "decision:rework", self.fixture.decision, "later-decision", blocked_visit="later-visit"
-        )
+        self.marker("decision:rework", self.fixture.decision, "later-decision", blocked_visit="later-visit")
         record = self.adopt()
         evidence = self.resolve(record)
         self.assertEqual(record.report_decision_id, "observer-decision-1")
