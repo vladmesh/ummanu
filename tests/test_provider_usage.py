@@ -1192,7 +1192,9 @@ class ClaudeStatuslineTest(unittest.TestCase):
                 sys.executable,
                 "-I",
                 "-c",
-                "import runpy; runpy.run_path("
+                "import sys, runpy; sys.path.insert(0, "
+                + repr(str(Path(provider_usage.__file__).parents[2]))
+                + "); runpy.run_path("
                 + repr(str(Path(provider_usage.__file__).parents[1] / "runtime/claude_usage.py"))
                 + ", run_name='__main__')",
                 "--forward",
@@ -1241,7 +1243,9 @@ class ClaudeStatuslineTest(unittest.TestCase):
                 sys.executable,
                 "-I",
                 "-c",
-                "import runpy; runpy.run_path("
+                "import sys, runpy; sys.path.insert(0, "
+                + repr(str(Path(provider_usage.__file__).parents[2]))
+                + "); runpy.run_path("
                 + repr(str(Path(provider_usage.__file__).parents[1] / "runtime/claude_usage.py"))
                 + ", run_name='__main__')",
                 "--forward",
@@ -1264,7 +1268,9 @@ class ClaudeStatuslineTest(unittest.TestCase):
         for name in ("json", "argparse", "subprocess", "tempfile", "typing"):
             (self.home / (name + ".py")).write_text("raise RuntimeError('workspace module')")
         command = (
-            "import runpy; data=runpy.run_path("
+            "import sys, runpy; sys.path.insert(0, "
+            + repr(str(Path(provider_usage.__file__).parents[2]))
+            + "); data=runpy.run_path("
             + repr(str(Path(provider_usage.__file__).parents[1] / "runtime/claude_usage.py"))
             + "); "
             "exec('def broken(*a, **k): raise RuntimeError()'); "

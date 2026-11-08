@@ -22,7 +22,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from ummanu.runtime.claude_usage import CACHE_NAME, MAX_CACHE_BYTES, finite_number, usage_limits
+from ummanu.webproto.claude_usage import CACHE_NAME, MAX_CACHE_BYTES, finite_number, usage_limits
 
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 # Compatibility header only: it does not guarantee that the usage endpoint accepts a request.
