@@ -224,7 +224,7 @@ def _retry_after(error: HTTPError, observed: float) -> float | None:
     if not isinstance(value, str) or not value.strip():
         return None
     text = value.strip()
-    if text.isdigit():
+    if text.isascii() and text.isdigit():
         return observed + int(text)
     try:
         moment = parsedate_to_datetime(text)
@@ -317,10 +317,11 @@ class ProviderUsageLayer:
         return Path(configured) if configured is not None else self.home / ".codex"
 
     def invalidate(self) -> None:
-        """Make Codex due, so the next render asks Codex again; Claude keeps its own next attempt."""
+        """Make Codex due unless it is rate limited; each provider keeps its own cooldown."""
         state = self._states["codex"]
         with state.lock:
-            state.next_attempt = 0.0
+            if state.document is None or "next_attempt_at" not in state.document:
+                state.next_attempt = 0.0
 
     def codex_live(self) -> dict[str, Any]:
         """The Codex reading as it is now, past the cache and without replacing what the cache holds."""
@@ -446,7 +447,12 @@ class ProviderUsageLayer:
                 return state.document
             try:
                 document = read(observed)
-            except _ReadFailure as failure:
+            except Exception as exc:  # noqa: BLE001 -- malformed provider answers must enter the failure cache
+                failure = (
+                    exc
+                    if isinstance(exc, _ReadFailure)
+                    else _ReadFailure(f"{label}'s answer was not a valid usage document")
+                )
                 state.document = self._failed(provider_id, label, state, failure, observed)
                 return state.document
             state.last_success = (observed, document)
