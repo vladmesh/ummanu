@@ -22,8 +22,10 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from ummanu.webproto.claude_usage import CACHE_NAME, MAX_CACHE_BYTES, finite_number, usage_limits
+
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-# The OAuth usage endpoint throttles generic HTTP clients separately from Claude Code clients.
+# Compatibility header only: it does not guarantee that the usage endpoint accepts a request.
 CLAUDE_USAGE_USER_AGENT = "claude-code/2.1.319 (ummanu)"
 #: Where the Claude token is looked for, first non-empty wins; each is read afresh on every due fetch.
 CLAUDE_LOGIN_SOURCES = (
@@ -368,7 +370,7 @@ class ProviderUsageLayer:
     def usage_snapshot(self) -> dict[str, Any]:
         """The combined document, assembled from each provider's own state; a provider is asked only when due."""
         providers = [
-            self._provider("claude", "Claude", self._claude),
+            self._claude_provider(),
             self._provider("codex", "Codex", self._codex),
         ]
         key = tuple(id(item) for item in providers)
@@ -378,6 +380,57 @@ class ProviderUsageLayer:
             document = {"kind": "provider_usage", "observed_at": _iso(self.now()), "providers": providers}
             self._combined = (key, document)
             return document
+
+    def _claude_provider(self) -> dict[str, Any]:
+        """Read passive CLI observations even during HTTP cooldown, without bypassing that cooldown."""
+        passive = self._claude_statusline(self.now())
+        if passive is not None and passive["status"] == "available":
+            return passive
+        live = self._provider("claude", "Claude", self._claude)
+        if passive is None or (
+            live["observed_at"] is not None
+            and datetime.fromisoformat(live["observed_at"]) >= datetime.fromisoformat(passive["observed_at"])
+        ):
+            return live
+        if live.get("reason"):
+            passive["reason"] += f"; {live['reason']}"
+        if "next_attempt_at" in live:
+            passive["next_attempt_at"] = live["next_attempt_at"]
+        return passive
+
+    def _claude_statusline(self, observed: float) -> dict[str, Any] | None:
+        """A bounded local snapshot, with its original time; never interpret missing usage as zero."""
+        try:
+            with (self.home / ".claude" / CACHE_NAME).open("rb") as stream:
+                data = stream.read(MAX_CACHE_BYTES + 1)
+            if len(data) > MAX_CACHE_BYTES:
+                return None
+            raw = json.loads(data)
+        except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+            return None
+        if not isinstance(raw, dict) or raw.get("version") != 1:
+            return None
+        stamp = raw.get("observed_at")
+        if not finite_number(stamp) or not 0 < stamp <= observed:
+            return None
+        limits = usage_limits(raw.get("rate_limits"))
+        windows = [
+            window
+            for window in (
+                _window("5-hour", limits.get("five_hour"), default_minutes=300),
+                _window("weekly", limits.get("seven_day"), default_minutes=10080),
+            )
+            if window is not None
+        ]
+        if not windows:
+            return None
+        result = self._available("claude", "Claude", stamp, windows)
+        age = max(0.0, observed - stamp)
+        result["age_seconds"] = round(age, 1)
+        if age > STALE_AFTER_SECONDS or any(w["resets_at"] <= observed for w in limits.values()):
+            result["status"] = "stale"
+            result["reason"] = "Latest Claude CLI usage observation is stale"
+        return result
 
     def _provider(
         self, provider_id: str, label: str, read: Callable[[float], dict[str, Any]]

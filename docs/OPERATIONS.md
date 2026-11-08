@@ -2532,20 +2532,59 @@ moment to its `Retry-After` (delta-seconds or an HTTP-date), or without one to a
 after a success serves that success's windows as `stale` with the failure as its reason, a rate limit
 adds `next_attempt_at`, and concurrent renders on a due provider share one request. A Codex reset
 credit spent from the bar makes only Codex due.
-The Claude token is the first non-empty one of: `~/.claude/.credentials.json`
+With no fresh CLI observation (configured below), the Claude HTTP token is the first non-empty one of: `~/.claude/.credentials.json`
 `claudeAiOauth.accessToken`, `CLAUDE_CODE_OAUTH_TOKEN` in the web process environment, and
 `CLAUDE_CODE_OAUTH_TOKEN` under `env` in `~/.claude/settings.json`; an unreadable file or a missing key
 only passes to the next source. All three are read again on every due fetch. The panel never copies,
 logs or refreshes the token: it sends it only in the usage request, and an unavailable or rejected
 login names the source, never the value.
 Claude usage requests send the OAuth beta header and the pinned CLI-compatible
-`User-Agent: claude-code/2.1.319 (ummanu)`; the endpoint can rate-limit generic HTTP clients even when
-their OAuth token works in the CLI. The same cache and `Retry-After` rules apply to this request.
+`User-Agent: claude-code/2.1.319 (ummanu)`. That header is no guarantee against HTTP 429,
+even when the token works in the CLI. The same cache and `Retry-After` rules apply to this request.
 **Rendering a page never adds a provider
 call**: the transport hands the bar the cached read, so a hundred page loads inside one cache window ask
 each provider once, and JSON routes, which render no page, ask nothing. A process built without the
 provider layer, and a read that refuses, both still serve every page; the bar then carries the reason
 where the numbers would be.
+
+
+#### Claude CLI usage capture
+
+Claude's bottom-bar percentages prefer a local Claude Code `statusLine.rate_limits`
+observation over OAuth polling. Claude Code emits these after a normal interactive
+response, including with a working inference-only setup token. This source needs no
+extra provider request or OAuth refresh. See the [upstream statusLine contract](https://code.claude.com/docs/en/statusline).
+
+Configure the user's `~/.claude/settings.json` statusLine command to run the installed
+interpreter with `-I -m ummanu.runtime.claude_usage`. If a command already exists, pass its
+complete shell-quoted command as `--forward COMMAND`; it receives the original stdin
+and retains its stdout. Preserve the other statusLine options and all other settings.
+Back up settings privately with mode 0600 under `~/.claude/` before editing; it may
+hold credentials. Keep that backup out of repositories and the exported data directory. Configuration is
+an explicit operator action, not something the web reader or upgrade silently does.
+Use the absolute installed venv interpreter with `-I` to ignore a head workspace's
+Python environment and same-named modules in its cwd. Removing this module requires
+restoring the previous command first; rehearse restoring the backup before deployment.
+Claude can hot-reload settings in existing sessions; no head restart is required.
+New ordinary Claude interactive turns then refresh `~/.claude/ummanu-usage.json`.
+Print/noninteractive turns may not emit statusLine; there is no background model call.
+
+The collector atomically writes a 0600 file containing only two validated usage
+windows and a conservative observation time from the transcript file mtime (stat only,
+no transcript content read). Identical windows never refresh that timestamp, even on
+a new reply, so idle re-renders cannot make old figures fresh. Concurrent writers are
+serialized and older transcript timestamps cannot replace a newer snapshot. The stored
+time therefore records the last changed reading, not every render. It discards session/transcript identifiers and
+all other input. Missing/malformed windows leave the last snapshot intact. Readers
+reject malformed, oversized or future-dated snapshots. A snapshot older than 15 min,
+or whose window has reset, is visibly stale, never silently reset to zero. With a
+fresh snapshot the bar does not call OAuth usage. Without one it retains the existing
+OAuth sources, cache and Retry-After rules, using an older CLI reading when it is the
+newest available evidence. New CLI data is visible even during an HTTP cooldown;
+it never causes an early HTTP retry. Idle installations can show stale figures until
+the next normal interactive Claude response. Remove the wrapper and restore the prior
+statusLine command to disable capture; delete the cache to discard its last reading.
+
 
 #### The doctor lamp, and the page behind it
 

@@ -1049,3 +1049,266 @@ class ClaudeLoginSourceTest(unittest.TestCase):
             "Claude rejected the login from settings.json CLAUDE_CODE_OAUTH_TOKEN (HTTP 401)",
         )
         self.assertNotIn(CLAUDE_TOKEN, json.dumps(claude))
+
+
+class ClaudeStatuslineTest(unittest.TestCase):
+    def setUp(self) -> None:
+        from ummanu.runtime import claude_usage
+
+        self.capture = claude_usage.capture
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.home = Path(self.directory.name)
+        self.cache = self.home / ".claude" / claude_usage.CACHE_NAME
+        self.calls = []
+        self.clock = NOW
+        self.limits = {
+            "five_hour": {"used_percentage": 0, "resets_at": NOW + 300},
+            "seven_day": {"used_percentage": 67, "resets_at": NOW + 10080},
+        }
+        self.layer = ProviderUsageLayer(home=self.home, fetch_json=self.fetch, now=lambda: self.clock)
+        write(self.home / ".claude/settings.json", {"env": {"CLAUDE_CODE_OAUTH_TOKEN": "secret"}})
+
+    def fetch(self, url, headers, timeout):
+        self.calls.append(url)
+        message = Message()
+        message["Retry-After"] = "3600"
+        raise HTTPError(url, 429, "throttled", message, None)
+
+    def claude(self):
+        return self.layer.usage_snapshot()["providers"][0]
+
+    def record(self, limits=None, observed=None):
+        return self.capture(
+            json.dumps(
+                {
+                    "rate_limits": self.limits if limits is None else limits,
+                    "token": "secret",
+                    "transcript_path": "/private/session",
+                }
+            ).encode(),
+            self.home,
+            observed=self.clock if observed is None else observed,
+        )
+
+    def test_real_payload_becomes_remaining_percent_without_http_or_auth(self) -> None:
+        (self.home / ".claude/settings.json").unlink()
+        self.assertTrue(self.record())
+        reading = self.claude()
+        self.assertEqual(reading["status"], "available")
+        self.assertEqual([w["remaining_percent"] for w in reading["windows"]], [100, 33])
+        self.assertEqual(reading["observed_at"], provider_usage._iso(NOW))
+        self.assertEqual(reading["age_seconds"], 0)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.cache.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn("secret", self.cache.read_text())
+        self.assertNotIn("transcript", self.cache.read_text())
+
+    def test_new_cli_reading_visible_during_existing_http_cooldown(self) -> None:
+        failed = self.claude()
+        self.assertEqual(failed["status"], "unavailable")
+        self.assertEqual(self.calls, [CLAUDE_USAGE_URL])
+        self.clock += 10
+        self.record()
+        self.assertEqual(self.claude()["status"], "available")
+        self.clock += 1000
+        stale = self.claude()
+        self.assertEqual(stale["status"], "stale")
+        self.assertEqual(stale["age_seconds"], 1000)
+        self.assertEqual(stale["observed_at"], provider_usage._iso(NOW + 10))
+        self.assertEqual(stale["windows"][1]["remaining_percent"], 33)
+        self.assertEqual(stale["next_attempt_at"], failed["next_attempt_at"])
+        self.layer.invalidate()
+        self.layer.codex_live()
+        self.assertEqual(self.claude()["status"], "stale")
+        self.assertEqual(self.calls, [CLAUDE_USAGE_URL])
+        self.clock = NOW + 3601
+        self.claude()
+        self.assertEqual(self.calls, [CLAUDE_USAGE_URL, CLAUDE_USAGE_URL])
+
+    def test_reset_window_is_stale_and_never_becomes_zero(self) -> None:
+        self.record()
+        self.clock += 301
+        reading = self.claude()
+        self.assertEqual(reading["status"], "stale")
+        self.assertEqual(reading["windows"][1]["remaining_percent"], 33)
+        self.assertEqual(reading["age_seconds"], 301)
+
+    def test_missing_or_malformed_payload_keeps_previous_snapshot(self) -> None:
+        self.record()
+        before = self.cache.read_bytes()
+        for raw in (b"{}", b"not json", b"[]", b"\xff", b"x" * (1024 * 1024 + 1)):
+            with self.subTest(raw=raw[:20]):
+                self.assertFalse(self.capture(raw, self.home))
+                self.assertEqual(self.cache.read_bytes(), before)
+        self.clock += 1  # A valid changed window must now replace the existing snapshot.
+        for value in (True, -1, 101, float("nan"), float("inf"), 10**1000):
+            self.assertFalse(self.record({"five_hour": {"used_percentage": value, "resets_at": NOW}}))
+        for value in (True, -1, float("nan"), float("inf"), 10**1000, 253402300800):
+            self.assertFalse(self.record({"five_hour": {"used_percentage": 0, "resets_at": value}}))
+        self.assertEqual(self.cache.read_bytes(), before)
+        self.assertTrue(self.record({"five_hour": {"used_percentage": 50, "resets_at": NOW + 300}}))
+        self.assertEqual(json.loads(self.cache.read_text())["observed_at"], NOW + 1)
+
+    def test_bounded_corrupt_and_future_cache_falls_back_to_http(self) -> None:
+        self.cache.parent.mkdir(exist_ok=True)
+        for raw in (b"x" * 4097, b"\xff", b"[]", b"{broken", b"{}"):
+            self.cache.write_bytes(raw)
+            self.assertIsNone(self.layer._claude_statusline(NOW))
+        self.record(observed=NOW + 1)
+        self.assertIsNone(self.layer._claude_statusline(NOW))
+        self.assertEqual(self.claude()["status"], "unavailable")
+        self.assertEqual(self.calls, [CLAUDE_USAGE_URL])
+
+    def test_only_present_valid_windows_are_kept(self) -> None:
+        self.record({"seven_day": self.limits["seven_day"], "five_hour": None})
+        reading = self.claude()
+        self.assertEqual(len(reading["windows"]), 1)
+        self.assertEqual(reading["windows"][0]["name"], "weekly")
+
+    def test_newer_successful_http_reading_wins_over_old_cli_data(self) -> None:
+        self.record(observed=NOW - 1000)
+        self.layer.fetch_json = lambda *_: {"seven_day": {"utilization": 70}}
+        reading = self.claude()
+        self.assertEqual(reading["status"], "available")
+        self.assertEqual(reading["windows"][0]["remaining_percent"], 30)
+
+    def test_cache_write_failure_does_not_break_capture(self) -> None:
+        with mock.patch("ummanu.runtime.claude_usage.os.replace", side_effect=PermissionError):
+            self.assertFalse(self.record())
+        self.assertEqual(list((self.home / ".claude").glob(".ummanu-usage-*")), [])
+
+    def test_wrapper_forwards_exact_input_and_existing_stdout(self) -> None:
+        import subprocess
+        import sys
+
+        transcript = self.home / "transcript.jsonl"
+        transcript.write_text("private contents")
+        payload = json.dumps(
+            {"rate_limits": self.limits, "session_id": "private-session", "transcript_path": str(transcript)}
+        ).encode()
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                "import sys, runpy; sys.path.insert(0, "
+                + repr(str(Path(provider_usage.__file__).parents[2]))
+                + "); runpy.run_path("
+                + repr(str(Path(provider_usage.__file__).parents[1] / "runtime/claude_usage.py"))
+                + ", run_name='__main__')",
+                "--forward",
+                "cat",
+            ],
+            input=payload,
+            capture_output=True,
+            check=True,
+            env={**os.environ, "HOME": str(self.home)},
+        )
+        self.assertEqual(result.stdout, payload)
+        self.assertEqual(result.stderr, b"")
+        self.assertNotIn("session", self.cache.read_text())
+
+    def test_rerenders_and_older_sessions_cannot_refresh_or_replace_snapshot(self) -> None:
+        self.record()
+        before = self.cache.read_bytes()
+        self.clock += 1000
+        self.assertFalse(self.record())
+        self.assertEqual(self.cache.read_bytes(), before)
+        older = {"seven_day": {"used_percentage": 65, "resets_at": NOW + 10080}}
+        self.assertFalse(self.record(older, observed=NOW - 1))
+        self.assertEqual(self.cache.read_bytes(), before)
+        self.assertEqual(self.claude()["status"], "stale")
+
+    def test_transcript_is_only_statted_and_observation_uses_its_mtime(self) -> None:
+        transcript = self.home / "turn.jsonl"
+        transcript.write_text("not JSON, must not be read")
+        os.utime(transcript, (NOW - 100, NOW - 100))
+        payload = json.dumps({"transcript_path": str(transcript), "rate_limits": self.limits}).encode()
+        with mock.patch("ummanu.runtime.claude_usage.time.time", return_value=NOW):
+            self.assertTrue(self.capture(payload, self.home))
+        data = json.loads(self.cache.read_text())
+        self.assertEqual(data["observed_at"], NOW - 100)
+        self.assertNotIn("transcript", self.cache.read_text())
+
+    def test_first_render_without_limits_forwards_without_cache_changes(self) -> None:
+        import subprocess
+        import sys
+
+        self.record()
+        before = self.cache.read_bytes()
+        payload = b'{"session_id":"first-render"}'
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                "import sys, runpy; sys.path.insert(0, "
+                + repr(str(Path(provider_usage.__file__).parents[2]))
+                + "); runpy.run_path("
+                + repr(str(Path(provider_usage.__file__).parents[1] / "runtime/claude_usage.py"))
+                + ", run_name='__main__')",
+                "--forward",
+                "cat",
+            ],
+            input=payload,
+            capture_output=True,
+            check=True,
+            cwd=self.home,
+            env={**os.environ, "HOME": str(self.home), "PYTHONPATH": str(self.home)},
+        )
+        self.assertEqual(result.stdout, payload)
+        self.assertEqual(result.stderr, b"")
+        self.assertEqual(self.cache.read_bytes(), before)
+
+    def test_isolated_wrapper_survives_shadowing_modules_and_capture_exception(self) -> None:
+        import subprocess
+        import sys
+
+        for name in ("json", "argparse", "subprocess", "tempfile", "typing"):
+            (self.home / (name + ".py")).write_text("raise RuntimeError('workspace module')")
+        command = (
+            "import sys, runpy; sys.path.insert(0, "
+            + repr(str(Path(provider_usage.__file__).parents[2]))
+            + "); data=runpy.run_path("
+            + repr(str(Path(provider_usage.__file__).parents[1] / "runtime/claude_usage.py"))
+            + "); "
+            "exec('def broken(*a, **k): raise RuntimeError()'); "
+            "data['main'].__globals__['capture']=broken; data['main']()"
+        )
+        payload = b'{"rate_limits": {}}'
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", command, "--forward", "cat"],
+            input=payload,
+            capture_output=True,
+            check=True,
+            cwd=self.home,
+            env={**os.environ, "HOME": str(self.home), "PYTHONPATH": str(self.home)},
+        )
+        self.assertEqual(result.stdout, payload)
+        self.assertEqual(result.stderr, b"")
+
+    def test_new_response_replaces_existing_snapshot_and_updates_the_bar(self) -> None:
+        transcript = self.home / "turn.jsonl"
+        transcript.write_text("private transcript contents are never read")
+        payload = {"transcript_path": str(transcript), "rate_limits": self.limits}
+        os.utime(transcript, (NOW, NOW))
+        with mock.patch("ummanu.runtime.claude_usage.time.time", return_value=NOW):
+            self.assertTrue(self.capture(json.dumps(payload).encode(), self.home))
+        self.assertEqual(self.claude()["windows"][1]["remaining_percent"], 33)
+        payload["rate_limits"] = {
+            "five_hour": {"used_percentage": 3, "resets_at": NOW + 300},
+            "seven_day": {"used_percentage": 68, "resets_at": NOW + 10080},
+        }
+        self.clock = NOW + 60
+        os.utime(transcript, (self.clock, self.clock))
+        with mock.patch("ummanu.runtime.claude_usage.time.time", return_value=self.clock):
+            self.assertTrue(self.capture(json.dumps(payload).encode(), self.home))
+        data = json.loads(self.cache.read_text())
+        self.assertEqual(data["observed_at"], NOW + 60)
+        self.assertEqual(data["rate_limits"], payload["rate_limits"])
+        reading = self.claude()
+        self.assertEqual(reading["status"], "available")
+        self.assertEqual(reading["observed_at"], provider_usage._iso(NOW + 60))
+        self.assertEqual([w["remaining_percent"] for w in reading["windows"]], [97, 32])
+        self.assertEqual(self.calls, [])
