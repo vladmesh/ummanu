@@ -13,6 +13,7 @@ import io
 import json
 import os
 import re
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,6 +25,7 @@ from ummanu import product_issue_commands, sprint_commands, task_commands
 from ummanu.board import sprint_dod
 from ummanu.board.roles import BOARD_ROLES, Role
 from ummanu.cli import build_parser, main
+from ummanu.dispatch.observer import render_observer_wake_context
 from ummanu.product_issues import ProductIssueStore
 from ummanu.runtime import role_env
 from ummanu.sprints import SprintWriter
@@ -85,6 +87,41 @@ def required_arguments(parser: argparse.ArgumentParser, files: Path) -> list[str
             value = "x"
         argv += [flag, value]
     return argv
+
+
+class PostMergeWakeCommandTests(unittest.TestCase):
+    def test_non_green_wake_command_parses_with_result_binding_and_request_id(self) -> None:
+        parser = build_parser()
+        for result in ("red", "absent", "timeout"):
+            fact = {"card": "example-7", "event_id": f"result-{result}", "result": result}
+            wake = render_observer_wake_context(
+                {"ref": SPRINT, "comments": []}, change="card", post_merge=[fact]
+            )
+            command = next(
+                part for part in wake.split("`") if part.startswith("ummanu task dispose-post-merge ")
+            )
+            self.assertIn("--request-id <id>", command)
+            for action, follow_up in (
+                ("ignore-flake", ""),
+                ("issue", "issue:follow"),
+                ("hotfix", "example-8"),
+            ):
+                with self.subTest(result=result, action=action):
+                    concrete = command.replace("ignore-flake|issue|hotfix", action)
+                    concrete = (
+                        concrete.replace(
+                            "[--follow-up <issue or hotfix ref>]",
+                            f"--follow-up {follow_up}" if follow_up else "",
+                        )
+                        .replace("<why>", "accepted-risk")
+                        .replace("<id>", f"dispose-{result}-{action}")
+                    )
+                    args = parser.parse_args(shlex.split(concrete)[1:])
+                    self.assertEqual((args.ref, args.role), (fact["card"], "observer"))
+                    self.assertEqual(args.result_event, fact["event_id"])
+                    self.assertEqual((args.action, args.follow_up), (action, follow_up))
+                    self.assertEqual(args.reason, "accepted-risk")
+                    self.assertEqual(args.request_id, f"dispose-{result}-{action}")
 
 
 class AdmitRoleTests(unittest.TestCase):
