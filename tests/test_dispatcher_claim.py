@@ -185,13 +185,35 @@ class AdoptDecisionTests(unittest.TestCase):
         self.assertEqual(self.resolve(record).decision, self.fixture.decision)
 
     def test_surrounding_whitespace_does_not_drop_the_decision_source(self):
-        self.fixture.decision = "\n\t" + self.fixture.decision + "\n"
+        self.fixture.decision = "\n\t\v\f\x1c\x1d\x1e\x1f\r" + self.fixture.decision + "\r\n\u0085"
         self.fixture.events[2]["data"]["body"] = self.fixture.decision
         self.fixture.task["comments"][0]["body"] = "[decision:rework]\n" + self.fixture.decision
         self.document(blocked=True)
         record = self.adopt()
         self.assertEqual(record.report_decision, self.fixture.decision.strip())
         self.assertEqual(self.resolve(record).decision_id, "observer-decision-1")
+
+    def test_trailing_crlf_keeps_the_blocked_instruction_after_adoption_and_serialization(self):
+        self.fixture.decision += "\r\n"
+        self.fixture.events[2]["data"]["body"] = self.fixture.decision
+        self.fixture.task["comments"][0]["body"] = "[decision:rework]\n" + self.fixture.decision
+        document = self.document(blocked=True)
+        self.assertIn(self.fixture.decision.strip() + "\\x0d\n", document)
+        before = DispatcherRecord.from_json(
+            {
+                "attempt_id": "attempt-1",
+                "report_generation": 3,
+                "report_decision": self.fixture.decision,
+                "report_decision_id": "observer-decision-1",
+            }
+        )
+        self.assertEqual(self.resolve(before).decision_id, "observer-decision-1")
+        record = DispatcherRecord.from_json(self.adopt().to_json())
+        self.assertEqual(record.report_decision, self.fixture.decision.strip())
+        self.assertEqual(record.report_decision_id, "observer-decision-1")
+        evidence = self.resolve(record)
+        self.assertEqual(evidence.decision, self.fixture.decision)
+        self.assertEqual(evidence.decision_id, "observer-decision-1")
 
     def test_missing_document_keeps_adoption_without_a_decision(self):
         record = self.adopt()
