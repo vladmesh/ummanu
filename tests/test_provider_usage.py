@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import tempfile
@@ -79,6 +80,32 @@ def test_old_codex_session_is_truthfully_stale_when_live_read_fails(tmp_path: Pa
     assert codex["status"] == "stale"
     assert codex["windows"][0]["remaining_percent"] == 20.0
     assert codex["reason"] == "Latest Codex usage observation is stale"
+
+
+class ClaudeRequestHeadersTest(unittest.TestCase):
+    def test_usage_sends_cli_compatibility_headers(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        tmp_path = Path(directory.name)
+        write(tmp_path / ".claude/.credentials.json", {"claudeAiOauth": {"accessToken": "test-secret"}})
+        requests = []
+
+        def open_usage(request, *, timeout):
+            requests.append(request)
+            if not request.get_header("User-agent", "").startswith("claude-code/"):
+                raise HTTPError(request.full_url, 429, "unsupported client", Message(), None)
+            assert request.get_header("Anthropic-beta") == "oauth-2025-04-20"
+            assert request.get_header("Authorization") == "Bearer test-secret"
+            return io.BytesIO(json.dumps({"seven_day": {"utilization": 37}}).encode())
+
+        with mock.patch.object(provider_usage, "urlopen", side_effect=open_usage):
+            document = ProviderUsageLayer(home=tmp_path, environ={}, now=lambda: NOW).usage_snapshot()
+
+        claude = document["providers"][0]
+        assert claude["status"] == "available"
+        assert claude["windows"][0]["remaining_percent"] == 63
+        assert len(requests) == 1
+        assert requests[0].full_url == CLAUDE_USAGE_URL
 
 
 def test_missing_or_malformed_auth_is_explicitly_unavailable(tmp_path: Path) -> None:

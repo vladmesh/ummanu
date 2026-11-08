@@ -2538,6 +2538,9 @@ The Claude token is the first non-empty one of: `~/.claude/.credentials.json`
 only passes to the next source. All three are read again on every due fetch. The panel never copies,
 logs or refreshes the token: it sends it only in the usage request, and an unavailable or rejected
 login names the source, never the value.
+Claude usage requests send the OAuth beta header and the pinned CLI-compatible
+`User-Agent: claude-code/2.1.319 (ummanu)`; the endpoint can rate-limit generic HTTP clients even when
+their OAuth token works in the CLI. The same cache and `Retry-After` rules apply to this request.
 **Rendering a page never adds a provider
 call**: the transport hands the bar the cached read, so a hundred page loads inside one cache window ask
 each provider once, and JSON routes, which render no page, ask nothing. A process built without the

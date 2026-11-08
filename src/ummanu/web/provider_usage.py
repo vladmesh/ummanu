@@ -23,6 +23,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+# The OAuth usage endpoint throttles generic HTTP clients separately from Claude Code clients.
+CLAUDE_USAGE_USER_AGENT = "claude-code/2.1.319 (ummanu)"
 #: Where the Claude token is looked for, first non-empty wins; each is read afresh on every due fetch.
 CLAUDE_LOGIN_SOURCES = (
     ".credentials.json claudeAiOauth.accessToken",
@@ -462,7 +464,11 @@ class ProviderUsageLayer:
         raw = self._live(
             "Claude",
             CLAUDE_USAGE_URL,
-            {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"},
+            {
+                "Authorization": f"Bearer {token}",
+                "anthropic-beta": "oauth-2025-04-20",
+                "User-Agent": CLAUDE_USAGE_USER_AGENT,
+            },
             observed,
             login=source,
         )
