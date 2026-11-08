@@ -1130,5 +1130,82 @@ class IssueReopenTests(IssueEditFixture, unittest.TestCase):
             ["entity.created", "issue.closed", "issue.reopened"],
         )
 
+class ProductReferenceInputTests(ProductIssueFixture, unittest.TestCase):
+    def invoke(self, *flags: str) -> dict:
+        output = io.StringIO()
+        with (
+            mock.patch("ummanu.product_issue_commands.board_client", return_value=self.client),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(output),
+        ):
+            code = main([*flags, "--instance", str(self.root), "--data-dir", str(self.root / "data")])
+        self.assertEqual(code, 0, output.getvalue())
+        return json.loads(output.getvalue())
+
+    def seed_product(self) -> None:
+        self.create_product(
+            product_id="ummanu", projects=["ummanu"], title="Ummanu", description="", actor="po",
+            request_id="seed-product",
+        )
+
+    def test_show_resolves_plain_id_and_product_reference(self) -> None:
+        self.seed_product()
+        plain = self.invoke("product", "show", "--id", "ummanu")
+        self.assertEqual(self.invoke("product", "show", "--id", "product:ummanu"), plain)
+
+    def test_create_normalizes_before_validation_and_request_replay(self) -> None:
+        flags = ["--role", "po", "--actor", "po", "--request-id", "create-product",
+                 "--project", "ummanu", "--title", "Ummanu"]
+        created = self.invoke("product", "create", "--id", "product:ummanu", *flags)
+        self.assertEqual(self.invoke("product", "create", "--id", "ummanu", *flags), created)
+        self.assertEqual(self.product("ummanu")["id"], "ummanu")
+        self.assertEqual(len(self.audit_events()), 1)
+
+    def test_edit_normalizes_before_lock_and_request_replay(self) -> None:
+        self.seed_product()
+        (self.root / "projects" / "service.yaml").write_text("id: service\n", encoding="utf-8")
+        flags = ["--role", "po", "--actor", "po", "--request-id", "edit-product",
+                 "--add-project", "service", "--reason", "share service"]
+        changed = self.invoke("product", "edit", "--id", "product:ummanu", *flags)
+        self.assertEqual(self.invoke("product", "edit", "--id", "ummanu", *flags), changed)
+        self.assertEqual(self.product_project_binding("ummanu"), ["service", "ummanu"])
+        self.assertEqual(len(self.audit_events()), 2)
+
+    def test_issue_create_and_filters_use_the_same_product_id(self) -> None:
+        self.seed_product()
+        flags = ["--role", "po", "--actor", "po", "--request-id", "create-issue",
+                 "--kind", "bug", "--priority", "P2", "--title", "Crash"]
+        created = self.invoke("issue", "create", "--product", "product:ummanu", *flags)
+        self.assertEqual(self.invoke("issue", "create", "--product", "ummanu", *flags), created)
+        self.assertEqual(self.issue(created["ref"])["product"], "ummanu")
+        plain = self.invoke("issue", "list", "--product", "ummanu")
+        self.assertEqual(len(plain), 1)
+        self.assertEqual(self.invoke("issue", "list", "--product", "product:ummanu"), plain)
+        self.assertEqual(self.store.catalogue(product="product:ummanu"), self.store.catalogue(product="ummanu"))
+        self.assertEqual(len(self.audit_events()), 2)
+
+    def test_closed_product_refuses_both_input_forms_without_writes(self) -> None:
+        self.seed_product()
+        row = self.client.call("getTaskByReference", project_id=1, reference="product:ummanu")
+        self.client.call("closeTask", task_id=row["id"])
+        before = self.audit_events()
+        for product in ("ummanu", "product:ummanu"):
+            with self.subTest(product=product):
+                self.assertTrue(self.store.show_product(product)["closed"])
+                with self.assertRaisesRegex(TaskError, "product is closed") as edit:
+                    self.store.edit_product_projects(
+                        product_id=product, add=["service"], remove=[], reason="share service", actor="po",
+                        request_id="closed-edit",
+                    )
+                self.assertEqual(edit.exception.code, "validation")
+                with self.assertRaisesRegex(TaskError, "requires an active Product"):
+                    self.store.create_issue(
+                        product=product, issue_kind="bug", priority="P2", title="Crash", description="",
+                        actor="po", request_id="closed-issue",
+                    )
+        self.assertEqual(self.audit_events(), before)
+        self.assertEqual(self.store.list_issues(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

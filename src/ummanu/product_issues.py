@@ -616,6 +616,7 @@ class ProductIssueStore:
         product: str | None,
         include_closed: bool,
     ) -> list[dict[str, Any]]:
+        product = product.removeprefix("product:") if product is not None else None
         result = []
         for card, meta in typed:
             closed = int(card.get("is_active", 1) or 0) == 0
@@ -645,6 +646,7 @@ class ProductIssueStore:
         return self._products_of(self._typed_cards())
 
     def show_product(self, product_id: str) -> dict[str, Any]:
+        product_id = product_id.removeprefix("product:")
         card, meta = self._find(f"product:{product_id}", PRODUCT_TYPE)
         return self._view(card, meta)
 
@@ -1155,6 +1157,7 @@ class ProductIssueStore:
         role: str = "po",
     ) -> dict[str, Any]:
         admit_role(role, actor, {"po"})
+        product_id = product_id.removeprefix("product:")
         if not _product_id_valid(product_id):
             raise TaskError(
                 "validation", machine_id_refusal("product id", product_id) + ", at most 63 characters", 2
@@ -1215,6 +1218,7 @@ class ProductIssueStore:
         PO only. A Product keeps at least one project, and a change to nothing writes nothing.
         """
         admit_role(role, actor, {"po"})
+        product_id = product_id.removeprefix("product:")
         if not add and not remove:
             raise TaskError("validation", "product edit needs --add-project, --remove-project or both", 2)
         if set(add) & set(remove):
@@ -1277,6 +1281,7 @@ class ProductIssueStore:
         `sprint_close` names the sprint whose owner close files this Issue, as a related ref.
         """
         admit_role(role, actor, {"po", "observer"})
+        product = product.removeprefix("product:")
         request_id = request_id or str(uuid.uuid4())
         related: tuple[str, ...] = (sprint_close,) if sprint_close else ()
         if role == "observer":
