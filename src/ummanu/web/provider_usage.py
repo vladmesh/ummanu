@@ -388,9 +388,12 @@ class ProviderUsageLayer:
             return passive
         live = self._provider("claude", "Claude", self._claude)
         if passive is None or (
-            live["observed_at"] is not None and live["observed_at"] >= passive["observed_at"]
+            live["observed_at"] is not None
+            and datetime.fromisoformat(live["observed_at"]) >= datetime.fromisoformat(passive["observed_at"])
         ):
             return live
+        if live.get("reason"):
+            passive["reason"] += f"; {live['reason']}"
         if "next_attempt_at" in live:
             passive["next_attempt_at"] = live["next_attempt_at"]
         return passive

@@ -2556,16 +2556,25 @@ response, including with a working inference-only setup token. This source needs
 extra provider request or OAuth refresh. See the [upstream statusLine contract](https://code.claude.com/docs/en/statusline).
 
 Configure the user's `~/.claude/settings.json` statusLine command to run the installed
-interpreter with `-m ummanu.runtime.claude_usage`. If a command already exists, pass its
+interpreter with `-I -m ummanu.runtime.claude_usage`. If a command already exists, pass its
 complete shell-quoted command as `--forward COMMAND`; it receives the original stdin
 and retains its stdout. Preserve the other statusLine options and all other settings.
-Back up settings privately before editing; it may hold credentials. Configuration is
+Back up settings privately with mode 0600 under `~/.claude/` before editing; it may
+hold credentials. Keep that backup out of repositories and the exported data directory. Configuration is
 an explicit operator action, not something the web reader or upgrade silently does.
+Use the absolute installed venv interpreter with `-I` to ignore a head workspace's
+Python environment and same-named modules in its cwd. Removing this module requires
+restoring the previous command first; rehearse restoring the backup before deployment.
+Claude can hot-reload settings in existing sessions; no head restart is required.
 New ordinary Claude interactive turns then refresh `~/.claude/ummanu-usage.json`.
 Print/noninteractive turns may not emit statusLine; there is no background model call.
 
 The collector atomically writes a 0600 file containing only two validated usage
-windows and their observation time. It discards session/transcript identifiers and
+windows and a conservative observation time from the transcript file mtime (stat only,
+no transcript content read). Identical windows never refresh that timestamp, even on
+a new reply, so idle re-renders cannot make old figures fresh. Concurrent writers are
+serialized and older transcript timestamps cannot replace a newer snapshot. The stored
+time therefore records the last changed reading, not every render. It discards session/transcript identifiers and
 all other input. Missing/malformed windows leave the last snapshot intact. Readers
 reject malformed, oversized or future-dated snapshots. A snapshot older than 15 min,
 or whose window has reset, is visibly stale, never silently reset to zero. With a

@@ -1179,9 +1179,22 @@ class ClaudeStatuslineTest(unittest.TestCase):
         import subprocess
         import sys
 
-        payload = json.dumps({"rate_limits": self.limits, "session_id": "private-session"}).encode()
+        transcript = self.home / "transcript.jsonl"
+        transcript.write_text("private contents")
+        payload = json.dumps(
+            {"rate_limits": self.limits, "session_id": "private-session", "transcript_path": str(transcript)}
+        ).encode()
         result = subprocess.run(
-            [sys.executable, "-m", "ummanu.runtime.claude_usage", "--forward", "cat"],
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                "import runpy; runpy.run_path("
+                + repr(str(Path(provider_usage.__file__).parents[1] / "runtime/claude_usage.py"))
+                + ", run_name='__main__')",
+                "--forward",
+                "cat",
+            ],
             input=payload,
             capture_output=True,
             check=True,
@@ -1190,3 +1203,78 @@ class ClaudeStatuslineTest(unittest.TestCase):
         self.assertEqual(result.stdout, payload)
         self.assertEqual(result.stderr, b"")
         self.assertNotIn("session", self.cache.read_text())
+
+    def test_rerenders_and_older_sessions_cannot_refresh_or_replace_snapshot(self) -> None:
+        self.record()
+        before = self.cache.read_bytes()
+        self.clock += 1000
+        self.assertFalse(self.record())
+        self.assertEqual(self.cache.read_bytes(), before)
+        older = {"seven_day": {"used_percentage": 65, "resets_at": NOW + 10080}}
+        self.assertFalse(self.record(older, observed=NOW - 1))
+        self.assertEqual(self.cache.read_bytes(), before)
+        self.assertEqual(self.claude()["status"], "stale")
+
+    def test_transcript_is_only_statted_and_observation_uses_its_mtime(self) -> None:
+        transcript = self.home / "turn.jsonl"
+        transcript.write_text("not JSON, must not be read")
+        os.utime(transcript, (NOW - 100, NOW - 100))
+        payload = json.dumps({"transcript_path": str(transcript), "rate_limits": self.limits}).encode()
+        with mock.patch("ummanu.runtime.claude_usage.time.time", return_value=NOW):
+            self.assertTrue(self.capture(payload, self.home))
+        data = json.loads(self.cache.read_text())
+        self.assertEqual(data["observed_at"], NOW - 100)
+        self.assertNotIn("transcript", self.cache.read_text())
+
+    def test_first_render_without_limits_forwards_without_cache_changes(self) -> None:
+        import subprocess
+        import sys
+
+        self.record()
+        before = self.cache.read_bytes()
+        payload = b'{"session_id":"first-render"}'
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                "import runpy; runpy.run_path("
+                + repr(str(Path(provider_usage.__file__).parents[1] / "runtime/claude_usage.py"))
+                + ", run_name='__main__')",
+                "--forward",
+                "cat",
+            ],
+            input=payload,
+            capture_output=True,
+            check=True,
+            cwd=self.home,
+            env={**os.environ, "HOME": str(self.home), "PYTHONPATH": str(self.home)},
+        )
+        self.assertEqual(result.stdout, payload)
+        self.assertEqual(result.stderr, b"")
+        self.assertEqual(self.cache.read_bytes(), before)
+
+    def test_isolated_wrapper_survives_shadowing_modules_and_capture_exception(self) -> None:
+        import subprocess
+        import sys
+
+        for name in ("json", "argparse", "subprocess", "tempfile", "typing"):
+            (self.home / (name + ".py")).write_text("raise RuntimeError('workspace module')")
+        command = (
+            "import runpy; data=runpy.run_path("
+            + repr(str(Path(provider_usage.__file__).parents[1] / "runtime/claude_usage.py"))
+            + "); "
+            "exec('def broken(*a, **k): raise RuntimeError()'); "
+            "data['main'].__globals__['capture']=broken; data['main']()"
+        )
+        payload = b'{"rate_limits": {}}'
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", command, "--forward", "cat"],
+            input=payload,
+            capture_output=True,
+            check=True,
+            cwd=self.home,
+            env={**os.environ, "HOME": str(self.home), "PYTHONPATH": str(self.home)},
+        )
+        self.assertEqual(result.stdout, payload)
+        self.assertEqual(result.stderr, b"")

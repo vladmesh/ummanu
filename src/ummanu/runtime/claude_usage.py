@@ -7,6 +7,7 @@ stdout. Only validated usage windows and a local observation time enter the priv
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import math
 import os
@@ -61,27 +62,50 @@ def capture(payload: bytes, home: Path, *, observed: float | None = None) -> boo
     limits = usage_limits(raw.get("rate_limits")) if isinstance(raw, dict) else {}
     if not limits:
         return False
+    # A re-render is not a new provider observation. Stat only: never read transcript contents.
+    if observed is None:
+        transcript = raw.get("transcript_path")
+        if not isinstance(transcript, str) or not Path(transcript).is_absolute():
+            return False
+        try:
+            observed = Path(transcript).stat().st_mtime
+        except OSError:
+            return False
+        if observed > time.time():
+            return False
+    if not finite_number(observed) or observed <= 0:
+        return False
     directory = home / ".claude"
     temporary = None
     try:
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd, temporary = tempfile.mkstemp(prefix=".ummanu-usage-", dir=directory)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(
-                {
-                    "version": 1,
-                    "observed_at": time.time() if observed is None else observed,
-                    "rate_limits": limits,
-                },
-                stream,
-            )
-        os.replace(temporary, directory / CACHE_NAME)
+        # Serialize heads before comparing timestamps, so an old session cannot win a write race.
+        fd = os.open(directory / ".ummanu-usage.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            previous = None
+            try:
+                with (directory / CACHE_NAME).open("rb") as stream:
+                    previous = json.loads(stream.read(MAX_CACHE_BYTES + 1))
+            except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+                previous = None
+            if isinstance(previous, dict) and previous.get("version") == 1:
+                stamp = previous.get("observed_at")
+                if finite_number(stamp) and (stamp >= observed or previous.get("rate_limits") == limits):
+                    return False
+            fd, temporary = tempfile.mkstemp(prefix=".ummanu-usage-", dir=directory)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump({"version": 1, "observed_at": observed, "rate_limits": limits}, stream)
+            os.replace(temporary, directory / CACHE_NAME)
         return True
     except OSError:
         return False
     finally:
         if temporary is not None:
-            Path(temporary).unlink(missing_ok=True)
+            try:
+                Path(temporary).unlink(missing_ok=True)
+            except OSError:
+                pass  # Best-effort capture must not prevent the original statusLine from running.
 
 
 def main() -> None:
@@ -89,7 +113,10 @@ def main() -> None:
     parser.add_argument("--forward", help="existing trusted statusLine shell command")
     args = parser.parse_args()
     payload = sys.stdin.buffer.read(MAX_PAYLOAD_BYTES + 1)
-    capture(payload, Path.home())
+    try:
+        capture(payload, Path.home())
+    except Exception:  # noqa: BLE001, S110 -- collection must never break the configured statusLine
+        pass
     if args.forward and len(payload) <= MAX_PAYLOAD_BYTES:
         # Exactly the configured command, never a shell fragment taken from the CLI payload.
         subprocess.run(args.forward, shell=True, input=payload, check=False)
