@@ -30,6 +30,7 @@ from ummanu.dispatch.helpers import (
     _review_adoption_baseline,
     _spent_report_generations,
     _task_doc_decision,
+    _task_doc_decision_id,
     _task_doc_protocol_prerequisites,
     _task_doc_report_generation,
     _worker_id,
@@ -71,6 +72,7 @@ from ummanu.dispatch.review import (
     recover_review_launch as _recover_review_launch,
     start_review as _start_review,
 )
+from ummanu.dispatch.review_packet import data_block
 from ummanu.dispatch.review_verdict import (
     advance_review_verdict as _advance_review_verdict,
     park_green_verdict as _park_green_verdict,
@@ -979,6 +981,7 @@ class DispatcherRuntime:
             review_baseline=review_baseline,
             report_generation=report_generation,
             report_decision=report_decision,
+            report_decision_id=_task_doc_decision_id(workspace, data_block(report_decision)),
             report_protocol_prerequisites=report_protocol_prerequisites,
             state=state,
             claimed_at=time.time(),

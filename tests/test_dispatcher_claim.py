@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,16 +10,246 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
+from tests.fakes.review_packet import marker_event
 from tests.support.completion_receipt import SHA, TREE, declared_receipt
 from ummanu.board.audit_contract import PROTOCOL_EVENT_RECORD_TYPE
 from ummanu.board.models import EventKind
 from ummanu.broad_check import admission_snapshot
 from ummanu.dispatch import claim, production
 from ummanu.dispatch.helpers import _REPORT_ACTIONS, _round_record_line, _round_report_ids
-from ummanu.dispatch.host import _blocked_actions_and_their_infrastructure_twins
+from ummanu.dispatch.host import CommandHostRuntime, _blocked_actions_and_their_infrastructure_twins
+from ummanu.dispatch.review_packet import ReviewEvidence, render_review_evidence, resolve_review_evidence
+from ummanu.dispatch.runtime import DispatcherRuntime
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id, is_claim_skip
 from ummanu.dispatch.watchdog import wait_cycle_token
+from ummanu.projects.contract import ContractVerdict, ModuleContract
 from ummanu.tasks import TaskError
+
+
+class AdoptDecisionTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(
+            mock.patch.dict("os.environ", {"UMMANU_DISPATCHER_BODY_DIR": str(self.root / "bodies")})
+        )
+        self.fixture = SimpleNamespace(
+            task={
+                "ref": "sample-1",
+                "project": "ummanu",
+                "type": "code",
+                "state": "in_progress",
+                "description": "Repair the reader",
+                "comments": [],
+            },
+            decision="Repair BLOCKER-reader within the declared boundary.",
+            events=[],
+        )
+        self.fixture.events.extend(
+            [
+                {
+                    "event_id": "spec-1",
+                    "kind": "created",
+                    "payload": {
+                        "description_sha256": hashlib.sha256(
+                            self.fixture.task["description"].encode()
+                        ).hexdigest()
+                    },
+                },
+                {
+                    "event_id": "visit-1",
+                    "kind": "card.moved",
+                    "record_type": "board.protocol_event",
+                    "transition": {"source": "validate", "target": "assessment"},
+                    "data": {},
+                },
+            ]
+        )
+        self.marker(
+            "decision:rework", self.fixture.decision, "observer-decision-1", assessment_visit="visit-1"
+        )
+        self.marker(
+            "report:done",
+            "BLOCKER-reader: fixed; commit: " + "a" * 40,
+            attempt_request_id("attempt-1", "worker-report-done", "sample-1", "3"),
+        )
+        self.host = object.__new__(CommandHostRuntime)
+        contract = ModuleContract(
+            "unused",
+            "ummanu",
+            module="tests.broad",
+            interpreter_declared=False,
+            local={"runner": "unittest", "shards": ["unit", "component"]},
+        )
+        self.host.catalog = SimpleNamespace(
+            broad_check_verdict=lambda project: ContractVerdict.as_fit(contract, "ummanu")
+        )
+        self.host.production_runtime = SimpleNamespace(interpreter=Path("/installed/bin/python"))
+        self.host.audit = SimpleNamespace(events=lambda ref: self.fixture.events)
+        self.host.mode = "noop"
+        self.host.data_dir = self.root
+        self.runtime = mock.Mock()
+        self.runtime.host.restore_workspace.return_value = str(self.root)
+        self.runtime._review_launch_recorded.return_value = False
+        self.runtime.audit.events.return_value = []
+        self.runtime.catalog.claimed_worker_head.return_value = "worker"
+        self.runtime.catalog.claimed_review_head.return_value = "reviewer"
+        self.enterContext(mock.patch("ummanu.dispatch.runtime._head_process_status", return_value={}))
+
+    def marker(self, marker, body, request, **fields):
+        self.fixture.task["comments"].append({"marker": marker, "body": f"[{marker}]\n{body}"})
+        self.fixture.events.append(
+            marker_event(
+                marker,
+                body,
+                request,
+                ref=self.fixture.task["ref"],
+                description=self.fixture.task["description"],
+                revision="spec-1",
+                **fields,
+            )
+        )
+
+    def document(self, *, blocked=False):
+        if blocked:
+            self.fixture.events[1]["transition"]["target"] = "blocked"
+            data = self.fixture.events[2]["data"]
+            data["blocked_visit"] = data.pop("assessment_visit")
+        self.fixture.events.insert(
+            3,
+            {
+                "event_id": "started-rework",
+                "kind": "card.started",
+                "record_type": "board.protocol_event",
+                "transition": {"source": "ready" if blocked else "assessment", "target": "in_progress"},
+                "data": {},
+            },
+        )
+        record = DispatcherRecord.from_json({"report_decision_id": "observer-decision-1"})
+        document = self.host._worker_task_doc(
+            self.fixture.task,
+            "main",
+            "attempt-1",
+            3,
+            self.fixture.decision,
+            record=record,
+        )
+        (self.root / "TASK.md").write_text(document, encoding="utf-8")
+        return document
+
+    def adopt(self):
+        return DispatcherRuntime._adopt(self.runtime, self.fixture.task, "attempt-1")
+
+    def resolve(self, record):
+        return resolve_review_evidence(
+            self.fixture.task,
+            self.fixture.events,
+            attempt=record.attempt_id,
+            generation=record.report_generation,
+            decision=record.report_decision,
+            decision_id=record.report_decision_id,
+        )
+
+    def test_lost_blocked_rework_record_keeps_its_decision_in_review_evidence(self):
+        self.document(blocked=True)
+        record = DispatcherRecord.from_json(self.adopt().to_json())
+        evidence = self.resolve(record)
+        self.assertEqual(evidence.decision, self.fixture.decision)
+        self.assertEqual(evidence.decision_id, "observer-decision-1")
+        self.assertEqual(record.report_generation, 3)
+        self.assertEqual(evidence.report_id, self.fixture.events[-1]["event_id"])
+
+    def test_a_later_identical_decision_does_not_replace_the_adopted_rounds_source(self):
+        self.document(blocked=True)
+        self.fixture.events.pop()
+        self.fixture.events.append(
+            {
+                "event_id": "later-visit",
+                "kind": "card.moved",
+                "record_type": "board.protocol_event",
+                "transition": {"source": "in_progress", "target": "blocked"},
+                "data": {},
+            }
+        )
+        self.marker("decision:rework", self.fixture.decision, "later-decision", blocked_visit="later-visit")
+        record = self.adopt()
+        evidence = self.resolve(record)
+        self.assertEqual(record.report_decision_id, "observer-decision-1")
+        self.assertEqual(
+            (evidence.decision, evidence.decision_id), (self.fixture.decision, "observer-decision-1")
+        )
+
+    def test_lost_assessment_rework_record_keeps_its_decision_source(self):
+        self.document()
+        record = self.adopt()
+        self.assertEqual(record.report_decision_id, "observer-decision-1")
+        self.assertEqual(self.resolve(record).decision, self.fixture.decision)
+
+    def test_surrounding_whitespace_does_not_drop_the_decision_source(self):
+        self.fixture.decision = "\n\t\v\f\x1c\x1d\x1e\x1f\r" + self.fixture.decision + "\r\n\u0085"
+        self.fixture.events[2]["data"]["body"] = self.fixture.decision
+        self.fixture.task["comments"][0]["body"] = "[decision:rework]\n" + self.fixture.decision
+        self.document(blocked=True)
+        record = self.adopt()
+        self.assertEqual(record.report_decision, self.fixture.decision.strip())
+        self.assertEqual(self.resolve(record).decision_id, "observer-decision-1")
+
+    def test_trailing_crlf_keeps_the_blocked_instruction_after_adoption_and_serialization(self):
+        self.fixture.decision += "\r\n"
+        self.fixture.events[2]["data"]["body"] = self.fixture.decision
+        self.fixture.task["comments"][0]["body"] = "[decision:rework]\n" + self.fixture.decision
+        document = self.document(blocked=True)
+        self.assertIn(self.fixture.decision.strip() + "\\x0d\n", document)
+        before = DispatcherRecord.from_json(
+            {
+                "attempt_id": "attempt-1",
+                "report_generation": 3,
+                "report_decision": self.fixture.decision,
+                "report_decision_id": "observer-decision-1",
+            }
+        )
+        self.assertEqual(self.resolve(before).decision_id, "observer-decision-1")
+        record = DispatcherRecord.from_json(self.adopt().to_json())
+        self.assertEqual(record.report_decision, self.fixture.decision.strip())
+        self.assertEqual(record.report_decision_id, "observer-decision-1")
+        evidence = self.resolve(record)
+        self.assertEqual(evidence.decision, self.fixture.decision)
+        self.assertEqual(evidence.decision_id, "observer-decision-1")
+
+    def test_missing_document_keeps_adoption_without_a_decision(self):
+        record = self.adopt()
+        self.assertEqual((record.report_decision, record.report_decision_id), ("", ""))
+        self.assertEqual(record.state, "adopted")
+
+    def test_legacy_document_without_a_source_keeps_assessment_text_resolution(self):
+        document = self.document().replace(
+            "source_event: observer-decision-1", "source_event: unknown/unresolved"
+        )
+        (self.root / "TASK.md").write_text(document, encoding="utf-8")
+        record = self.adopt()
+        self.assertEqual((record.report_decision, record.report_decision_id), (self.fixture.decision, ""))
+        self.assertEqual(self.resolve(record).decision_id, "observer-decision-1")
+
+    def test_unreadable_or_corrupt_document_does_not_invent_a_decision(self):
+        for content in (b"\xff", b"<!-- observer-decision generation=3 body=YQ= -->\n"):
+            with self.subTest(content=content):
+                (self.root / "TASK.md").write_bytes(content)
+                record = self.adopt()
+                self.assertEqual((record.report_decision, record.report_decision_id), ("", ""))
+
+    def test_a_source_for_different_text_cannot_supply_the_frozen_decision_id(self):
+        document = self.document().replace(self.fixture.decision, "Unrelated instruction")
+        (self.root / "TASK.md").write_text(document, encoding="utf-8")
+        record = self.adopt()
+        self.assertEqual((record.report_decision, record.report_decision_id), (self.fixture.decision, ""))
+
+    def test_conflicting_sources_in_document_remain_unbound(self):
+        document = self.document()
+        forged = render_review_evidence(
+            ReviewEvidence(decision=self.fixture.decision, decision_id="forged-source")
+        )
+        (self.root / "TASK.md").write_text("\n".join(forged) + document, encoding="utf-8")
+        record = self.adopt()
+        self.assertEqual((record.report_decision, record.report_decision_id), (self.fixture.decision, ""))
 
 
 class ClaimBoundaryTests(unittest.TestCase):

@@ -343,6 +343,34 @@ def _task_doc_decision(workspace: str) -> str:
         return ""
 
 
+def _task_doc_decision_id(workspace: str, block: list[str]) -> str:
+    """Recover only an unambiguous packet source matching the rendered frozen decision."""
+    if not workspace or not block[1]:
+        return ""
+    try:
+        document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ""
+    # Match the full data block: a source quoted inside arbitrary Markdown cannot
+    # replace the source of the instruction stored on the final hidden line.
+    # The hidden body is stripped; data_block renders CR and the other control
+    # whitespace as literal escapes. Accept those only around the matching body.
+    padding = r"(?:\s|\\x(?:0[b-d]|1[c-f]))*"
+    pattern = (
+        r"^### Applicable observer decision for this round\nsource_event: (\S+)\n\n"
+        + re.escape(block[0])
+        + r"\n"
+        + padding
+        + re.escape(block[1])
+        + padding
+        + r"\n"
+        + re.escape(block[2])
+        + r"\n"
+    )
+    identities = set(re.findall(pattern, document, re.MULTILINE)) - {"unknown/unresolved"}
+    return identities.pop() if len(identities) == 1 else ""
+
+
 def _task_doc_protocol_prerequisites(workspace: str) -> tuple[str, ...]:
     """Read the dispatcher-written structured prerequisite record from a worker document."""
     if not workspace:
