@@ -184,6 +184,15 @@ class AdoptDecisionTests(unittest.TestCase):
         self.assertEqual(record.report_decision_id, "observer-decision-1")
         self.assertEqual(self.resolve(record).decision, self.fixture.decision)
 
+    def test_surrounding_whitespace_does_not_drop_the_decision_source(self):
+        self.fixture.decision = "\n\t" + self.fixture.decision + "\n"
+        self.fixture.events[2]["data"]["body"] = self.fixture.decision
+        self.fixture.task["comments"][0]["body"] = "[decision:rework]\n" + self.fixture.decision
+        self.document(blocked=True)
+        record = self.adopt()
+        self.assertEqual(record.report_decision, self.fixture.decision.strip())
+        self.assertEqual(self.resolve(record).decision_id, "observer-decision-1")
+
     def test_missing_document_keeps_adoption_without_a_decision(self):
         record = self.adopt()
         self.assertEqual((record.report_decision, record.report_decision_id), ("", ""))

@@ -354,8 +354,15 @@ def _task_doc_decision_id(workspace: str, decision: str) -> str:
         return ""
     # Match the full data block: a source quoted inside arbitrary Markdown cannot
     # replace the source of the instruction stored on the final hidden line.
-    pattern = r"^### Applicable observer decision for this round\nsource_event: (\S+)\n\n" + re.escape(
-        "\n".join(data_block(decision))
+    block = data_block(decision)
+    pattern = (
+        r"^### Applicable observer decision for this round\nsource_event: (\S+)\n\n"
+        + re.escape(block[0])
+        + r"\n\s*"
+        + re.escape(block[1])
+        + r"\s*\n"
+        + re.escape(block[2])
+        + r"\n"
     )
     identities = set(re.findall(pattern, document, re.MULTILINE)) - {"unknown/unresolved"}
     return identities.pop() if len(identities) == 1 else ""
