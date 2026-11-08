@@ -8,9 +8,80 @@ from __future__ import annotations
 
 import re
 import unittest
+from unittest import mock
 
 from ummanu.board import sprint_dod
-from ummanu.web import page_assets, page_overview, page_parts, page_po
+from ummanu.board.card_transitions import CARD_TRANSITIONS
+from ummanu.board.models import CardState
+from ummanu.board.roles import Role
+from ummanu.web import page_assets, page_card, page_overview, page_parts, page_po
+
+
+class CardMoveFormTests(unittest.TestCase):
+    def test_options_follow_the_viewer_role_and_current_state(self) -> None:
+        cases = (
+            ("po", "issues", {"ready", "blocked", "done"}),
+            ("po", "ready", {"issues", "blocked", "done"}),
+            ("po", "in_progress", {"issues", "ready", "blocked", "done"}),
+            ("po", "validate", {"issues", "ready", "blocked", "done"}),
+            ("po", "ci", {"ready", "blocked"}),
+            ("po", "review", {"ready", "blocked"}),
+            ("po", "assessment", {"issues", "ready", "blocked", "done"}),
+            ("po", "blocked", {"issues", "ready", "done"}),
+            ("po", "done", {"issues", "ready", "blocked"}),
+            ("observer", "ready", {"issues", "blocked", "done"}),
+            ("steward", "blocked", {"ready", "done"}),
+            ("steward", "assessment", {"blocked"}),
+            ("dispatcher", "ready", {"in_progress", "blocked"}),
+        )
+        for role, state, expected in cases:
+            with self.subTest(role=role, state=state):
+                form = page_parts._move_form("card-1", state, role=role)
+                self.assertEqual(set(re.findall(r'<option value="([^"]+)"', form)), expected)
+                self.assertIn('name="reason" required', form)
+
+    def test_empty_or_unknown_authority_offers_no_form(self) -> None:
+        cases = (
+            ("worker", "ready"),
+            ("reviewer", "in_progress"),
+            ("retro", "blocked"),
+            ("observer", "assessment"),
+            ("steward", "issues"),
+            ("dispatcher", "issues"),
+            ("po", "future_state"),
+            ("po", ""),
+            ("po", None),
+            ("unknown_role", "ready"),
+        )
+        for role, state in cases:
+            with self.subTest(role=role, state=state):
+                self.assertEqual(page_parts._move_form("card-1", state, role=role), "")
+
+    def test_post_merge_ci_requires_disposition_for_every_role(self) -> None:
+        for role in Role:
+            with self.subTest(role=role):
+                self.assertEqual(page_parts._move_form("card-1", "post_merge_ci", role=role), "")
+
+    def test_options_read_the_authority_registry(self) -> None:
+        with mock.patch.dict(CARD_TRANSITIONS, {Role.PO: frozenset({(CardState.READY, CardState.BLOCKED)})}):
+            form = page_parts._move_form("card-1", "ready")
+        self.assertEqual(re.findall(r'<option value="([^"]+)"', form), ["blocked"])
+
+    def test_card_page_passes_actual_state_and_keeps_comments_without_moves(self) -> None:
+        for state, expected in (
+            ("ready", {"issues", "blocked", "done"}),
+            ("ci", {"ready", "blocked"}),
+            ("done", {"issues", "ready", "blocked"}),
+            ("post_merge_ci", set()),
+            ("future_state", set()),
+            (None, set()),
+        ):
+            with self.subTest(state=state):
+                html = page_card.task({"ref": "card-1", "card": {"value": {"state": state}}}, runs={})
+                self.assertEqual(set(re.findall(r'<option value="([^"]+)"', html)), expected)
+                self.assertEqual('data-kind="move"' in html, bool(expected))
+                self.assertEqual('class="more-actions"' in html, bool(expected))
+                self.assertIn('data-kind="comment"', html)
 
 
 class LongTextTests(unittest.TestCase):

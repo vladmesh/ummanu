@@ -8,6 +8,9 @@ from html import escape
 from typing import Any
 from urllib.parse import quote, urlencode
 
+from ummanu.board.card_transitions import CARD_TRANSITIONS
+from ummanu.board.models import CardState
+from ummanu.board.roles import Role
 from ummanu.web.page_assets import MAX_TABS
 from ummanu.web.page_values import _RENDER_CLOCK, _mapping
 
@@ -574,10 +577,19 @@ def _comment_form(action: str, key: str, label: str) -> str:
     )
 
 
-def _move_form(ref: str) -> str:
+def _move_form(ref: str, state: str | None, *, role: str = "po") -> str:
+    """Offer the viewer's declared edges; Post-merge CI exits require a disposition."""
+    try:
+        source, viewer = CardState(state), Role(role)
+    except ValueError:
+        return ""
+    if source is CardState.POST_MERGE_CI:
+        return ""
+    targets = [target for target in CardState if (source, target) in CARD_TRANSITIONS[viewer]]
+    if not targets:
+        return ""
     options = "".join(
-        f'<option value="{escape(target)}">{escape(target.replace("_", " "))}</option>'
-        for target in MOVE_TARGETS
+        f'<option value="{escape(target)}">{escape(target.replace("_", " "))}</option>' for target in targets
     )
     return (
         f'<form class="act" data-action="/api/tasks/{quote(ref)}/move" data-key="move.{escape(ref)}" data-kind="move">'
@@ -609,13 +621,6 @@ def _close_form(ref: str) -> str:
         '<p class="hint">a close is not a completed Definition of Done; the sprint\'s own document says so.</p>'
         "</form>"
     )
-
-
-#: The states a move may name, in the layer's spelling.
-MOVE_TARGETS = ("ready", "in_progress", "done", "blocked", "issues", "validate", "ci", "review", "assessment")
-
-#: States no role may move a card out of, so their card page offers no move.
-UNMOVABLE_STATES = frozenset({"post_merge_ci"})
 
 
 def _entries(value: Any) -> list[dict[str, Any]]:

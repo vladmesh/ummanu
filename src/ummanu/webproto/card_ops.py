@@ -31,8 +31,8 @@ from ummanu.webproto.errors import (
 
 SCHEMA_VERSION = 1
 
-#: The whole move vocabulary in `TaskWriter.move` spelling, so a client can offer it and a misspelling
-#: is refused before the board; which target a given card may take is the writer's decision.
+#: Request vocabulary for spelling validation only; forms use role/state edges from CARD_TRANSITIONS.
+#: The writer decides whether a requested move is authorized.
 MOVE_TARGETS = ("issues", "ready", "in_progress", "validate", "ci", "review", "assessment", "blocked", "done")
 
 #: The writer's codes as typed failures. `transition_forbidden` refuses on card state, not request
