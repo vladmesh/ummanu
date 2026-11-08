@@ -605,7 +605,10 @@ def run_broad_check(
         environment = _normalize_pythonpath_for_child(environment)
     sink = sys.stderr if stream is None else stream
 
-    with tempfile.TemporaryDirectory(prefix="ummanu-broad-check-") as scratch:
+    # A head's workspace TMPDIR can exceed Unix socket address limits before a check
+    # creates anything. Keep the child root short, private and owned by this invocation.
+    with tempfile.TemporaryDirectory(prefix="u", dir="/tmp") as scratch:
+        environment["TMPDIR"] = scratch
         # Keep provenance outside the workspace whose contents the receipt names.
         record = Path(scratch) / "provenance.json" if spec.attests_provenance else None
         environment.pop("UMMANU_TEST_TIMING_RECORD", None)
