@@ -8,11 +8,9 @@ from html import escape
 from typing import Any
 from urllib.parse import quote, urlencode
 
-from ummanu.board.card_transitions import CARD_TRANSITIONS
-from ummanu.board.models import CardState
-from ummanu.board.roles import Role
 from ummanu.web.page_assets import MAX_TABS
 from ummanu.web.page_values import _RENDER_CLOCK, _mapping
+from ummanu.webproto.card_ops import card_move_targets
 
 
 def _panel(title: str, body: str, *, count: Any = None, more: str = "", open_: bool | None = None) -> str:
@@ -578,14 +576,7 @@ def _comment_form(action: str, key: str, label: str) -> str:
 
 
 def _move_form(ref: str, state: str | None, *, role: str = "po") -> str:
-    """Offer the viewer's declared edges; Post-merge CI exits require a disposition."""
-    try:
-        source, viewer = CardState(state), Role(role)
-    except ValueError:
-        return ""
-    if source is CardState.POST_MERGE_CI:
-        return ""
-    targets = [target for target in CardState if (source, target) in CARD_TRANSITIONS[viewer]]
+    targets = card_move_targets(state, role=role)
     if not targets:
         return ""
     options = "".join(
