@@ -113,6 +113,39 @@ from ummanu.runtime.redact import redact
 from ummanu.state_repo import BOARD_RUNS_PATHSPEC
 from ummanu.tasks import task_audit_for
 
+# Reviewed synthetic values the checkpoint secret gate lets through: exact strings matched as
+# whole tokens, never patterns. Any other secret in the same file still blocks. Add one only with
+# proof that it is synthetic and where it comes from.
+REVIEWED_SYNTHETIC_SECRET_VALUES = (
+    # Test fixture of agent-peer-protocol guest_gate/tests/test_private_sources.py, quoted on the
+    # board. Its tail is all `0`, outside the base32 alphabet of real AWS key IDs.
+    "AKIA0000000000000000",
+)
+_REVIEWED_SYNTHETIC_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:"
+    + "|".join(re.escape(value) for value in REVIEWED_SYNTHETIC_SECRET_VALUES)
+    + r")(?![A-Za-z0-9_-])"
+)
+_REVIEWED_SYNTHETIC_MARK = "«reviewed-synthetic»"
+
+
+def _scan_redact(text: str, *, runtime_env: Path, secret_values: tuple[str, ...]) -> str:
+    """`redact` for the checkpoint secret gate: `text` unchanged when its only matches are
+    `REVIEWED_SYNTHETIC_SECRET_VALUES`, else `redact` of the original text."""
+    scrubbed = redact(text, env_files=[runtime_env], secret_values=secret_values)
+    if scrubbed == text:
+        return text
+    masked = _REVIEWED_SYNTHETIC_RE.sub(_REVIEWED_SYNTHETIC_MARK, text)
+    if masked != text and redact(masked, env_files=[runtime_env], secret_values=secret_values) == masked:
+        return text
+    return scrubbed
+
+
+def _secret_scanner(runtime_env: Path, secret_values: tuple[str, ...]) -> Callable[[str], str]:
+    """`_scan_redact` bound to one installation, as the per-file scanners take it."""
+    return lambda value: _scan_redact(value, runtime_env=runtime_env, secret_values=secret_values)
+
+
 # Canonical checkpoint entries per component. `events.ndjson` is stored history: the
 # pre-2026-09-10 file journal, which nothing writes any more. It is copied while the data dir
 # still holds it, because offline analytics projects pre-cutover outcomes from that copy, and
@@ -779,7 +812,7 @@ class CheckpointWriter:
                     continue
             except OSError as exc:
                 raise CheckpointBlocked(f"could not read {relative}: {exc}") from None
-            if redact(text, env_files=[runtime_env], secret_values=secret_values) != text:
+            if _scan_redact(text, runtime_env=runtime_env, secret_values=secret_values) != text:
                 hits.append(relative)
         if hits:
             raise CheckpointBlocked(f"secret detected in {', '.join(hits)}")
@@ -1401,18 +1434,18 @@ class SnapshotExporter(CheckpointWriter):
             if board.has("sprints.ndjson"):
                 scan_close_secrets(
                     board.read_text("sprints.ndjson"),
-                    lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values),
+                    _secret_scanner(runtime_env, secret_values),
                 )
             # Queue and image parts may cut a line, a token or a UTF-8 sequence, so the whole logical file is scanned.
             if board.has(QUEUE_CHECKPOINT_FILE):
                 scan_queue_secrets(
                     board.read_text(QUEUE_CHECKPOINT_FILE),
-                    lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values),
+                    _secret_scanner(runtime_env, secret_values),
                 )
             if board.has(ATTACHMENTS_CHECKPOINT_FILE):
                 scan_attachment_secrets(
                     board.read_text(ATTACHMENTS_CHECKPOINT_FILE),
-                    lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values),
+                    _secret_scanner(runtime_env, secret_values),
                 )
         except (CloseCheckpointError, CheckpointLayoutError, PoQueueCheckpointError, PoAttachmentsCheckpointError) as exc:
             raise CheckpointBlocked(str(exc)) from None
@@ -1422,23 +1455,23 @@ class SnapshotExporter(CheckpointWriter):
                 try:
                     scan_owner_secrets(
                         text,
-                        lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values),
+                        _secret_scanner(runtime_env, secret_values),
                     )
                 except OwnerCheckpointError as exc:
                     raise CheckpointBlocked(str(exc)) from None
             if path == f"state/board/{PO_FILE}":
                 try:
-                    scan_po_secrets(text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values))
+                    scan_po_secrets(text, _secret_scanner(runtime_env, secret_values))
                 except PoCheckpointError as exc:
                     raise CheckpointBlocked(str(exc)) from None
             if path == f"state/board/{NOTES_CHECKPOINT_FILE}":
                 try:
                     scan_notes_secrets(
-                        text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values)
+                        text, _secret_scanner(runtime_env, secret_values)
                     )
                 except PoNotesError as exc:
                     raise CheckpointBlocked(str(exc)) from None
-            if redact(text, env_files=[runtime_env], secret_values=secret_values) != text:
+            if _scan_redact(text, runtime_env=runtime_env, secret_values=secret_values) != text:
                 hits.append(path)
         if hits:
             raise CheckpointBlocked(f"secret detected in snapshot: {', '.join(hits)}")
@@ -2521,50 +2554,46 @@ def _scan_for_secrets(
         text = _read_text(staging / entry, entry)
         if component == "board" and entry == "sprints.ndjson":
             try:
-                scan_close_secrets(text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values))
+                scan_close_secrets(text, _secret_scanner(runtime_env, secret_values))
             except CloseCheckpointError as exc:
                 raise CheckpointBlocked(str(exc)) from None
         if component == "board" and entry == OWNER_FILE:
             try:
                 scan_owner_secrets(
-                    text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values)
+                    text, _secret_scanner(runtime_env, secret_values)
                 )
             except OwnerCheckpointError as exc:
                 raise CheckpointBlocked(str(exc)) from None
         if component == "board" and entry == PO_FILE:
             try:
-                scan_po_secrets(text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values))
+                scan_po_secrets(text, _secret_scanner(runtime_env, secret_values))
             except PoCheckpointError as exc:
                 raise CheckpointBlocked(str(exc)) from None
         if component == "board" and entry == NOTES_CHECKPOINT_FILE:
             try:
                 scan_notes_secrets(
-                    text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values)
+                    text, _secret_scanner(runtime_env, secret_values)
                 )
             except PoNotesError as exc:
                 raise CheckpointBlocked(str(exc)) from None
         if component == "board" and entry == QUEUE_CHECKPOINT_FILE:
             try:
                 scan_queue_secrets(
-                    text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values)
+                    text, _secret_scanner(runtime_env, secret_values)
                 )
             except PoQueueCheckpointError as exc:
                 raise CheckpointBlocked(str(exc)) from None
         if component == "board" and entry == ATTACHMENTS_CHECKPOINT_FILE:
             try:
                 scan_attachment_secrets(
-                    text, lambda value: redact(value, env_files=[runtime_env], secret_values=secret_values)
+                    text, _secret_scanner(runtime_env, secret_values)
                 )
             except PoAttachmentsCheckpointError as exc:
                 raise CheckpointBlocked(str(exc)) from None
         # Scan against this installation rather than the process home default:
         # a recovery/doctor can intentionally point at another instance, and a
         # credential in that instance must still fail closed.
-        scrubbed = redact(
-            text,
-            env_files=[runtime_env],
-            secret_values=secret_values,
-        )
+        scrubbed = _scan_redact(text, runtime_env=runtime_env, secret_values=secret_values)
         if scrubbed != text:
             raise CheckpointBlocked(f"secret detected in state/{component}/{entry}")
 

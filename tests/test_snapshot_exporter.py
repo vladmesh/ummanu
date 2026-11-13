@@ -980,6 +980,23 @@ class SnapshotSecretTests(SnapshotCase):
         (self.live / "persona" / "rules.md").write_text("opaque-runtime-value-1234\n", encoding="utf-8")
         self.assert_blocked_naming("persona/rules.md")
 
+    def test_a_reviewed_synthetic_fixture_in_the_board_does_not_block_the_window(self):
+        self.seed_board([dict(CARD, title="fixture b'needle AKIA0000000000000000'")])
+
+        result = self.exporter().write()
+
+        self.assertEqual(result.status, "committed", result.reason)
+
+    def test_a_reviewed_fixture_does_not_hide_another_secret_in_the_same_record(self):
+        self.seed_board([dict(CARD, title=f"fixture AKIA0000000000000000 and {TOKEN}")])
+        self.assert_blocked_naming("state/board/cards/0000/00000000.json")
+
+    def test_the_reviewed_fixture_allowlist_is_an_exact_value_not_a_pattern(self):
+        for near in ("AKIA0000000000000001", "AKIA00000000000000000", "AKIA0000000000000000Z"):
+            with self.subTest(near=near):
+                self.seed_board([dict(CARD, title=f"pasted {near}")])
+                self.assert_blocked_naming("state/board/cards/0000/00000000.json")
+
     def test_the_manifest_itself_is_scanned(self):
         result = self.exporter(product_revision=TOKEN).write()
 
