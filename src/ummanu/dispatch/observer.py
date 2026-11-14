@@ -2960,7 +2960,7 @@ def render_observer_wake_context(
     facts += [
         f"{fact.get('card')} stays in Post-merge CI until you close this result: `ummanu task dispose-post-merge "
         f"--ref {fact.get('card')} --role observer --result-event {fact.get('event_id')} --action "
-        "ignore-flake|issue|hotfix [--follow-up <issue or hotfix ref>] --reason <why>`."
+        "ignore-flake|issue|hotfix [--follow-up <issue or hotfix ref>] --reason <why> --request-id <id>`."
         for fact in results if fact.get("result") != "green" and fact.get("event_id")
     ]
     if facts:
