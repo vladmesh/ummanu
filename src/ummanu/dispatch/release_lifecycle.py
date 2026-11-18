@@ -34,6 +34,7 @@ from ummanu.dispatch.types import GateTransportError, HostError, MergeLanding
 from ummanu.knowledge_write import (
     KnowledgeError,
     KnowledgeValidationError,
+    knowledge_directory_holds,
     write_knowledge_directory,
 )
 from ummanu.state_repo import StateRepoError
@@ -230,8 +231,8 @@ def _transfer_research_report(
     return None
 
 
-def _stage_research_report(source: Path, staging: Path) -> None:
-    """Copy the report and its small text attachments into `staging`, naming every file left behind.
+def _stage_research_report(source: Path, staging: Path) -> list[str]:
+    """Copy the report and its small text attachments into `staging`; return the files left behind.
 
     `report.md` always goes; another regular file goes when its suffix is a text one and it fits
     the per-file and total caps. What stays is listed at the end of the staged `report.md`.
@@ -266,6 +267,23 @@ def _stage_research_report(source: Path, staging: Path) -> None:
                 + "\n".join(kept)
                 + "\n"
             )
+    return kept
+
+
+def research_report_archived(instance_dir: Path, ref: str, workspace: Path) -> bool:
+    """Whether `<workspace>/.ummanu-report/` stages, whole, to exactly what its knowledge directory holds.
+
+    A report the transfer would refuse, cannot read, or would leave any file of in the workspace is not
+    archived: the archived report names those files as kept there.
+    """
+    with tempfile.TemporaryDirectory(prefix="ummanu-research-") as staging:
+        try:
+            if _stage_research_report(workspace / RESEARCH_REPORT_DIR, Path(staging)):
+                return False
+            return knowledge_directory_holds(instance_dir, directory=research_report_path(ref),
+                                             actor="dispatcher", source_dir=Path(staging))
+        except (KnowledgeError, OSError):
+            return False
 
 
 def release_parked(

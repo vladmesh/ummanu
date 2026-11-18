@@ -936,8 +936,8 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertTrue(self.workspace.exists())
         self.assertEqual(self.owner.replay()[0]["status"], "completed")
 
-    def test_tracked_untracked_and_ignored_work_are_preserved(self):
-        for name in ("file", "untracked", "ignored"):
+    def test_tracked_and_untracked_work_are_preserved(self):
+        for name in ("file", "untracked"):
             with self.subTest(name=name):
                 path = self.workspace / name
                 path.write_text("author work")
@@ -949,8 +949,8 @@ class OwnedCleanupTests(unittest.TestCase):
                 else:
                     path.unlink()
 
-    def test_generated_prompt_requires_exact_bytes(self):
-        path = self.workspace / "TASK.md"
+    def test_untracked_generated_file_requires_exact_bytes(self):
+        path = self.workspace / "generated.txt"
         path.write_text("generated")
         self.owner.journal.generated(path, "generated")
         path.write_text("user notes")
@@ -1037,24 +1037,14 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertEqual(git(self.repo, "for-each-ref", "--format=%(refname)", "refs/heads/pipeline/"), "")
 
     def test_retention_floor_survives_pipeline_generated_artifacts(self):
-        """secretary-1920: each piece of real work still keeps the workspace, named in the reason."""
+        """Each piece of real work still keeps the workspace, named in the reason."""
         namespace, metadata = self.pipeline_generated_workspace()
-        with (self.repo / ".git" / "info" / "exclude").open("a") as exclude:
-            exclude.write("__pycache__/\n")
         key = self.request()
-        ignored = self.workspace / "ignored"
         untracked = self.workspace / "notes.txt"
         egg = metadata / "SOURCES.txt"
         original = egg.read_text()
         owner_file = namespace / "owner.json"
         claim = owner_file.read_text()
-        ownership = self.host._decide_workspace_environment_ownership
-
-        def outside_cache():
-            # ummanu-132: an ignored `__pycache__` of a Done card is a disposable cache now; any
-            # other ignored file outside the owned namespace is still author work.
-            ignored.write_text("author data\n")
-            return ignored.unlink
 
         def untracked_file():
             untracked.write_text("author notes\n")
@@ -1064,20 +1054,14 @@ class OwnedCleanupTests(unittest.TestCase):
             egg.write_text("rewritten by a head\n")
             return lambda: egg.write_text(original)
 
-        def unowned_namespace():
-            # The host's ownership answer is not the dispatcher's: every namespace row is work.
-            self.host._decide_workspace_environment_ownership = lambda path: "absent"
-            return lambda: setattr(self.host, "_decide_workspace_environment_ownership", ownership)
-
-        cases = (("!! ignored", outside_cache), ("?? notes.txt", untracked_file),
-                 ("src/sample.egg-info/SOURCES.txt", modified_install_output),
-                 ("!! .ummanu-task-env/", unowned_namespace))
+        cases = (("?? notes.txt", untracked_file),
+                 ("src/sample.egg-info/SOURCES.txt", modified_install_output))
         for named, introduce in cases:
             with self.subTest(named=named):
                 restore = introduce()
                 result = self.owner.replay_one(key)
                 self.assertEqual(result["status"], "preserved", result["reason"])
-                self.assertIn("dirty tracked, untracked or ignored work", result["reason"])
+                self.assertIn("dirty tracked or untracked work", result["reason"])
                 self.assertIn(named, result["reason"])
                 self.assertTrue(self.workspace.exists())
                 restore()
@@ -2643,15 +2627,15 @@ class OwnedCleanupTests(unittest.TestCase):
     def test_dirty_work_is_itemized_in_manifest_and_replay_result(self):
         self.head()
         key = self.request()
-        (self.workspace / "ignored").write_text("ignored author work\n")
+        (self.workspace / "notes.txt").write_text("untracked author work\n")
         entry = self.entry(self.owner.inventory(project="sample"), key)
         self.assertEqual(entry["outcome"], "preserved")
-        self.assertIn("dirty tracked, untracked or ignored work: !! ignored", entry["reason"])
+        self.assertIn("dirty tracked or untracked work: ?? notes.txt", entry["reason"])
         self.assertEqual([effect["effect"] for effect in entry["effects"]], ["stop-head", "settle-claim"])
         result = self.owner.replay_targets("sample", [(key, entry["digest"])])
         self.assertEqual(result[0]["status"], "preserved")
-        self.assertIn("!! ignored", result[0]["reason"])
-        self.assertTrue((self.workspace / "ignored").exists())
+        self.assertIn("?? notes.txt", result[0]["reason"])
+        self.assertTrue((self.workspace / "notes.txt").exists())
         self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
 
     def test_owned_attempt_of_a_terminal_card_plans_its_settlement_request_first(self):
@@ -3077,11 +3061,12 @@ class OwnedCleanupTests(unittest.TestCase):
             file.write_bytes(b"cache")
         return files, outside
 
-    def test_done_workspace_with_ignored_python_caches_is_removed_without_force(self):
+    def test_done_workspace_with_ignored_entries_is_removed_without_force(self):
         self.head()
         self.task["claim"]["worker"] = self.record.worker
         key = self.request()
         files, outside = self.ignored_caches()
+        (self.workspace / "ignored").write_text("ignored output\n")
         status = git(self.workspace, "status", "--porcelain", "--ignored", "--untracked-files=all")
         self.assertTrue(all(line.startswith("!! ") for line in status.splitlines()), status)
         # Planning reads the same predicate and writes nothing, in the journal or the workspace.
@@ -3089,7 +3074,8 @@ class OwnedCleanupTests(unittest.TestCase):
         entry = self.entry(self.owner.inventory(project="sample"), key)
         self.assertEqual(entry["outcome"], "eligible", entry["reason"])
         removal = next(effect for effect in entry["effects"] if effect["effect"] == "remove-worktree")
-        self.assertEqual((removal["dirty"], removal["ignored_caches"]), ("clean", 4))
+        # Git's matched paths: the file, both caches' roots and each matched `__pycache__`.
+        self.assertEqual((removal["dirty"], removal["ignored_entries"]), ("clean", 5))
         self.assertEqual(journal_bytes(self.owner.journal), before)
         self.assertTrue(all(file.exists() for file in files))
         git_calls = []
@@ -3108,106 +3094,118 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertEqual(result["commit_proof"]["publication"], "remote-tracking")
         self.assertEqual(outside.read_bytes(), b"interpreter bytes\n")
 
-    def test_only_done_ignored_caches_are_disposable(self):
+    def owned_namespace(self):
+        """A dispatcher-owned `.ummanu-task-env` with a test basetemp, tool caches and a venv."""
+        namespace = self.workspace / ".ummanu-task-env"
+        for directory in ("tmp/pytest-of-dev/basetemp", "pycache/src", "venv/bin"):
+            (namespace / directory).mkdir(parents=True)
+            (namespace / directory / "entry").write_bytes(b"generated")
+        (namespace / "owner.json").write_text("dispatcher-owned")
+        with (self.repo / ".git" / "info" / "exclude").open("a") as exclude:
+            exclude.write(".ummanu-task-env/\n")
+
+        def ownership(path):
+            return "dispatcher" if (Path(path) / ".ummanu-task-env" / "owner.json").exists() else "absent"
+        self.host._decide_workspace_environment_ownership = ownership
+        return namespace
+
+    def test_preserved_done_workspace_drops_only_its_build_caches(self):
         self.tolerant_stop()
         self.head()
         self.task["claim"]["worker"] = self.record.worker
         key = self.request()
         files, outside = self.ignored_caches()
-        foreign = self.root / "foreign"
-        (foreign / "__pycache__").mkdir(parents=True)
-        (foreign / "__pycache__" / "x.pyc").write_bytes(b"foreign")
-        (foreign / "data").write_bytes(b"foreign data")
-        tracked = self.workspace / "src" / "tracked" / "__pycache__" / "kept.pyc"
-
-        def tracked_cache():
-            tracked.parent.mkdir(parents=True)
-            tracked.write_bytes(b"tracked")
-            git(self.workspace, "add", "-f", str(tracked))
-            git(self.workspace, "commit", "--quiet", "-m", "tracked cache")
-            git(self.repo, "update-ref", "refs/remotes/origin/main", git(self.workspace, "rev-parse", "HEAD"))
-            tip = git(self.workspace, "rev-parse", "HEAD")
-            intent = self.owner.journal.intent(key)
-            intent["identity"]["tip"] = tip
-            self.owner.journal.save({"intents": {key: intent}})
-            tracked.write_bytes(b"changed tracked cache")
-            return lambda: None
-
-        def unignored_cache():
-            (self.workspace / "other" / "__pycache__").mkdir(parents=True)
-            (self.workspace / "other" / "__pycache__" / "x.pyc").write_bytes(b"x")
-            return lambda: shutil.rmtree(self.workspace / "other")
-
-        def arbitrary_ignored():
-            (self.workspace / "ignored").write_text("secret\n")
-            return (self.workspace / "ignored").unlink
-
-        def author_work():
-            (self.workspace / "notes.txt").write_text("author\n")
-            return (self.workspace / "notes.txt").unlink
-
-        def symlinked_cache():
-            shutil.rmtree(self.workspace / ".pytest_cache")
-            (self.workspace / ".pytest_cache").symlink_to(foreign, target_is_directory=True)
-            def restore():
-                (self.workspace / ".pytest_cache").unlink()
-                files[0].parent.mkdir(parents=True)
-                files[0].write_bytes(b"cache")
-            return restore
-
-        def symlinked_parent():
-            (self.workspace / "src" / "link").symlink_to(foreign, target_is_directory=True)
-            return (self.workspace / "src" / "link").unlink
-
-        def symlink_leaf():
-            # ummanu-132 refused every leaf link, a venv's interpreter included. ummanu-135 makes a leaf
-            # link strictly inside a real `.venv` disposable as an entry (see the ummanu-135 tests), so
-            # this case now covers the links that stay work: a leaf link in any other cache.
-            (self.workspace / ".pytest_cache" / "v" / "python").symlink_to(outside)
-            return (self.workspace / ".pytest_cache" / "v" / "python").unlink
-
-        def closed_not_done():
-            self.tasks["sample-1"].update(state="blocked", closed=True)
-            return lambda: self.tasks["sample-1"].update(state="done", closed=False)
-
-        cases = (("unignored cache name", unignored_cache, "?? other/__pycache__/x.pyc"),
-                 ("arbitrary ignored file", arbitrary_ignored, "!! ignored"),
-                 ("author work", author_work, "?? notes.txt"),
-                 ("symlinked cache", symlinked_cache, ".pytest_cache"),
-                 ("symlinked parent", symlinked_parent, "src/link"),
-                 ("symlink leaf", symlink_leaf, "!! .pytest_cache/v/python"),
-                 ("closed but not Done", closed_not_done, "!! .venv/lib/site.py"),
-                 ("tracked cache name", tracked_cache, "src/tracked/__pycache__/kept.pyc"))
-        for named, introduce, row in cases:
-            with self.subTest(named=named):
-                restore = introduce()
-                try:
-                    result = self.owner.replay_one(key)
-                finally:
-                    restore()
-                self.assertEqual(result["status"], "preserved", result["reason"])
-                self.assertIn("dirty tracked, untracked or ignored work", result["reason"])
-                self.assertIn(row, result["reason"])
-                self.assertTrue(all(file.exists() for file in files), "no cache entry is deleted while dirty")
-                self.assertEqual((foreign / "__pycache__" / "x.pyc").read_bytes(), b"foreign")
-                self.assertEqual((foreign / "data").read_bytes(), b"foreign data")
-                self.assertEqual(outside.read_bytes(), b"interpreter bytes\n")
-        # An active card is refused before any proof: nothing at all is read as disposable.
-        self.tasks["sample-1"]["state"] = "in_progress"
+        pytest_cache, pycache, deep_pycache, venv_file = files
+        namespace = self.owned_namespace()
+        with (self.repo / ".git" / "info" / "exclude").open("a") as exclude:
+            exclude.write("target/\nlinked-target\n")
+        target = self.workspace / "target"
+        (target / "debug").mkdir(parents=True)
+        (target / "debug" / "artifact").write_bytes(b"rebuildable")
+        (target / "CACHEDIR.TAG").write_text("Signature: 8a477f597d28d172789f06886806bc55\n")
+        foreign = self.root / "foreign-target"
+        foreign.mkdir()
+        (foreign / "CACHEDIR.TAG").write_text("Signature: 8a477f597d28d172789f06886806bc55\n")
+        (foreign / "data").write_bytes(b"foreign")
+        (self.workspace / "linked-target").symlink_to(foreign, target_is_directory=True)
+        (self.workspace / "ignored").write_text("ignored output\n")
+        (self.workspace / "notes.txt").write_text("author work\n")
+        kept = [pytest_cache, venv_file, self.workspace / "ignored", self.workspace / "notes.txt",
+                namespace / "owner.json", namespace / "venv" / "bin" / "entry"]
+        caches = [pycache, deep_pycache, target, namespace / "tmp", namespace / "pycache"]
+        # A card that is not Done keeps every entry of its preserved workspace.
+        self.task.update(state="blocked", closed=True)
         result = self.owner.replay_one(key)
-        self.assertEqual(result["status"], "pending", result["reason"])
-        self.assertTrue(all(file.exists() for file in files))
-
-    def test_observer_ignored_caches_remain_work(self):
-        repo, path, observer = self.observer()
-        with (repo / ".git" / "info" / "exclude").open("a") as exclude:
-            exclude.write("__pycache__/\n")
-        (path / "__pycache__").mkdir()
-        (path / "__pycache__" / "x.pyc").write_bytes(b"x")
-        result = self.owner.cleanup_observer(observer)
         self.assertEqual(result["status"], "preserved", result["reason"])
-        self.assertIn("!! __pycache__/x.pyc", result["reason"])
-        self.assertTrue((path / "__pycache__" / "x.pyc").exists())
+        self.assertTrue(all(path.exists() for path in [*kept, *caches]))
+        self.task.update(state="done", closed=False)
+        before = journal_bytes(self.owner.journal)
+        entry = self.entry(self.owner.inventory(project="sample"), key)
+        self.assertEqual(journal_bytes(self.owner.journal), before, "planning writes nothing")
+        self.assertTrue(all(path.exists() for path in caches), "planning removes nothing")
+        dropped = next(effect for effect in entry["effects"] if effect["effect"] == "drop-build-caches")
+        self.assertEqual(sorted(dropped["entries"]),
+                         [".ummanu-task-env/pycache/", ".ummanu-task-env/tmp/", "src/pkg/__pycache__/",
+                          "src/pkg/deep/__pycache__/", "target/"])
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertIn("?? notes.txt", result["reason"])
+        self.assertFalse(any(path.exists() for path in caches))
+        self.assertTrue(all(path.exists() for path in kept))
+        self.assertTrue((self.workspace / "linked-target").is_symlink())
+        self.assertEqual((foreign / "data").read_bytes(), b"foreign")
+        self.assertEqual(outside.read_bytes(), b"interpreter bytes\n")
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+
+    def test_archived_research_report_is_not_work(self):
+        from ummanu.dispatch.release_lifecycle import _stage_research_report
+        self.tolerant_stop()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        instance = self.root / "instance"
+        archive = instance / "state" / "knowledge" / "reports" / "sample-1"
+        archive.mkdir(parents=True)
+        self.catalog.instance_dir = str(instance)
+        report = self.workspace / ".ummanu-report"
+        report.mkdir()
+        (report / "report.md").write_text("# Findings\n")
+        with (self.repo / ".git" / "info" / "exclude").open("a") as exclude:
+            exclude.write("/.ummanu-report/\n")
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertIn("!! .ummanu-report/ (differs from its knowledge archive)", result["reason"])
+        self.assertTrue((report / "report.md").exists())
+        _stage_research_report(report, archive)
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertFalse(self.workspace.exists())
+        self.assertEqual((archive / "report.md").read_text(), "# Findings\n")
+
+    def test_research_attachments_left_in_the_workspace_keep_it(self):
+        """Files the transfer leaves behind are named as kept there by the archived report."""
+        from ummanu.dispatch.release_lifecycle import _stage_research_report
+        self.tolerant_stop()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        instance = self.root / "instance"
+        archive = instance / "state" / "knowledge" / "reports" / "sample-1"
+        archive.mkdir(parents=True)
+        self.catalog.instance_dir = str(instance)
+        report = self.workspace / ".ummanu-report"
+        report.mkdir()
+        (report / "report.md").write_text("# Findings\n")
+        (report / "issues.json").write_text("[]\n")
+        with (self.repo / ".git" / "info" / "exclude").open("a") as exclude:
+            exclude.write("/.ummanu-report/\n")
+        _stage_research_report(report, archive)
+        self.assertIn("issues.json", (archive / "report.md").read_text())
+        for _ in range(2):
+            result = self.owner.replay_one(key)
+            self.assertEqual(result["status"], "preserved", result["reason"])
+            self.assertIn("!! .ummanu-report/ (differs from its knowledge archive)", result["reason"])
+        self.assertEqual((report / "issues.json").read_text(), "[]\n")
 
     # -- ummanu-132 review round: the six reproduced gaps --------------------------------------------
 
@@ -3569,7 +3567,7 @@ class OwnedCleanupTests(unittest.TestCase):
         entry = self.entry(self.owner.inventory(project="sample"), key)
         self.assertEqual(entry["outcome"], "eligible", entry["reason"])
         removal = next(effect for effect in entry["effects"] if effect["effect"] == "remove-worktree")
-        self.assertEqual((removal["dirty"], removal["ignored_caches"]), ("clean", len(rows)))
+        self.assertEqual((removal["dirty"], removal["ignored_entries"]), ("clean", 1))
         self.assertEqual(journal_bytes(self.owner.journal), before, "planning writes nothing")
         self.assertTrue(all(os.path.lexists(self.workspace / name) for name in links))
         git_calls = []
@@ -3595,41 +3593,38 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertTrue(result["progress"]["workspace_removed"])
         self.assertEqual(result["commit_proof"]["publication"], "remote-tracking")
 
-    def test_only_leaf_links_strictly_inside_a_real_venv_are_disposable(self):
+    def test_ignored_links_are_unlinked_never_followed(self):
+        """An ignored link anywhere goes as the entry it is; no target is read or changed."""
         self.tolerant_stop()
         self.head()
         self.task["claim"]["worker"] = self.record.worker
         key = self.request()
         external, interpreter = self.real_venv()
         targets = self.target_bytes(external, interpreter)
-        venv_entries = {row[3:] for row in self.ignored_rows()}
         foreign = self.root / "foreign-venv"
         (foreign / "bin").mkdir(parents=True)
         (foreign / "bin" / "python").write_bytes(b"foreign venv\n")
         with (self.repo / ".git" / "info" / "exclude").open("a") as exclude:
-            exclude.write(".pytest_cache/\nsrc/**/__pycache__/\n")
+            exclude.write("/linked-venv\nsrc/**/__pycache__/\n")
+        (self.workspace / "linked-venv").symlink_to(foreign, target_is_directory=True)
+        (self.workspace / "ignored").symlink_to(external / "bin" / "python3.12")
+        (self.workspace / "src" / "pkg" / "__pycache__").mkdir(parents=True)
+        (self.workspace / "src" / "pkg" / "__pycache__" / "x.pyc").symlink_to(external / "bin" / "python3.12")
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertFalse(self.workspace.exists())
+        self.assertEqual(self.target_bytes(external, interpreter), targets)
+        self.assertEqual((foreign / "bin" / "python").read_bytes(), b"foreign venv\n")
 
-        def venv_root_link():
-            # The cache root itself a link, ignored as a file too: nothing below it is read, and the
-            # ignored link is work.
-            with (self.repo / ".git" / "info" / "exclude").open("a") as exclude:
-                exclude.write("/.venv\n")
-            real = self.workspace.parent / "real-venv"
-            (self.workspace / ".venv").rename(real)
-            (self.workspace / ".venv").symlink_to(foreign, target_is_directory=True)
-            def restore():
-                (self.workspace / ".venv").unlink()
-                real.rename(self.workspace / ".venv")
-            return restore
-
-        def link_in_other_cache():
-            (self.workspace / "src" / "pkg" / "__pycache__").mkdir(parents=True)
-            (self.workspace / "src" / "pkg" / "__pycache__" / "x.pyc").symlink_to(external / "bin" / "python3.12")
-            return lambda: shutil.rmtree(self.workspace / "src")
-
-        def ignored_link_outside_caches():
-            (self.workspace / "ignored").symlink_to(external / "bin" / "python3.12")
-            return (self.workspace / "ignored").unlink
+    def test_untracked_or_tracked_links_stay_work(self):
+        self.tolerant_stop()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        external, interpreter = self.real_venv()
+        targets = self.target_bytes(external, interpreter)
+        foreign = self.root / "foreign-venv"
+        foreign.mkdir()
 
         def untracked_venv_named_link():
             # A link named like a cache but not ignored is untracked author work.
@@ -3651,10 +3646,7 @@ class OwnedCleanupTests(unittest.TestCase):
             link.symlink_to("bin/python3")
             return lambda: None
 
-        cases = (("venv root link", venv_root_link, "!! .venv"),
-                 ("leaf link in another cache", link_in_other_cache, "!! src/pkg/__pycache__/x.pyc"),
-                 ("ignored link outside caches", ignored_link_outside_caches, "!! ignored"),
-                 ("untracked venv-named link", untracked_venv_named_link, "?? venv-link/.venv"),
+        cases = (("untracked venv-named link", untracked_venv_named_link, "?? venv-link/.venv"),
                  ("tracked venv link", tracked_venv_link, " M .venv/tracked-link"))
         for named, introduce, row in cases:
             with self.subTest(named=named):
@@ -3664,15 +3656,13 @@ class OwnedCleanupTests(unittest.TestCase):
                 finally:
                     restore()
                 self.assertEqual(result["status"], "preserved", result["reason"])
-                self.assertIn("dirty tracked, untracked or ignored work", result["reason"])
+                self.assertIn("dirty tracked or untracked work", result["reason"])
                 self.assertIn(row, result["reason"])
-                self.assertTrue(all(os.path.lexists(self.workspace / name) for name in venv_entries),
-                                "no venv entry is unlinked while any row is work")
+                self.assertTrue((self.workspace / ".venv" / "bin" / "python").is_symlink())
                 self.assertEqual(self.target_bytes(external, interpreter), targets)
-                self.assertEqual((foreign / "bin" / "python").read_bytes(), b"foreign venv\n")
 
     def test_venv_links_stay_while_any_fence_refuses(self):
-        """Foreign claim, live head, changed HEAD, active and non-Done cards: no venv entry goes."""
+        """Foreign claim, live head, changed HEAD or admin, active card: no venv entry goes."""
         self.tolerant_stop()
         self.head()
         self.task["claim"]["worker"] = self.record.worker
@@ -3703,13 +3693,9 @@ class OwnedCleanupTests(unittest.TestCase):
             self.task["state"] = "in_progress"
             return lambda: self.task.update(state="done")
 
-        def closed_not_done():
-            self.task.update(state="blocked", closed=True)
-            return lambda: self.task.update(state="done", closed=False)
-
         cases = (("foreign claim", foreign_claim, "pending"), ("live head", live_head, "pending"),
                  ("changed HEAD", changed_head, "pending"), ("changed admin", changed_admin, "pending"),
-                 ("active card", active, "pending"), ("closed but not Done", closed_not_done, "preserved"))
+                 ("active card", active, "pending"))
         for named, introduce, status in cases:
             with self.subTest(named=named):
                 restore = introduce()
@@ -3725,17 +3711,6 @@ class OwnedCleanupTests(unittest.TestCase):
         result = self.owner.replay_one(key)
         self.assertEqual(result["status"], "completed", result["reason"])
         self.assertEqual(self.target_bytes(external, interpreter), targets)
-
-    def test_observer_venv_links_remain_work(self):
-        repo, path, observer = self.observer()
-        with (repo / ".git" / "info" / "exclude").open("a") as exclude:
-            exclude.write(".venv/\n")
-        (path / ".venv" / "bin").mkdir(parents=True)
-        (path / ".venv" / "bin" / "python").symlink_to(sys.executable)
-        result = self.owner.cleanup_observer(observer)
-        self.assertEqual(result["status"], "preserved", result["reason"])
-        self.assertIn("!! .venv/bin/python", result["reason"])
-        self.assertTrue((path / ".venv" / "bin" / "python").is_symlink())
 
     def test_venv_parent_substituted_after_the_pin_only_reaches_the_pinned_workspace(self):
         """The 132 after-pin swap with a real venv: the foreign copy, its links and every target stay."""
@@ -3768,9 +3743,9 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertFalse(result["progress"].get("claim_settled"))
 
     def test_venv_parent_moved_during_the_effect_never_reaches_foreign_bytes(self):
-        """A real venv directory renamed away and replaced by a link mid-effect: the effect keeps to
-        the directory it reached through real parents, the link and its foreign target stay, and Git
-        refuses the link as work."""
+        """A real venv subdirectory renamed away and replaced by a link after the venv was opened:
+        the effect keeps to the directory it holds, unlinks the link as an entry, and neither the
+        foreign target nor the moved directory is reached."""
         self.tolerant_stop()
         self.head()
         self.task["claim"]["worker"] = self.record.worker
@@ -3783,23 +3758,23 @@ class OwnedCleanupTests(unittest.TestCase):
         foreign_links = sorted(p.name for p in foreign.iterdir() if p.is_symlink())
         foreign_before = self.snapshot(foreign)
         moved = {}
-        native = cleanup_module._unlink_confined
-        def unlink(directories, name):
-            native(directories, name)
-            if name.startswith(".venv/bin/") and not moved:
+        native = cleanup_module._clear_directory
+        def clear(directory, what, disposal):
+            if not moved:
                 moved["to"] = self.root / "moved-bin"
                 (self.workspace / ".venv" / "bin").rename(moved["to"])
                 (self.workspace / ".venv" / "bin").symlink_to(foreign, target_is_directory=True)
-        with mock.patch.object(cleanup_module, "_unlink_confined", side_effect=unlink):
+                moved["before"] = self.snapshot(moved["to"])
+            return native(directory, what, disposal)
+        with mock.patch.object(cleanup_module, "_clear_directory", side_effect=clear):
             result = self.owner.replay_one(key)
         self.assertTrue(moved)
         self.assertEqual(self.snapshot(foreign), foreign_before)
         self.assertEqual(sorted(p.name for p in foreign.iterdir() if p.is_symlink()), foreign_links)
+        self.assertEqual(self.snapshot(moved["to"]), moved["before"])
         self.assertEqual(self.target_bytes(external, interpreter), targets)
-        self.assertTrue((self.workspace / ".venv" / "bin").is_symlink(), "the substituted link is not removed")
-        self.assertEqual(result["status"], "pending", result["reason"])
-        self.assertFalse(result["progress"].get("workspace_removed"))
-        self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertFalse(self.workspace.exists())
 
     def realistic_venv(self, workspace, packages):
         """A stdlib venv plus `packages` site-packages of 46 regular files, 2 links and a __pycache__.
@@ -3819,8 +3794,8 @@ class OwnedCleanupTests(unittest.TestCase):
         return external
 
     def test_realistic_venv_cost_is_bounded_per_directory_not_per_entry(self):
-        """>= 20000 status rows under a real .venv: a fixed number of subprocesses and journal reads,
-        descriptor opens bounded by directories, and every entry read without following (ummanu-135).
+        """>= 20000 files under a real .venv: a fixed number of subprocesses, journal reads and
+        stats, and descriptor opens bounded by directories, every one without following.
 
         Wall clock is printed for the report, never asserted."""
         self.tolerant_stop()
@@ -3868,16 +3843,15 @@ class OwnedCleanupTests(unittest.TestCase):
         small, large = measured["small"], measured["large"]
         self.assertGreaterEqual(large["rows"], 20000)
         self.assertGreater(large["links"], 800)
-        for phase, passes in (("plan", 1), ("execute", 3)):
-            # No subprocess and no journal read per entry: the same counts at 100 and 20000 rows.
+        for phase, passes in (("plan", 0), ("execute", 1)):
+            # No subprocess, journal read or stat per entry: Git matches `.venv/` as one row, and
+            # the effect reads entries from directory scans.
             self.assertEqual(large[phase]["subprocesses"], small[phase]["subprocesses"], phase)
             self.assertEqual(large[phase]["journal"], small[phase]["journal"], phase)
-            # Each directory of a pass is opened once; the pins add a bounded constant.
+            self.assertEqual(large[phase]["stats"], small[phase]["stats"], phase)
+            # The effect opens each directory once; the pins add a bounded constant.
             self.assertLessEqual(large[phase]["opens"] - small[phase]["opens"],
                                  passes * (large["directories"] - small["directories"]), phase)
-        # One no-follow stat per entry and pass (plan; execution: two predicates and the effect).
-        self.assertEqual(large["plan"]["stats"], large["rows"])
-        self.assertEqual(large["execute"]["stats"], 3 * large["rows"])
         print("realistic venv cleanup: " + json.dumps(measured, sort_keys=True))
 
 class SettledHeadStopTests(unittest.TestCase):

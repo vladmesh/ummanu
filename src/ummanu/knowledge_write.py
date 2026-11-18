@@ -194,6 +194,15 @@ def check_knowledge_directory(
     return KnowledgeDirectory(actor, relative, files, root)
 
 
+def knowledge_directory_holds(instance_dir: Path, *, directory: str, actor: str, source_dir: Path) -> bool:
+    """Whether :func:`write_knowledge_directory` of `source_dir` would find it already written.
+
+    Raises what :func:`check_knowledge_directory` refuses.
+    """
+    checked = check_knowledge_directory(instance_dir, directory=directory, actor=actor, source_dir=source_dir)
+    return _directory_holds(state_repo.knowledge_dir(checked.instance_dir) / checked.directory, checked.files)
+
+
 def write_knowledge_directory(
     instance_dir: Path,
     *,
