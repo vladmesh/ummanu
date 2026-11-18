@@ -3159,6 +3159,7 @@ class OwnedCleanupTests(unittest.TestCase):
 
     def test_archived_research_report_is_not_work(self):
         from ummanu.dispatch.release_lifecycle import _stage_research_report
+        self.tolerant_stop()
         self.head()
         self.task["claim"]["worker"] = self.record.worker
         key = self.request()
