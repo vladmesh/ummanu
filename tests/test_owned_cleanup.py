@@ -3182,6 +3182,31 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertFalse(self.workspace.exists())
         self.assertEqual((archive / "report.md").read_text(), "# Findings\n")
 
+    def test_research_attachments_left_in_the_workspace_keep_it(self):
+        """Files the transfer leaves behind are named as kept there by the archived report."""
+        from ummanu.dispatch.release_lifecycle import _stage_research_report
+        self.tolerant_stop()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        instance = self.root / "instance"
+        archive = instance / "state" / "knowledge" / "reports" / "sample-1"
+        archive.mkdir(parents=True)
+        self.catalog.instance_dir = str(instance)
+        report = self.workspace / ".ummanu-report"
+        report.mkdir()
+        (report / "report.md").write_text("# Findings\n")
+        (report / "issues.json").write_text("[]\n")
+        with (self.repo / ".git" / "info" / "exclude").open("a") as exclude:
+            exclude.write("/.ummanu-report/\n")
+        _stage_research_report(report, archive)
+        self.assertIn("issues.json", (archive / "report.md").read_text())
+        for _ in range(2):
+            result = self.owner.replay_one(key)
+            self.assertEqual(result["status"], "preserved", result["reason"])
+            self.assertIn("!! .ummanu-report/ (differs from its knowledge archive)", result["reason"])
+        self.assertEqual((report / "issues.json").read_text(), "[]\n")
+
     # -- ummanu-132 review round: the six reproduced gaps --------------------------------------------
 
     def test_oversized_integer_due_times_are_malformed_not_fatal(self):
