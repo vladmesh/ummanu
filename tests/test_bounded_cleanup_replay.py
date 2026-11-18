@@ -459,22 +459,53 @@ class BoundedCleanupReplayTests(unittest.TestCase):
         self.assertNotIn("removal_started", intent["progress"])
         self.assert_deferred_then_recovered(key, "Git rev-parse")
 
-    def test_ignored_cache_removal_cut_short_resumes_from_a_full_proof(self):
+    def spent_after_removals(self, count):
+        """Spend the allowance as the attempt's disposal records its `count`th removed entry."""
+        test = self
+
+        class Spending(cleanup_module._Disposal):
+            @property
+            def removed(self):
+                return self._removed
+
+            @removed.setter
+            def removed(self, value):
+                self._removed = value
+                if value == count:
+                    test.spend()
+        return mock.patch.object(cleanup_module, "_Disposal", Spending)
+
+    def assert_resumed_on_the_next_tick(self, key: str, boundary: str) -> None:
+        """A cut that removed entries keeps them removed and leaves the intent due at once: the next
+        tick, at the same clock, finishes the removal from a full proof."""
+        fixture = self.fixture
+        intent = self.owner.journal.intent(key)
+        self.assertEqual(intent["status"], "pending", intent["reason"])
+        self.assertIn("allowance exhausted at " + boundary, intent["reason"])
+        self.assertEqual(self.owner.last_replay["deferred"], 1, self.owner.last_replay)
+        self.assertEqual(intent["retry"], {"last_attempt_at": self.clock.now, "next_attempt_at": self.clock.now})
+        self.assertEqual(fixture.task["claim"]["worker"], fixture.record.worker)
+        result, _ = self.replay(CleanupOwner(fixture.runtime))
+        self.assertEqual([item["status"] for item in result], ["completed"], result and result[0]["reason"])
+        self.assertFalse(fixture.workspace.exists())
+        self.assertNotIn(str(fixture.workspace), git(fixture.repo, "worktree", "list", "--porcelain"))
+        self.assertIsNone(fixture.task["claim"]["worker"])
+
+    def test_ignored_entry_removal_cut_short_resumes_on_the_next_tick(self):
         fixture = self.fixture
         key = self.due_card()
         external = fixture.realistic_venv(fixture.workspace, 8)
         targets = fixture.snapshot(external)
         before = len(fixture.ignored_rows())
-        patch, calls = self.spent_at(cleanup_module, "_unlink_confined", after=100)
-        with patch:
+        with self.spent_after_removals(100):
             self.replay()
-        # Checked before every entry: the call that spent it was the last one made.
-        self.assertEqual(len(calls), 101)
         intent = self.owner.journal.intent(key)
         self.assertNotIn("removal_started", intent["progress"])
-        self.assertEqual(len(fixture.ignored_rows()), before - 101)
+        # Checked before every entry: the cut came after 100 removed files and directories.
+        self.assertLessEqual(before - 100, len(fixture.ignored_rows()))
+        self.assertLess(len(fixture.ignored_rows()), before)
         self.assertIn(str(fixture.workspace), git(fixture.repo, "worktree", "list", "--porcelain"))
-        self.assert_deferred_then_recovered(key, "ignored cache removal")
+        self.assert_resumed_on_the_next_tick(key, "ignored entry removal")
         self.assertEqual(fixture.snapshot(external), targets)
 
     def test_environment_removal_cut_short_resumes_from_its_retained_identity(self):
@@ -495,15 +526,14 @@ class BoundedCleanupReplayTests(unittest.TestCase):
             return "dispatcher"
         fixture.host._decide_workspace_environment_ownership = ownership
         key = self.due_card()
-        patch, _ = self.spent_at(cleanup_module, "_clear_directory", after=1)
-        with patch:
+        with self.spent_after_removals(5):
             self.replay()
         intent = self.owner.journal.intent(key)
         self.assertTrue(intent["progress"]["environment_removal_started"])
         self.assertEqual(intent["generated_environment"]["owner"], "ummanu-dispatcher")
         self.assertNotIn("removal_started", intent["progress"])
-        self.assertTrue((namespace / "venv").is_dir())
-        self.assert_deferred_then_recovered(key, "environment namespace removal")
+        self.assertTrue(namespace.is_dir())
+        self.assert_resumed_on_the_next_tick(key, "environment namespace removal")
 
     def test_no_git_removal_starts_in_the_allowances_last_moments(self):
         key = self.due_card()

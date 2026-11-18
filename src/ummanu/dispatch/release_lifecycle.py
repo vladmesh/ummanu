@@ -34,6 +34,7 @@ from ummanu.dispatch.types import GateTransportError, HostError, MergeLanding
 from ummanu.knowledge_write import (
     KnowledgeError,
     KnowledgeValidationError,
+    knowledge_directory_holds,
     write_knowledge_directory,
 )
 from ummanu.state_repo import StateRepoError
@@ -266,6 +267,20 @@ def _stage_research_report(source: Path, staging: Path) -> None:
                 + "\n".join(kept)
                 + "\n"
             )
+
+
+def research_report_archived(instance_dir: Path, ref: str, workspace: Path) -> bool:
+    """Whether `<workspace>/.ummanu-report/` stages to exactly what its knowledge directory holds.
+
+    A report the transfer would refuse, or one it cannot read, is not archived.
+    """
+    with tempfile.TemporaryDirectory(prefix="ummanu-research-") as staging:
+        try:
+            _stage_research_report(workspace / RESEARCH_REPORT_DIR, Path(staging))
+            return knowledge_directory_holds(instance_dir, directory=research_report_path(ref),
+                                             actor="dispatcher", source_dir=Path(staging))
+        except (KnowledgeError, OSError):
+            return False
 
 
 def release_parked(

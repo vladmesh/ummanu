@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Self
 
 from ummanu import _proc
+from ummanu.board.completion_evidence import RESEARCH_REPORT_DIR
 from ummanu.dispatch.cleanup_journal import (
     _FANOUT_EVENTS_KEPT as _FANOUT_EVENTS_KEPT,
     _FANOUT_KEPT as _FANOUT_KEPT,
@@ -87,6 +88,7 @@ from ummanu.dispatch.ownership import (
 from ummanu.dispatch.tick_telemetry import tick_stage, tick_stage_entering
 from ummanu.dispatch.types import HostError, OwnershipChanged
 from ummanu.infra import git_worktree
+from ummanu.runtime.role_env import WORKSPACE_NAMESPACE, WORKSPACE_TMPDIR, WORKSPACE_TOOL_CACHES
 
 #: The bound of one cleanup Git child outside an automatic replay, and its ceiling inside one.
 GIT_TIMEOUT = 30.0
@@ -173,19 +175,6 @@ def _no_workspace_attempt(intent: dict[str, Any]) -> bool:
             and not (record.get("launch_intent") or {}).get("head_run"))
 
 
-#: Disposable Python caches a Done card's exact workspace may hold, when Git ignores their contents.
-_CACHE_DIRECTORIES = frozenset({".pytest_cache", "__pycache__", ".venv"})
-
-
-def _cache_parts(name: str) -> tuple[str, ...] | None:
-    """The components of a relative Git path strictly inside a cache directory, or None: never the
-    cache itself, a directory row, an absolute path or one with an empty, `.` or `..` component."""
-    parts = tuple(name.split("/"))
-    if any(part in {"", ".", ".."} for part in parts) or not any(part in _CACHE_DIRECTORIES for part in parts[:-1]):
-        return None
-    return parts
-
-
 def _open_below(root: int, parts: tuple[str, ...]) -> int:
     """A descriptor of root/parts..., each component a real directory opened without following."""
     directory = os.dup(root)
@@ -198,18 +187,6 @@ def _open_below(root: int, parts: tuple[str, ...]) -> int:
         os.close(directory)
         raise
     return directory
-
-
-#: The one cache whose leaf symlinks are disposable (ummanu-135): a virtual environment links its
-#: interpreter outside itself and `lib64` beside it. Such a link goes as the directory entry it is.
-_LINKED_CACHE = ".venv"
-
-
-def _disposable_leaf(parts: tuple[str, ...], mode: int) -> bool:
-    """The one leaf type policy of classification and effect, for an entry reached through real
-    directories only: a regular file in any cache, or a symlink strictly inside a real `.venv`
-    (dangling, to a file or to a directory alike). A link's target is never stat'ed or opened."""
-    return stat_mode.S_ISREG(mode) or (stat_mode.S_ISLNK(mode) and _LINKED_CACHE in parts[:-1])
 
 
 class _ConfinedDirectories:
@@ -251,33 +228,72 @@ class _ConfinedDirectories:
         return self._open[-1][1] if self._open else self._root
 
 
-def _cache_entry(directories: _ConfinedDirectories, name: str) -> bool:
-    """A disposable leaf (see `_disposable_leaf`) strictly inside a cache directory, reached from the
-    pinned root through real directories only. A symlinked cache or parent, a leaf link outside a
-    real `.venv`, or a nested repository Git reports as a directory, is not one."""
-    parts = _cache_parts(name)
-    if parts is None:
-        return False
+def _entry_parts(name: str) -> tuple[str, ...]:
+    """The components of one relative Git path row (a directory row ends with `/`); a HostError for
+    an absolute path or one with an empty, `.` or `..` component."""
+    parts = tuple(name.removesuffix("/").split("/"))
+    if any(part in {"", ".", ".."} for part in parts):
+        raise HostError("cleanup entry is not a plain relative path: " + name)
+    return parts
+
+
+class _Disposal:
+    """How many entries one attempt's disposal removed; any at all is progress a cut keeps."""
+
+    def __init__(self) -> None:
+        self.removed = 0
+
+
+def _dispose_entry(directories: _ConfinedDirectories, name: str, disposal: _Disposal) -> None:
+    """Remove one entry below the pinned root: a real directory emptied entry by entry, anything else
+    (a file or a link, never its target) unlinked as the entry it is. No link on the way is followed,
+    and an entry already gone is already disposed of."""
+    parts = _entry_parts(name)
+    parent = directories.parent(parts)
     try:
-        mode = os.stat(parts[-1], dir_fd=directories.parent(parts), follow_symlinks=False).st_mode
+        mode = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        return
+    if stat_mode.S_ISDIR(mode):
+        child = os.open(parts[-1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        try:
+            _clear_directory(child, "ignored entry removal", disposal)
+        finally:
+            os.close(child)
+        os.rmdir(parts[-1], dir_fd=parent)
+    else:
+        os.unlink(parts[-1], dir_fd=parent)
+    disposal.removed += 1
+
+
+#: A directory holding this regular file declares itself a rebuildable cache (Cargo `target/`,
+#: `.pytest_cache`); see https://bford.info/cachedir/.
+_CACHEDIR_TAG = "CACHEDIR.TAG"
+
+
+def _build_cache(directories: _ConfinedDirectories, name: str) -> bool:
+    """Whether one Git-ignored directory row is a rebuildable build cache: a real `__pycache__`
+    directory, or a real directory holding a regular `CACHEDIR.TAG`."""
+    if not name.endswith("/"):
+        return False
+    parts = _entry_parts(name)
+    if parts[-1] == "__pycache__":
+        return True
+    try:
+        directory = os.open(parts[-1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=directories.parent(parts))
     except OSError:
         return False
-    return _disposable_leaf(parts, mode)
+    try:
+        tag = os.stat(_CACHEDIR_TAG, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    finally:
+        os.close(directory)
+    return stat_mode.S_ISREG(tag.st_mode)
 
 
-def _unlink_confined(directories: _ConfinedDirectories, name: str) -> None:
-    """Unlink one disposable cache entry below the pinned root; nothing on the way, and no link
-    target, is followed: the type is read again without following and unlink removes the entry."""
-    parts = _cache_parts(name)
-    if parts is None:
-        raise HostError("cleanup cache entry is not inside a cache directory: " + name)
-    directory = directories.parent(parts)
-    if not _disposable_leaf(parts, os.stat(parts[-1], dir_fd=directory, follow_symlinks=False).st_mode):
-        raise HostError("cleanup cache entry is no longer a disposable file or venv link: " + name)
-    os.unlink(parts[-1], dir_fd=directory)
-
-
-def _remove_namespace(namespace: Path) -> None:
+def _remove_namespace(namespace: Path, disposal: _Disposal) -> None:
     """Remove the exactly owned environment namespace like `shutil.rmtree`: every directory opened
     without following a link, every entry unlinked relative to its parent's descriptor, and the
     current allowance checked between entries. A cut leaves a smaller namespace whose retained
@@ -290,7 +306,7 @@ def _remove_namespace(namespace: Path) -> None:
     try:
         directory = os.open(namespace.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
         try:
-            _clear_directory(directory)
+            _clear_directory(directory, "environment namespace removal", disposal)
         finally:
             os.close(directory)
         os.rmdir(namespace.name, dir_fd=parent)
@@ -298,7 +314,7 @@ def _remove_namespace(namespace: Path) -> None:
         os.close(parent)
 
 
-def _clear_directory(directory: int) -> None:
+def _clear_directory(directory: int, what: str, disposal: _Disposal) -> None:
     """Empty one directory, the allowance checked before each entry is read and removed. Entries are
     removed as the scan yields them, never collected first; a scan that removed anything is
     repeated, since removing while reading may leave entries the scan did not return."""
@@ -306,16 +322,17 @@ def _clear_directory(directory: int) -> None:
         removed = False
         with os.scandir(directory) as scan:
             for entry in scan:
-                _check("environment namespace removal")
+                _check(what)
                 if entry.is_dir(follow_symlinks=False):
                     child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
                     try:
-                        _clear_directory(child)
+                        _clear_directory(child, what, disposal)
                     finally:
                         os.close(child)
                     os.rmdir(entry.name, dir_fd=directory)
                 else:
                     os.unlink(entry.name, dir_fd=directory)
+                disposal.removed += 1
                 removed = True
         if not removed:
             return
@@ -1030,49 +1047,110 @@ class CleanupOwner:
 
     def _dirty(self, intent: dict[str, Any], path: Path,
                root: int | None = None) -> tuple[list[str], list[str]]:
-        """The one dirty predicate of planning, inventory and execution: dirty rows, disposable caches.
+        """The one dirty predicate of planning, inventory and execution: dirty rows, ignored entries.
 
-        Include ignored files. Only bytes written by the prompt producer, the existing exact
-        environment namespace contract and, for the exact workspace of a card this replay's
-        admission saw Done, Git-ignored regular files inside its Python caches and leaf links inside
-        its real `.venv` (see `_cache_entry`) can be disposable. Every later admission must see that same state. Status and cache
-        classification read the recorded directory through its pinned descriptor (`root`, or one
-        pinned here), never through a path that could be substituted. It reads only.
+        Work is a tracked change, an untracked file other than exact bytes the prompt producer
+        wrote, or a `.ummanu-report/` that differs from its knowledge archive. Every other Git-ignored
+        entry is disposable, listed as Git matched it (a matched directory is one row); the
+        dispatcher's own environment namespace is left to its ownership contract. Status reads the
+        recorded directory through its pinned descriptor (`root`, or one pinned here). It reads only.
         """
         if root is None:
             with _pinned_root(intent["identity"]) as pinned:
                 return self._dirty(intent, path, pinned)
-        result = _read_pinned_git(root, "status", "--porcelain=v1", "--ignored", "--untracked-files=all", "-z")
+        result = _read_pinned_git(root, "status", "--porcelain=v1", "--ignored=matching",
+                                  "--untracked-files=all", "-z")
         if result.returncode:
             raise HostError("cleanup workspace status is unreadable")
-        status = result.stdout
         dirty: list[str] = []
-        caches: list[str] = []
+        ignored: list[str] = []
         generated = self.journal.generated_digests()
         environment = self._environment_owner(intent, path)
-        done = (intent["task"].get("kind") != "observer"
-                and (self._admitted or {}).get("state") == "done")
         prefix = str(path) + "/"
-        with _ConfinedDirectories(root) as directories:
-            for row in status.split("\0"):
-                if not row:
+        for row in result.stdout.split("\0"):
+            if not row:
+                continue
+            _check("workspace status classification")
+            name = row[3:]
+            if row[:2] == "!!":
+                if name.startswith(WORKSPACE_NAMESPACE + "/") and environment == "dispatcher":
                     continue
-                _check("workspace status classification")
-                name = row[3:]
-                if row[:2] in {"??", "!!"}:
-                    if name.startswith(".ummanu-task-env/") and environment == "dispatcher":
+                if name.rstrip("/") == RESEARCH_REPORT_DIR and not self._report_archived(intent, path):
+                    dirty.append(row + " (differs from its knowledge archive)")
+                    continue
+                ignored.append(name)
+                continue
+            if row[:2] == "??":
+                # `str(path / name)` for Git's normalized names, without a Path per row.
+                expected = generated.get(prefix + name)
+                if expected:
+                    file = path / name
+                    if not file.is_symlink() and file.is_file() and hashlib.sha256(file.read_bytes()).hexdigest() == expected:
                         continue
-                    # `str(path / name)` for Git's normalized names, without a Path per row.
-                    expected = generated.get(prefix + name.rstrip("/"))
-                    if expected:
-                        file = path / name
-                        if not file.is_symlink() and file.is_file() and hashlib.sha256(file.read_bytes()).hexdigest() == expected:
-                            continue
-                    if row[:2] == "!!" and done and _cache_entry(directories, name):
-                        caches.append(name)
-                        continue
-                dirty.append(row)
-        return dirty, caches
+            dirty.append(row)
+        return dirty, ignored
+
+    def _report_archived(self, intent: dict[str, Any], path: Path) -> bool:
+        """Whether the workspace's research report stages to exactly its archived knowledge copy."""
+        from ummanu.dispatch.release_lifecycle import research_report_archived
+        return research_report_archived(Path(self.runtime.catalog.instance_dir), intent["task"]["ref"], path)
+
+    def _build_caches(self, intent: dict[str, Any], path: Path, directories: _ConfinedDirectories,
+                      ignored: list[str]) -> list[str]:
+        """The rebuildable build caches of a workspace: ignored cache directories (`_build_cache`) and
+        the temporary and tool-cache directories of the dispatcher's own environment namespace."""
+        caches = [name for name in ignored if _build_cache(directories, name)]
+        if self._environment_owner(intent, path) == "dispatcher":
+            for directory in (WORKSPACE_TMPDIR, *WORKSPACE_TOOL_CACHES.values()):
+                try:
+                    os.stat(directory, dir_fd=directories.parent((WORKSPACE_NAMESPACE, directory)),
+                            follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                caches.append(f"{WORKSPACE_NAMESPACE}/{directory}/")
+        return caches
+
+    @contextlib.contextmanager
+    def _resumable(self, intent: dict[str, Any], disposal: _Disposal) -> Iterator[None]:
+        """An allowance cut after this attempt removed anything leaves the intent due at once.
+
+        Removed entries stay removed, so the next tick resumes a smaller workspace instead of
+        waiting out the cooldown; a cut that removed nothing keeps it, so no intent spins.
+        """
+        try:
+            yield
+        except Deferred:
+            retry = intent.get("retry")
+            if disposal.removed and isinstance(retry, dict):
+                retry["next_attempt_at"] = retry["last_attempt_at"]
+            raise
+
+    def _drop_build_caches(self, intent: dict[str, Any], repo: Path, path: Path) -> None:
+        """Remove the build caches (`_build_caches`) of a Done card's preserved workspace; its work,
+        commits and every other ignored entry stay."""
+        if intent["task"].get("kind") == "observer" or (self._admitted or {}).get("state") != "done":
+            return
+        identity = intent["identity"]
+        if self._planned is not None:
+            with _pinned_root(identity) as root, _ConfinedDirectories(root) as directories:
+                caches = self._build_caches(intent, path, directories, self._dirty(intent, path, root)[1])
+            if caches:
+                self._planned.append({"effect": "drop-build-caches", "path": identity["workspace"],
+                                      "entries": caches})
+            return
+        allowance = _allowance()
+        if allowance is not None:
+            allowance.require(EFFECT_FLOOR, "build cache removal admission")
+        disposal = _Disposal()
+        branch = identity["branch"].removeprefix("refs/heads/") if identity["branch"] else ""
+        with self.admission(intent["task"], intent=intent), self._resumable(intent, disposal):
+            if _identity(repo, identity["workspace"], branch) != identity:
+                raise HostError("cleanup workspace, registration or HEAD changed before its build caches "
+                                "were removed; nothing was removed")
+            with _pinned_root(identity) as root, _ConfinedDirectories(root) as directories:
+                for name in self._build_caches(intent, path, directories, self._dirty(intent, path, root)[1]):
+                    _check("build cache removal")
+                    _dispose_entry(directories, name, disposal)
 
     def _environment_owner(self, intent: dict[str, Any], path: Path) -> str:
         try:
@@ -1228,7 +1306,7 @@ class CleanupOwner:
             self._verify_commits(intent, repo)
             return
         missing = not path.exists() and not path.is_symlink()
-        caches: list[str] = []
+        ignored: list[str] = []
         if missing:
             if not intent["progress"].get("removal_started"):
                 # Only the exact recorded registration may end this way; a changed one is a refusal.
@@ -1244,15 +1322,19 @@ class CleanupOwner:
             fresh = _identity(repo, workspace, identity["branch"].removeprefix("refs/heads/") if identity["branch"] else "")
             if fresh != identity:
                 raise HostError("cleanup workspace, registration or HEAD changed")
-            dirty, caches = self._dirty(intent, path)
-            if dirty:
-                raise Preserved("dirty tracked, untracked or ignored work: " + "; ".join(dirty[:8]), verified=True)
-            self._verify_commits(intent, repo)
+            dirty, ignored = self._dirty(intent, path)
+            try:
+                if dirty:
+                    raise Preserved("dirty tracked or untracked work: " + "; ".join(dirty[:8]), verified=True)
+                self._verify_commits(intent, repo)
+            except Preserved:
+                self._drop_build_caches(intent, repo, path)
+                raise
         if self._planned is not None:
             self._planned.append({
                 "effect": "remove-worktree", "path": workspace, "identity": identity,
                 "dirty": "missing directory; admitted removal resumes" if missing else "clean",
-                "ignored_caches": len(caches),
+                "ignored_entries": len(ignored),
                 "commit_proof": intent.get("commit_proof"),
                 "environment": "absent" if missing else self._environment_owner(intent, path)})
             self._plan_removed.add(workspace)
@@ -1261,25 +1343,24 @@ class CleanupOwner:
         if allowance is not None:
             # No new destructive stage starts in the allowance's last moments.
             allowance.require(EFFECT_FLOOR, "workspace removal admission")
-        with self.admission(intent["task"], intent=intent):
+        disposal = _Disposal()
+        with self.admission(intent["task"], intent=intent), self._resumable(intent, disposal):
             if not missing:
                 # Board and journal admission does not cover the filesystem: the exact recorded
                 # workspace is revalidated and pinned, and the same predicate runs again inside it.
-                # Only its Git-ignored cache files and venv links go, unlinked through that descriptor.
+                # Its ignored entries go through that descriptor, before Git sees the directory.
                 if _identity(repo, workspace, identity["branch"].removeprefix("refs/heads/")
                              if identity["branch"] else "") != identity:
-                    raise HostError("cleanup workspace, registration or HEAD changed before its cache "
-                                    "effects; nothing was removed")
+                    raise HostError("cleanup workspace, registration or HEAD changed before its ignored "
+                                    "entries were removed; nothing was removed")
                 with _pinned_root(identity) as root:
-                    dirty, caches = self._dirty(intent, path, root)
+                    dirty, ignored = self._dirty(intent, path, root)
                     if dirty:
                         raise HostError("cleanup workspace changed since its dirty check; workspace retained")
                     with _ConfinedDirectories(root) as directories:
-                        for name in caches:
-                            # Each entry is disposable by itself: a cut leaves the rest for the next
-                            # attempt's full proof, never a partial unproven state.
-                            _check("ignored cache removal")
-                            _unlink_confined(directories, name)
+                        for name in ignored:
+                            _check("ignored entry removal")
+                            _dispose_entry(directories, name, disposal)
             # No forced removal: first delete only exact generated bytes whose
             # ownership was validated above. Git independently refuses dirty work.
             generated = self.journal.generated_digests()
@@ -1300,7 +1381,7 @@ class CleanupOwner:
                                                    "schema_version": 1}
                 intent["progress"]["environment_removal_started"] = True
                 self._checkpoint_intent(intent)
-                _remove_namespace(namespace)
+                _remove_namespace(namespace, disposal)
             if allowance is not None:
                 allowance.require(EFFECT_FLOOR, "Git worktree removal admission")
             # Admit Git only after exact identity, author-work and retention proof.

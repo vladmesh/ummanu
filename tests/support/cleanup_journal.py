@@ -86,7 +86,7 @@ def intent(ref: str, status: str, *, baseline: int = 180, events: int = 40, head
     if status == "completed":
         progress.update(workspace_removed=True, ref_removed=True, removal_started=True)
     reason = {"pending": "cleanup workspace disappeared without removal evidence",
-              "preserved": "dirty tracked, untracked or ignored work: ?? notes.txt"}.get(status, "")
+              "preserved": "dirty tracked or untracked work: ?? notes.txt"}.get(status, "")
     value = {
         "task": {"id": hash(ref) % 10**6, "ref": ref, "project": "ummanu", "sprint": "sprint:1484",
                  "state": "done", "claim": {"worker": f"{ref}-worker"}, "description": "d" * 3000},
