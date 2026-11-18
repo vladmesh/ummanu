@@ -12307,6 +12307,24 @@ class DispatcherLauncherTests(unittest.TestCase):
         # A profile that pins a model renders `--model`, which outranks the environment.
         self.assertEqual(pinned, ("fable", "profile"))
 
+    def test_claude_launch_model_reads_the_profile_settings_file(self) -> None:
+        """`claude_settings` is passed as `--settings`, which outranks the user and project files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Path(tmp) / "second.settings.json"
+            settings.write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
+            env = {
+                "CLAUDE_CONFIG_DIR": str(Path(tmp) / "empty"),
+                "CLAUDE_MANAGED_SETTINGS": str(Path(tmp) / "no-managed.json"),
+            }
+            with mock.patch.dict(os.environ, env):
+                os.environ.pop("ANTHROPIC_MODEL", None)
+                profile = {"adapter": "claude", "claude_settings": str(settings)}
+                from_settings = claude_launch_model(profile, workspace=tmp)
+                pinned = claude_launch_model({**profile, "model": "opus"}, workspace=tmp)
+
+        self.assertEqual(from_settings, ("sonnet", "profile_settings"))
+        self.assertEqual(pinned, ("opus", "profile"))
+
     def test_unknown_explicit_head_is_rejected_before_claim(self) -> None:
         catalog = object.__new__(InstanceCatalog)
         catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]

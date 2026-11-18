@@ -108,6 +108,28 @@ class ProviderFakeTests(unittest.TestCase):
         with mock.patch.object(resource_probe.subprocess, "run", return_value=ok) as run:
             self.assertTrue(resource_probe.probe_claude_sub().ok)
         self.assertEqual(run.call_args.args[0][:4], ["claude", "-p", "ping", "--model"])
+        self.assertNotIn("--settings", run.call_args.args[0])
+
+    def test_claude_sub_asks_through_a_profile_settings_file(self) -> None:
+        """A resource on another account probes through the same `--settings` its heads use."""
+        ok = subprocess.CompletedProcess([], 0, "pong", "")
+        with mock.patch.object(resource_probe.subprocess, "run", return_value=ok) as run:
+            code = resource_probe.main(
+                ["--resource", "claude-sub", "--claude-settings", "/srv/accounts/second.settings.json"]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(run.call_args.args[0][-2:], ["--settings", "/srv/accounts/second.settings.json"])
+
+    def test_a_settings_file_is_refused_off_claude_or_relative(self) -> None:
+        for argv in (
+            ["--resource", "openai-sub", "--claude-settings", "/srv/accounts/second.settings.json"],
+            ["--resource", "claude-sub", "--claude-settings", "second.settings.json"],
+        ):
+            with self.subTest(argv=argv), mock.patch.object(resource_probe.subprocess, "run") as run:
+                with contextlib.redirect_stderr(io.StringIO()) as err:
+                    self.assertEqual(resource_probe.main(argv), 2)
+                run.assert_not_called()
+                self.assertIn("--claude-settings", err.getvalue())
 
     def test_openai_sub_runs_codex_in_the_shared_home(self) -> None:
         failed = subprocess.CompletedProcess([], 1, "", "You've hit your usage limit")

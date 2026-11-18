@@ -16,6 +16,7 @@ from ummanu.runtime.codex_preflight import (
     ensure_codex_workspace_trusted as _preflight_codex_workspace,
     reject_symlinked_config as _reject_symlinked_config,
 )
+from ummanu.runtime.head.command import CLAUDE_SETTINGS_KEY
 from ummanu.runtime.paths import env_value
 from ummanu.runtime.role_env import (
     RoleEnvError,
@@ -92,6 +93,12 @@ def claude_launch_model(
     from_env = str(environ.get(CLAUDE_MODEL_ENV) or "").strip()
     if from_env:
         return from_env, f"env:{CLAUDE_MODEL_ENV}"
+    # `--settings` ranks above every settings file below it.
+    settings = profile.get(CLAUDE_SETTINGS_KEY)
+    if isinstance(settings, str) and settings:
+        model = _settings_model(Path(settings))
+        if model:
+            return model, "profile_settings"
     if workspace:
         for name, source in (
             ("settings.local.json", "project_settings_local"),

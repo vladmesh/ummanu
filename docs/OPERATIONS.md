@@ -270,6 +270,42 @@ rg -n 'po_memory|ummanu-memory-po-bridge' \
   DATA_DIR/codex-home/config.toml
 ```
 
+### Claude account per profile (`claude_settings`)
+
+Every `claude` profile draws on the login the `claude` CLI finds for the runtime user
+(`~/.claude/settings.json`, `CLAUDE_CODE_OAUTH_TOKEN`, `~/.claude/.credentials.json`). A profile that
+has to run on another Claude account names a settings file of its own:
+
+```toml
+[resources.claude-second]
+account = "claude-subscription-second"
+probe = "python3 -P -m ummanu.runtime.resource_probe --resource claude-sub --claude-settings /home/dev/ummanu-data/claude-accounts/second.settings.json"
+
+[profiles.claude-opus-high-second]
+resource = "claude-second"
+adapter = "claude"
+model = "opus"
+effort = "high"
+claude_settings = "/home/dev/ummanu-data/claude-accounts/second.settings.json"
+runtime = "local-pty"
+fallback = ["codex-terra-high"]
+```
+
+The head is launched with `claude --settings <file>`. Claude Code layers that file over the user's
+settings, so its keys win, and the file holds the account as
+`{"env": {"CLAUDE_CODE_OAUTH_TOKEN": "..."}}` (a `claude setup-token` value). The command line, the
+run record and the routing journal carry only the path; keep the file `0600`, owned by the runtime
+user, and outside the instance directory so the instance export never sees it. Everything else
+(skills, hooks, `~/.claude.json` trust, session transcripts under `~/.claude/projects`) stays the
+runtime user's, so vitality and usage readers need nothing new. The path must be absolute; a
+non-`claude` profile that sets it is refused when the registry loads.
+
+Give such a profile its own resource whose probe passes the same file with `--claude-settings`: the
+resource then turns red on that account's own limit, and the other account's resource is unaffected.
+Route work onto it by pinning the profile on a sprint (`sprint create --observer/--worker/--reviewer`)
+or a card; role defaults keep their profiles. Check a file before routing to it:
+`claude --settings FILE -p --model haiku "Reply only PONG" </dev/null`.
+
 ### Codex home (`CODEX_HOME`)
 
 Every Codex head launched by the dispatcher, and the `openai-sub` resource probe, runs with one
