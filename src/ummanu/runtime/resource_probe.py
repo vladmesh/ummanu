@@ -239,11 +239,18 @@ def _read_openrouter_key() -> str | None:
     return None
 
 
-def probe_claude_sub() -> ProbeResult:
+def probe_claude_sub(settings: str | None = None) -> ProbeResult:
     """One haiku token through the shared OAuth `claude` CLI: fails when the subscription is
-    rate-limited or the API is unreachable."""
+    rate-limited or the API is unreachable.
+
+    `settings` is a claude profile's `claude_settings` file: the probe then asks through the account
+    that file selects, the same `--settings` its heads are launched with.
+    """
+    command = ["claude", "-p", "ping", "--model", "haiku", "--dangerously-skip-permissions"]
+    if settings:
+        command += ["--settings", settings]
     result = _run_subprocess_probe(
-        ["claude", "-p", "ping", "--model", "haiku", "--dangerously-skip-permissions"],
+        command,
         "builtin:claude-sub",
         timeout_s=probe_timeout_s("claude-sub"),
     )
@@ -444,6 +451,10 @@ def main(argv: list[str] | None = None) -> int:
     """Run the named built-in resource probe: 0 healthy, 1 failed, 2 no such probe."""
     parser = argparse.ArgumentParser(prog="ummanu.runtime.resource_probe")
     parser.add_argument("--resource", required=True)
+    parser.add_argument(
+        "--claude-settings",
+        help="claude-sub only: the Claude settings file (another account) the probe asks through",
+    )
     args = parser.parse_args(argv)
     probe = BUILTIN_PROBES.get(args.resource)
     if probe is None:
@@ -452,7 +463,16 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    result = probe()
+    if args.claude_settings is not None:
+        if args.resource != "claude-sub" or not os.path.isabs(args.claude_settings):
+            print(
+                "health probe: --claude-settings takes an absolute path and only the claude-sub probe",
+                file=sys.stderr,
+            )
+            return 2
+        result = probe_claude_sub(args.claude_settings)
+    else:
+        result = probe()
     if not result.ok:
         print(format_probe_failure(args.resource, result), file=sys.stderr)
     elif result.warning:

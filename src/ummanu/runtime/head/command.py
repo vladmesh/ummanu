@@ -39,6 +39,8 @@ CODEX_EFFORTS = {
 }
 
 CLAUDE_EFFORTS = {"default", "low", "medium", "high", "xhigh", "max"}
+# A claude profile's own settings file, passed as `--settings` (another account, for one).
+CLAUDE_SETTINGS_KEY = "claude_settings"
 
 # Interactive adapters receive prompts through their live pane.
 PROMPT_AFTER_START_ADAPTERS = {"codex"}
@@ -103,6 +105,11 @@ def validate_launch_shape(profile_id: str, profile: Mapping[str, Any]) -> None:
             raise HeadCommandError(
                 f"profile {profile_id!r} has unknown claude effort {effort!r} (known: {known})"
             )
+        claude_settings_path(profile, profile_id)
+    elif CLAUDE_SETTINGS_KEY in profile:
+        raise HeadCommandError(
+            f"profile {profile_id!r} sets {CLAUDE_SETTINGS_KEY} but its adapter is {adapter!r}, not 'claude'"
+        )
     # Backend validity is independent of the CLI adapter.
     runtime = _named(profile.get("runtime", DEFAULT_HEAD_RUNTIME), f"profile {profile_id!r} runtime")
     if runtime not in HEAD_RUNTIMES:
@@ -117,6 +124,26 @@ def validate_launch_shape(profile_id: str, profile: Mapping[str, Any]) -> None:
         memory_limit_mib(profile.get("memory_limit_mib", DEFAULT_MEMORY_LIMIT_MIB), profile_id)
     except ValueError as exc:
         raise HeadCommandError(str(exc)) from None
+
+
+def claude_settings_path(profile: Mapping[str, Any], profile_id: str = "head") -> str | None:
+    """The profile's extra Claude Code settings file, or None when it names none.
+
+    `claude_settings` is layered over the user's settings with `claude --settings`, so the keys it
+    sets win over `~/.claude/settings.json`. Its use is to put a profile's heads on another Claude
+    account: `env.CLAUDE_CODE_OAUTH_TOKEN` in that file, kept 0600 by the operator, while the command
+    line carries only the path. Absolute, because a head runs in its workspace.
+    """
+    if CLAUDE_SETTINGS_KEY not in profile:
+        return None
+    value = profile[CLAUDE_SETTINGS_KEY]
+    if not isinstance(value, str) or not value.strip():
+        raise HeadCommandError(f"profile {profile_id!r} {CLAUDE_SETTINGS_KEY} must be a non-empty path")
+    if not os.path.isabs(value):
+        raise HeadCommandError(
+            f"profile {profile_id!r} {CLAUDE_SETTINGS_KEY} must be an absolute path, got {value!r}"
+        )
+    return value
 
 
 def _named(value: object, what: str) -> str:
@@ -305,6 +332,9 @@ def _render_claude(profile: Mapping[str, Any], *, prompt: str | None, workspace:
         "--mcp-config",
         memory,
     ]
+    settings = claude_settings_path(profile)
+    if settings:
+        args += ["--settings", settings]
     model = profile.get("model")
     if model:
         args += ["--model", str(model)]

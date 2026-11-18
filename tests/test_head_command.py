@@ -36,6 +36,7 @@ from ummanu.runtime.head import (
     STANDING_BINDING,
     HeadCommandError,
     render_head_command,
+    validate_launch_shape,
     with_pid_heartbeat,
     wrap_role_command,
 )
@@ -128,6 +129,34 @@ class ClaudeShapeTests(unittest.TestCase):
 
     def test_a_carried_prompt_leaves_nothing_to_deliver(self) -> None:
         self.assertFalse(render_head_command({"adapter": "claude"}, prompt="skill").prompt_after_start)
+
+    def test_a_profile_settings_file_is_layered_by_its_path(self) -> None:
+        """`claude_settings` puts a profile on another account: only the path is on the command line."""
+        profile = {
+            "adapter": "claude",
+            "model": "opus",
+            "effort": "high",
+            "claude_settings": "/srv/accounts/second.settings.json",
+        }
+        validate_launch_shape("claude-opus-high-second", profile)
+        self.assertEqual(
+            self.render(profile),
+            f"{CLAUDE_BASE} --settings /srv/accounts/second.settings.json --model opus --effort high",
+        )
+
+    def test_a_settings_path_that_is_not_absolute_is_refused(self) -> None:
+        for value in ("second.settings.json", "", "  ", 7):
+            with self.subTest(value=value):
+                profile = {"adapter": "claude", "claude_settings": value}
+                with self.assertRaisesRegex(HeadCommandError, "claude_settings must be"):
+                    validate_launch_shape("claude-second", profile)
+                with self.assertRaisesRegex(HeadCommandError, "claude_settings must be"):
+                    self.render(profile)
+
+    def test_a_settings_file_on_a_non_claude_profile_is_refused(self) -> None:
+        profile = {"adapter": "codex", "claude_settings": "/srv/accounts/second.settings.json"}
+        with self.assertRaisesRegex(HeadCommandError, "adapter is 'codex', not 'claude'"):
+            validate_launch_shape("codex-second", profile)
 
 
 class CodexShapeTests(unittest.TestCase):

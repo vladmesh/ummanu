@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from .command import (
     CLAUDE_EFFORTS,
+    CLAUDE_SETTINGS_KEY,
     CODEX_EFFORTS,
     CODEX_LAUNCH_MODES,
     CODEX_TUI_MODE,
@@ -22,6 +23,7 @@ from .command import (
     STANDING_BINDING,
     HeadCommand,
     HeadCommandError,
+    claude_settings_path,
     render_head_command,
     validate_launch_shape,
     with_pid_heartbeat,
@@ -84,6 +86,7 @@ from .task_ref import (
 
 __all__ = [
     "CLAUDE_EFFORTS",
+    "CLAUDE_SETTINGS_KEY",
     "CODEX_EFFORTS",
     "CODEX_LAUNCH_MODES",
     "CODEX_TUI_MODE",
@@ -139,6 +142,7 @@ __all__ = [
     "TaskRefError",
     "TurnLease",
     "TurnLeaseError",
+    "claude_settings_path",
     "head_spec",
     "load_head_specs",
     "new_run_id",
