@@ -46,10 +46,12 @@ from signal import NSIG
 from typing import IO, Any
 
 from ummanu._fsutil import write_text_atomic
-from ummanu.runtime.redact import in_head_sandbox
 from ummanu.runtime.role_env import dispatcher_workspace_namespace
 
 SCHEMA_VERSION = 1
+# Marks a process inside the head sandbox; must equal `ummanu.runtime.redact.HEAD_SANDBOX_ENV` (this
+# module stays in the cleanup journal's parser closure, which may not reach `ummanu.runtime.redact`).
+HEAD_SANDBOX_ENV = "UMMANU_HEAD_SANDBOX"
 RECEIPT_DIR_NAME = Path("state") / "checks"
 #: In a dispatcher workspace the receipt is the pipeline's own output, kept in its owned namespace.
 DISPATCHER_RECEIPT_DIR_NAME = Path("checks")
@@ -634,7 +636,7 @@ def _scratch_parent() -> str:
     TMPDIR). That dir is short too: with the scratch's own name a check's TMPDIR there is 51 bytes
     for uid 1000, leaving 56 of the 108-byte Unix socket path for the check's own names.
     """
-    if in_head_sandbox():
+    if os.environ.get(HEAD_SANDBOX_ENV) == "1":
         return os.environ.get("TMPDIR") or tempfile.gettempdir()
     return "/tmp"
 

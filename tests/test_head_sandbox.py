@@ -327,7 +327,10 @@ class LaunchStateTests(Layout):
     def test_the_child_marker_is_the_one_the_board_redaction_reads(self) -> None:
         from ummanu.runtime.redact import HEAD_SANDBOX_ENV, in_head_sandbox
 
+        from ummanu import broad_check
+
         self.assertEqual(sandbox.HEAD_SANDBOX_ENV, HEAD_SANDBOX_ENV)
+        self.assertEqual(broad_check.HEAD_SANDBOX_ENV, HEAD_SANDBOX_ENV)
         env = sandbox.child_environment({}, claude_home=None, tmp=self.root)
         self.assertTrue(in_head_sandbox(env))
 
