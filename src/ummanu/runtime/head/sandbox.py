@@ -120,6 +120,10 @@ DATA_READ = ("dispatcher/production-state.json", "dispatcher/cleanup")
 ALLOWED_SOCKETS = ("/run/systemd/resolve/io.systemd.Resolve",)
 # The memory service every head's MCP config names.
 MEMORY_PORT = 8077
+# A static binary resolves names through the loopback stub resolver rather than the varlink socket.
+DNS_PORT = 53
+# Addresses that are this host's or its neighbours' (containers, LAN): reachable only on allowed ports.
+SHARED_ADDRESS_SPACE = ipaddress.IPv4Network("100.64.0.0/10")
 # Variables that would point a head at the owner's account, agent or bus.
 STRIPPED_ENV = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "SSH_AUTH_SOCK",
                 "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "GPG_AGENT_INFO")
@@ -253,7 +257,7 @@ def build_policy(
     repo_read, repo_write = git_paths(workspace, git_store)
     read += repo_read
     write += repo_write
-    ports = {MEMORY_PORT, *loopback_ports}
+    ports = {MEMORY_PORT, DNS_PORT, *loopback_ports}
     instance = environ.get("UMMANU_INSTANCE", "").strip()
     if instance:
         read += [Path(instance) / name for name in INSTANCE_READ]
@@ -369,8 +373,11 @@ def _json(value: object) -> str:
 
 def _read_json(path: Path) -> dict:
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
+        return {}
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
         return {}
     try:
         with os.fdopen(fd, encoding="utf-8") as handle:
@@ -676,9 +683,14 @@ class Broker:
         return family != socket.AF_UNIX
 
     def is_local(self, host: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+        """Loopback, this host's addresses and private ranges, where containers and the LAN live."""
         if isinstance(host, ipaddress.IPv6Address) and host.ipv4_mapped is not None:
             host = host.ipv4_mapped
-        return host.is_loopback or host.is_unspecified or host in self.local
+        if isinstance(host, ipaddress.IPv4Address) and host in SHARED_ADDRESS_SPACE:
+            return True
+        return host.is_loopback or host.is_unspecified or host.is_private or host.is_link_local or (
+            host in self.local
+        )
 
     def loopback_allowed(self, port: int) -> bool:
         return port in self.policy.loopback_ports or port in sandbox_listening_ports(self.root_pid)

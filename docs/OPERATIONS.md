@@ -334,9 +334,9 @@ a worktree inside it.
 
 The broker performs each `connect()` itself, on a duplicate of the head's socket and from its own copy
 of the address, so the head cannot change the address after the check. It allows a Unix socket inside
-a write root (and systemd-resolved), loopback or this host's own addresses only on the board port, the
-memory service (8077) and listeners the head opened itself, and any other network address (GitHub,
-Anthropic). TCP Fast Open sends and io_uring are refused.
+a write root (and systemd-resolved). Loopback, this host's own addresses and private, link-local and
+shared ranges (containers, the LAN) are reachable only on the board port, the memory service (8077),
+DNS (53) and listeners the head opened itself; any public address is reachable (GitHub, Anthropic). TCP Fast Open sends and io_uring are refused.
 
 Claude Code runs with `CLAUDE_CONFIG_DIR=~/.local/state/ummanu/head-sandbox/claude/<digest>`, one per
 workspace: settings, trust, `~/.claude/CLAUDE.md` and the skills the product and installation

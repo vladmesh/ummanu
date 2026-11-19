@@ -118,7 +118,7 @@ class PolicyTests(Layout):
         self.assertIn(self.instance / "heads", policy.read)
         self.assertIn(self.instance / "board-store.env", policy.read)
         self.assertFalse(any(self.instance.is_relative_to(root) for root in policy.read))
-        self.assertEqual(policy.loopback_ports, {5432, sandbox.MEMORY_PORT})
+        self.assertEqual(policy.loopback_ports, {5432, sandbox.MEMORY_PORT, sandbox.DNS_PORT})
 
     def test_the_board_locks_are_the_only_data_directory_writes(self) -> None:
         sandbox.prepare_data_locks(self.data)
@@ -171,6 +171,10 @@ class BrokerTests(unittest.TestCase):
             self.assertFalse(self.broker.permits(inet_address("10.1.2.3", 8787), "/"))
             self.assertFalse(self.broker.permits(inet6_address("2001:db8::7", 8787), "/"))
             self.assertTrue(self.broker.permits(inet_address("10.1.2.3", 5432), "/"))
+            for host in ("172.17.0.2", "192.168.1.10", "100.64.0.1", "169.254.169.254"):
+                with self.subTest(host=host):
+                    self.assertFalse(self.broker.permits(inet_address(host, 5555), "/"))
+            self.assertFalse(self.broker.permits(inet6_address("fd00::2", 5555), "/"))
             self.assertTrue(self.broker.permits(inet_address("140.82.112.3", 443), "/"))
             self.assertTrue(self.broker.permits(inet6_address("2606:4700::6810:84e5", 443), "/"))
 
@@ -271,6 +275,14 @@ class LaunchStateTests(Layout):
                 self.assertFalse((claude_home / name).is_symlink())
         self.assertNotIn("owner", (claude_home / ".claude.json").read_text(encoding="utf-8"))
         self.assertEqual(sorted(path.name for path in (self.home / "secrets").iterdir()), ["credentials.json", "victim"])
+
+    def test_a_fifo_left_at_the_claude_state_does_not_stall_the_launch(self) -> None:
+        claude_home = self.root / "state" / "claude"
+        claude_home.mkdir(parents=True)
+        os.mkfifo(claude_home / ".claude.json")
+        sandbox.prepare_claude_home(claude_home, self.workspace, home=self.home, skills=[])
+        state = json.loads((claude_home / ".claude.json").read_text(encoding="utf-8"))
+        self.assertTrue(state["projects"][str(self.workspace)]["hasTrustDialogAccepted"])
 
     def test_role_skills_come_from_the_product_and_installation_manifests(self) -> None:
         (self.product / "skills").mkdir()
