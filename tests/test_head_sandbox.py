@@ -159,9 +159,12 @@ class LaunchStateTests(Layout):
                 "UMMANU_MEMORY_ACCESS_TOKEN": "m",
                 "TMPDIR": str(self.root / "tmp"),
                 "XDG_CACHE_HOME": str(self.root / "tmp" / "cache"),
+                "GIT_CONFIG_GLOBAL": os.devnull,
                 "CLAUDE_CONFIG_DIR": str(self.root / "claude"),
             },
         )
+        named = sandbox.child_environment({"GIT_CONFIG_GLOBAL": "/srv/gitconfig"}, claude_home=None, tmp=self.root)
+        self.assertEqual(named["GIT_CONFIG_GLOBAL"], "/srv/gitconfig")
 
     def test_the_claude_home_holds_trust_rules_skills_and_the_shared_transcripts(self) -> None:
         (self.home / ".claude").mkdir()

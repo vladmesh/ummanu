@@ -564,6 +564,8 @@ def child_environment(environ: Mapping[str, str], *, claude_home: Path | None, t
     env = {key: value for key, value in environ.items() if key not in STRIPPED_ENV}
     env["TMPDIR"] = str(tmp)
     env["XDG_CACHE_HOME"] = str(tmp / "cache")
+    # `~/.gitconfig` is out of reach and git refuses an unreadable one; role env names its own.
+    env.setdefault("GIT_CONFIG_GLOBAL", os.devnull)
     if claude_home is not None:
         env["CLAUDE_CONFIG_DIR"] = str(claude_home)
     return env
