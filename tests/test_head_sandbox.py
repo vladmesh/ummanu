@@ -379,6 +379,31 @@ class KernelConfinementTests(Layout):
         result = self.launch(f"/usr/bin/python3 -I -c {shlex.quote(probe)} {outside.getsockname()[1]}")
         self.assertEqual(result.stdout.split(), ["PermissionError", "ok", "OSError"], result.stderr)
 
+    def test_a_connect_from_a_second_thread_is_brokered(self) -> None:
+        outside = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(outside.close)
+        outside.bind(str(self.home / "secrets" / "s"))
+        outside.listen()
+        probe = (
+            "import socket,sys,threading\n"
+            "results = []\n"
+            "def attempt(path):\n"
+            "    s = socket.socket(socket.AF_UNIX)\n"
+            "    try:\n"
+            "        s.connect(path); results.append('ok')\n"
+            "    except OSError as exc:\n"
+            "        results.append(exc.__class__.__name__)\n"
+            "inside = sys.argv[2] + '/t'\n"
+            "listener = socket.socket(socket.AF_UNIX); listener.bind(inside); listener.listen()\n"
+            "for path in (sys.argv[1], inside):\n"
+            "    worker = threading.Thread(target=attempt, args=(path,)); worker.start(); worker.join()\n"
+            "print(*results)\n"
+        )
+        result = self.launch(
+            f"/usr/bin/python3 -I -c {shlex.quote(probe)} {self.home}/secrets/s {self.workspace}"
+        )
+        self.assertEqual(result.stdout.split(), ["PermissionError", "ok"], result.stderr)
+
     def test_a_home_wide_workspace_never_starts(self) -> None:
         result = subprocess.run(
             [sys.executable, "-I", str(LAUNCHER), "--workspace", str(self.home),

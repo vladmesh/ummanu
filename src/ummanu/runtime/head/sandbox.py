@@ -651,7 +651,8 @@ class Broker:
             os.close(handle)
 
     def connect_as(self, notif_id: int, pid: int, fd: int, raw: bytes) -> int:
-        pidfd = os.pidfd_open(pid)
+        # The notification names the calling thread; a pidfd names its process, which owns the fds.
+        pidfd = os.pidfd_open(thread_group(pid))
         try:
             duplicate = _syscall(_arch().pidfd_getfd, ctypes.c_int(pidfd), ctypes.c_int(fd), ctypes.c_uint(0))
         finally:
@@ -694,6 +695,14 @@ class Broker:
 
     def loopback_allowed(self, port: int) -> bool:
         return port in self.policy.loopback_ports or port in sandbox_listening_ports(self.root_pid)
+
+
+def thread_group(tid: int) -> int:
+    """The process a thread belongs to (`Tgid` in its status)."""
+    for line in Path(f"/proc/{tid}/status").read_text(encoding="ascii").splitlines():
+        if line.startswith("Tgid:"):
+            return int(line.split()[1])
+    raise OSError(errno.ESRCH, f"thread {tid} has no thread group")
 
 
 def local_addresses() -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
