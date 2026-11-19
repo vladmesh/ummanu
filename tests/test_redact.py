@@ -8,6 +8,7 @@ being masked and, just as important, what must not be: a git sha in a CI-failure
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -199,21 +200,32 @@ class HeadSandboxRedactionTests(unittest.TestCase):
             ):
                 redact("text", env_files=[env])
 
+    @unittest.skipIf(os.geteuid() == 0, "root reads a 0000 directory")
     def test_board_redaction_values_inside_and_outside_the_sandbox(self):
         from types import SimpleNamespace
 
-        from ummanu.tasks import TaskError, TaskWriter
+        from ummanu.tasks import TaskWriter
 
         with tempfile.TemporaryDirectory() as tmpdir:
             instance = Path(tmpdir)
-            (instance / "secrets" / "values").mkdir(parents=True)
+            values = instance / "secrets" / "values"
+            values.mkdir(parents=True)
             writer = SimpleNamespace(instance_dir=instance, _redaction_cache=None)
-            with mock.patch.object(Path, "iterdir", side_effect=PermissionError(13, "denied")):
+            values.chmod(0)
+            try:
                 with mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": "1"}):
                     self.assertEqual(TaskWriter._redaction_values(writer), ())
-                with mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": ""}), self.assertRaises(TaskError):
+                # Unmarked, a store it cannot list is still an error, never an empty redaction.
+                with mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": ""}), self.assertRaises(PermissionError):
                     TaskWriter._redaction_values(writer)
-
+            finally:
+                values.chmod(0o700)
+            # Marked but able to list the store: it is read as always.
+            with (
+                mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": "1"}),
+                mock.patch("ummanu.secret_store.redaction_values", return_value=("store-secret-value",)),
+            ):
+                self.assertEqual(TaskWriter._redaction_values(writer), ("store-secret-value",))
 
 if __name__ == "__main__":
     unittest.main()

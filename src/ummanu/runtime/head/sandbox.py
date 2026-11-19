@@ -11,7 +11,8 @@ refuses the launch; nothing ever runs unconfined.
 What a head reads: the system, its toolchain, the product checkout, its workspace and the git store
 the workspace belongs to, the installation's configuration, and the roots its profile names. What
 it writes: the workspace, its own Claude config dir and temp dir, the cargo caches, its transcript
-directory and the board's lock files. The rest of the home (other projects, agent profiles, other
+directory, the board's lock files and what its role needs (a worker or reviewer: its own card's task
+documents and report/verdict bodies; an observer: the sprint reservation index). The rest of the home (other projects, agent profiles, other
 transcripts, installation state) is refused by the kernel.
 """
 
@@ -27,6 +28,7 @@ import ipaddress
 import json
 import os
 import platform
+import re
 import select
 import shutil
 import signal
@@ -113,11 +115,18 @@ INSTANCE_READ = ("instance.yaml", "board-store.env", "heads", "projects", "skill
 # The board CLI's lock files and journals beneath the data directory (made before the ruleset).
 DATA_WRITE_FILES = ("board/.create.lock", "board/.audit.lock", "dispatcher/board-bulk.lock",
                     "dispatcher/cleanup.lock")
-# `artifacts/bodies` holds the report/verdict body files the dispatcher names for a head; they are
-# board text, which a head reads through the board anyway.
 DATA_WRITE_DIRS = ("board/assessment-decisions", "board/sql-sprint-locks", "board/product-issue-transactions",
-                   "dispatcher/effects", "dispatcher/admission", "dispatcher/lifecycle", "artifacts/bodies")
-PRIVATE_DATA_DIRS = ("artifacts/bodies",)
+                   "dispatcher/effects", "dispatcher/admission", "dispatcher/lifecycle")
+# Per role, from the role env the trusted launch command bound (`BOARD_ROLE`, `UMMANU_HEAD_CARD`): a
+# worker or reviewer reads its own card's task documents and writes its own card's report/verdict
+# bodies (`dispatch.host_runtime.packets`), never another card's; an observer writes the sprint
+# reservation index and its locks, which `sprint resume` and `task move` update.
+ROLE_ENV = "BOARD_ROLE"
+CARD_ENV = "UMMANU_HEAD_CARD"
+CARD_ROLES = ("worker", "reviewer")
+CARD_READ = "artifacts/prompts"
+CARD_WRITE = "artifacts/bodies"
+OBSERVER_WRITE_DIRS = ("sprints",)
 # A rule binds the inode, and the dispatcher replaces its state files atomically, so its directory is
 # the read root: `ummanu sprint status` and `task show` read the production state from there.
 DATA_READ = ("dispatcher", "data-manifest.json")
@@ -254,7 +263,8 @@ def build_policy(
 ) -> Policy:
     """The roots one head may read and write; missing paths are dropped, nothing else is reachable.
 
-    `private` are the sandbox's own writable directories (its Claude config dir and temp dir).
+    `private` are the sandbox's own writable directories (its Claude config dir and temp dir) and its
+    role's (`role_paths`).
     """
     read = [Path(p) for p in SYSTEM_READ]
     read += [home / p for p in HOME_READ]
@@ -288,13 +298,47 @@ def build_policy(
 def prepare_data_locks(data_dir: Path) -> None:
     """Create the board's lock files and directories the confined head cannot create itself."""
     for name in DATA_WRITE_DIRS:
-        # The body directory is private to this user (`dispatch.host_runtime.packets._private_body_dir`).
-        (data_dir / name).mkdir(mode=0o700 if name in PRIVATE_DATA_DIRS else 0o777, parents=True, exist_ok=True)
+        (data_dir / name).mkdir(parents=True, exist_ok=True)
     for name in DATA_WRITE_FILES:
         path = data_dir / name
         path.parent.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(FileExistsError):
             os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644))
+
+
+def card_token(reference: str) -> str:
+    """A card's directory name under the artifacts roots (`dispatch.state.request_token`)."""
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", reference).strip("-") or "empty"
+
+
+def role_paths(data_dir: Path, environ: Mapping[str, str]) -> tuple[list[Path], list[Path]]:
+    """Extra read and write roots of this head's role, made private (0700) before the ruleset."""
+    role = environ.get(ROLE_ENV, "").strip()
+    card = environ.get(CARD_ENV, "").strip()
+    if role in CARD_ROLES and card:
+        token = card_token(card)
+        if token in (".", ".."):
+            raise SandboxError(f"card {card!r} names no directory of its own")
+        read, write = data_dir / CARD_READ / token, data_dir / CARD_WRITE / token
+        for path in (read.parent, read, write.parent, write):
+            _owned_private_dir(path)
+        return [read], [write]
+    if role == "observer":
+        for name in OBSERVER_WRITE_DIRS:
+            (data_dir / name).mkdir(parents=True, exist_ok=True)
+        return [], [data_dir / name for name in OBSERVER_WRITE_DIRS]
+    return [], []
+
+
+def _owned_private_dir(path: Path) -> None:
+    """`path` as a 0700 directory of this user; anything else there refuses the launch."""
+    with contextlib.suppress(FileExistsError):
+        path.mkdir(mode=0o700, parents=True)
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise SandboxError(f"{path} is not a directory of this user")
+    if info.st_mode & 0o077:
+        os.chmod(path, 0o700)
 
 
 def installation_data_dir(instance: str) -> Path | None:
@@ -912,6 +956,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if data_dir is not None:
             data_dir = data_dir.resolve()
             prepare_data_locks(data_dir)
+            role_read, role_write = role_paths(data_dir, os.environ)
+            args.read += role_read
+            private += role_write
         policy = build_policy(
             workspace, home=home, environ=os.environ, product_root=product_root, private=private,
             data_dir=data_dir, git_store=trusted_git_store(workspace, data_dir=data_dir, instance=instance),

@@ -329,7 +329,18 @@ installation's configuration (`instance.yaml`, `board-store.env`, `heads`, `proj
 roots (a single file there is bound to its inode: a file its owner replaces by renaming over it is
 refused from then on, so name its directory instead). It writes its workspace, that store's objects, refs and its own worktree admin dir, the cargo
 caches, its own transcript directory, a private `/tmp/ummanu-sandbox-<uid>/<digest>` (its `TMPDIR`)
-and the board's lock files. Everything else in the home is refused by the kernel. The git store is
+and the board's lock files. Its role, bound by the launch command (`BOARD_ROLE`, and for a worker or
+reviewer `UMMANU_HEAD_CARD`), adds only what that role's board commands write: a worker or reviewer
+reads its own card's `DATA_DIR/artifacts/prompts/<card>/` and writes its own card's
+`DATA_DIR/artifacts/bodies/<card>/` (both kept `0700`; other cards' prompts and bodies stay refused), an
+observer writes `DATA_DIR/sprints/` (the reserved-project index and its locks, which `task move` and
+`sprint resume` update). Everything else in the home is refused by the kernel.
+
+The board commands scrub secrets before they write, and the head can read neither the secret store
+nor `runtime.env`. The launcher marks its child `UMMANU_HEAD_SANDBOX=1`; in a marked process a secret
+store or env file the kernel refuses is skipped, and the sensitive-named values of the process's own
+environment are scrubbed instead (a value the head cannot read cannot reach its text). Outside the
+sandbox, or when the store can be read, it is read as always and a refusal stays an error. The git store is
 the `repo` of `projects/<project>.yaml` for a workspace under `DATA_DIR/workspaces/<project>/`, or
 the observer repository for `DATA_DIR/workspaces/observers/`; the head's own `.git` pointer only picks
 a worktree inside it.
@@ -2450,8 +2461,9 @@ The stall settings are read at check time; garbage or zero falls back to the def
 ### Reports and verdicts
 
 Heads write bodies to `ummanu-report-<ref>-<round>.md` and `ummanu-verdict-<ref>-<round>.md` in
-`<data_dir>/artifacts/bodies/` (or `UMMANU_DISPATCHER_BODY_DIR` when set), a directory the dispatcher
-keeps at mode 0700 and refuses when another user owns it; files are left in place. `task report` and
+`<data_dir>/artifacts/bodies/<ref>/` (or `UMMANU_DISPATCHER_BODY_DIR/<ref>/` when set), one directory per
+card so a sandboxed head is given its own card's bodies only; the dispatcher keeps it and the root above
+it at mode 0700 and refuses when another user owns it; files are left in place. `task report` and
 `task verdict` read `--body-file` only as a regular file the caller owns, never through a symbolic link;
 anything else is refused with `unsafe_body_file` and exit code 2. The round is part of the verdict request id.
 

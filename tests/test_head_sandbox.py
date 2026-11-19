@@ -126,13 +126,61 @@ class PolicyTests(Layout):
         expected = {self.data / name for name in (*sandbox.DATA_WRITE_FILES, *sandbox.DATA_WRITE_DIRS)}
         written = {path for path in policy.write if path.is_relative_to(self.data / "board")}
         written |= {path for path in policy.write if path.is_relative_to(self.data / "dispatcher")}
-        written |= {path for path in policy.write if path.is_relative_to(self.data / "artifacts")}
         self.assertEqual(written, expected)
         self.assertTrue(all(path.exists() for path in expected))
-        # The report/verdict body directory the dispatcher names for a head is writable and private.
-        bodies = self.data / "artifacts" / "bodies"
-        self.assertIn(bodies, policy.write)
-        self.assertEqual(bodies.stat().st_mode & 0o777, 0o700)
+        self.assertFalse(any(path.is_relative_to(self.data / "artifacts") for path in (*policy.read, *policy.write)))
+        self.assertFalse(any(path.is_relative_to(self.data / "sprints") for path in policy.write))
+
+    def test_a_card_head_gets_its_own_card_s_prompts_and_bodies_and_nothing_else(self) -> None:
+        for role in sandbox.CARD_ROLES:
+            with self.subTest(role=role):
+                read, write = sandbox.role_paths(self.data, {"BOARD_ROLE": role, "UMMANU_HEAD_CARD": "app-7"})
+                prompts = self.data / "artifacts" / "prompts" / "app-7"
+                bodies = self.data / "artifacts" / "bodies" / "app-7"
+                self.assertEqual((read, write), ([prompts], [bodies]))
+                for path in (prompts, prompts.parent, bodies, bodies.parent):
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o700, path)
+                policy = self.policy(data_dir=self.data, private=write, extra_read=read)
+                self.assertIn(bodies, policy.write)
+                self.assertIn(prompts, policy.read)
+                self.assertNotIn(bodies.parent, (*policy.read, *policy.write))
+                self.assertNotIn(prompts.parent, (*policy.read, *policy.write))
+
+    def test_role_paths_follow_the_bound_role(self) -> None:
+        sprints = self.data / "sprints"
+        self.assertEqual(sandbox.role_paths(self.data, {"BOARD_ROLE": "observer"}), ([], [sprints]))
+        self.assertTrue(sprints.is_dir())
+        # The card binding counts only for a card role; a card role without it gets no artifacts.
+        self.assertEqual(
+            sandbox.role_paths(self.data, {"BOARD_ROLE": "observer", "UMMANU_HEAD_CARD": "app-7"}), ([], [sprints])
+        )
+        for environ in ({"BOARD_ROLE": "worker"}, {"BOARD_ROLE": "steward", "UMMANU_HEAD_CARD": "app-7"},
+                        {"UMMANU_HEAD_CARD": "app-7"}, {}):
+            with self.subTest(environ=environ):
+                self.assertEqual(sandbox.role_paths(self.data, environ), ([], []))
+        self.assertFalse((self.data / "artifacts").exists())
+
+    def test_the_card_directory_name_is_the_dispatcher_s(self) -> None:
+        from ummanu.dispatch.host_runtime.packets import _body_file_path
+        from ummanu.dispatch.state import request_token
+
+        for ref in ("ulei-68", "app/7 x", "../up", "", "a..b"):
+            with self.subTest(ref=ref), mock.patch.dict(os.environ, {"UMMANU_DISPATCHER_BODY_DIR": ""}):
+                self.assertEqual(sandbox.card_token(ref), request_token(ref))
+                body = Path(_body_file_path(self.data, "verdict", ref, 3))
+                self.assertEqual(body.parent, self.data / "artifacts" / "bodies" / sandbox.card_token(ref))
+                self.assertNotIn("..", body.relative_to(self.data).parts)
+
+    def test_a_card_that_names_a_parent_directory_refuses_the_launch(self) -> None:
+        for card in ("..", "."):
+            with self.subTest(card=card), self.assertRaises(sandbox.SandboxError):
+                sandbox.role_paths(self.data, {"BOARD_ROLE": "worker", "UMMANU_HEAD_CARD": card})
+
+    def test_a_planted_link_at_the_card_s_body_directory_refuses_the_launch(self) -> None:
+        (self.data / "artifacts" / "bodies").mkdir(parents=True)
+        (self.data / "artifacts" / "bodies" / "app-7").symlink_to(self.home / "secrets")
+        with self.assertRaises(sandbox.SandboxError):
+            sandbox.role_paths(self.data, {"BOARD_ROLE": "reviewer", "UMMANU_HEAD_CARD": "app-7"})
 
     def test_the_dispatcher_state_stays_readable_after_it_is_replaced(self) -> None:
         state = self.data / "dispatcher" / "production-state.json"
@@ -355,6 +403,40 @@ class KernelConfinementTests(Layout):
         self.assertNotIn("main checkout", result.stdout)
         self.assertEqual(result.stderr.count("Permission denied"), 4, result.stderr)
         self.assertFalse((self.home / "planted").exists())
+
+    def test_a_reviewer_writes_its_own_verdict_body_and_reads_no_other_card_s(self) -> None:
+        bodies = self.data / "artifacts" / "bodies"
+        prompts = self.data / "artifacts" / "prompts"
+        (bodies / "app-8").mkdir(parents=True)
+        (bodies / "app-8" / "ummanu-report-app-8-1.md").write_text("other card\n", encoding="utf-8")
+        (prompts / "app-7").mkdir(parents=True)
+        (prompts / "app-7" / "review-1.md").write_text("own prompt\n", encoding="utf-8")
+        (prompts / "app-8").mkdir()
+        (prompts / "app-8" / "review-1.md").write_text("other prompt\n", encoding="utf-8")
+        own = bodies / "app-7" / "ummanu-verdict-app-7-1.md"
+        script = (
+            f"cat {prompts}/app-7/review-1.md; echo green > {own}.tmp && mv {own}.tmp {own} && cat {own}; "
+            f"cat {bodies}/app-8/ummanu-report-app-8-1.md; cat {prompts}/app-8/review-1.md; ls {bodies}; "
+            f"echo x > {bodies}/planted; exit 7"
+        )
+        launcher = (
+            "import os, sys\n"
+            f"sys.path.insert(0, {str(REPO_ROOT / 'src')!r})\n"
+            "from pathlib import Path\n"
+            "from ummanu.runtime.head import sandbox\n"
+            f"data = Path({str(self.data)!r})\n"
+            "read, write = sandbox.role_paths(data, {'BOARD_ROLE': 'reviewer', 'UMMANU_HEAD_CARD': 'app-7'})\n"
+            f"policy = sandbox.build_policy(Path({str(self.workspace)!r}), home=Path({str(self.home)!r}),\n"
+            f"    environ={{}}, product_root=Path({str(self.product)!r}), private=write, extra_read=read)\n"
+            f"sys.exit(sandbox.run(['/bin/sh', '-c', {script!r}], policy, {{'PATH': '/usr/bin:/bin'}}))\n"
+        )
+        result = subprocess.run([sys.executable, "-I", "-c", launcher], capture_output=True, text=True,
+                                timeout=60, check=False)
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertEqual(result.stdout, "own prompt\ngreen\n")
+        self.assertEqual(own.read_text(encoding="utf-8"), "green\n")
+        self.assertEqual(result.stderr.count("Permission denied"), 4, result.stderr)
+        self.assertFalse((bodies / "planted").exists())
 
     def test_a_unix_socket_outside_the_sandbox_is_refused(self) -> None:
         outside = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

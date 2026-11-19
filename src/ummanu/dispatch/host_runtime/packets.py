@@ -107,27 +107,31 @@ def _gate_attestation_for_prompt(
 
 def _body_file_path(data_dir: Path, kind: str, reference: str, review_round: int) -> str:
     """Where a head writes its report/verdict body: a directory private to this user, never the
-    shared `/tmp`, where another account could plant the predictable name first."""
+    shared `/tmp`, where another account could plant the predictable name first. Each card has its
+    own subdirectory, so a sandboxed head is given its card's bodies and no other card's."""
     override = os.environ.get("UMMANU_DISPATCHER_BODY_DIR", "").rstrip("/")
     root = override or str(Path(data_dir) / "artifacts" / "bodies")
-    return f"{root}/ummanu-{kind}-{_request_token(reference)}-{_request_token(str(review_round))}.md"
+    token = _request_token(reference)
+    return f"{root}/{token}/ummanu-{kind}-{token}-{_request_token(str(review_round))}.md"
 
 def _private_body_dir(directory: Path) -> None:
     """Create the body directory 0700, or take an existing one only when this user owns it.
 
     The head writes the body file itself (its editing tool refuses to overwrite a file it has not
     read, which is why the dispatcher clears it before launch), so the privacy lives on the
-    directory: nobody else can create, replace or read a name inside it.
+    directory: nobody else can create, replace or read a name inside it. The card's directory and
+    the bodies root above it are both held to that.
     """
-    try:
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        info = directory.lstat()
-        if not S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
-            raise HostError(f"report body directory {directory} is not a directory this user owns")
-        if S_IMODE(info.st_mode) & 0o077:
-            os.chmod(directory, 0o700)
-    except OSError as exc:
-        raise HostError(f"report body directory {directory} could not be made private: {exc}") from None
+    for path in (directory.parent, directory):
+        try:
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            info = path.lstat()
+            if not S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+                raise HostError(f"report body directory {path} is not a directory this user owns")
+            if S_IMODE(info.st_mode) & 0o077:
+                os.chmod(path, 0o700)
+        except OSError as exc:
+            raise HostError(f"report body directory {path} could not be made private: {exc}") from None
 
 def _no_candidate_review_subject(task: dict[str, Any]) -> list[str]:
     """What a reviewer of a research/infra card reviews, in place of a branch and its commits."""

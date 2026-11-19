@@ -33,6 +33,23 @@ def in_head_sandbox(environ: Mapping[str, str] | None = None) -> bool:
     return (os.environ if environ is None else environ).get(HEAD_SANDBOX_ENV) == "1"
 
 
+def secret_store_refused(values_dir: Path) -> bool:
+    """Whether this sandboxed process is refused the secret store's `values/` directory by the kernel.
+
+    Only then may board redaction go without the store; outside the sandbox, or when the store can be
+    listed, it is read as always and any failure stays an error.
+    """
+    if not in_head_sandbox():
+        return False
+    try:
+        os.listdir(values_dir)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def environment_values(environ: Mapping[str, str] | None = None) -> list[str]:
     """The sensitive-named values of a process environment: what a confined head can know."""
     source = os.environ if environ is None else environ

@@ -137,7 +137,7 @@ from ummanu.kernel.capacity_policy import (
 from ummanu.kernel.errors import TaskError as TaskError
 from ummanu.kernel.identifiers import is_machine_id, machine_id_refusal
 from ummanu.projects.integration_base import integration_base_refusal, seed_ref_refusal
-from ummanu.runtime.redact import in_head_sandbox, redact
+from ummanu.runtime.redact import redact, secret_store_refused
 from ummanu.runtime.references import (
     reference_allocation_lock,
 )
@@ -679,16 +679,10 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         root = self.instance_dir / "secrets"
         paths = [root / "catalog.yaml", root / "installation.key"]
         values_dir = root / "values"
-        try:
-            if values_dir.is_dir():
-                paths.extend(sorted(path for path in values_dir.iterdir() if path.is_file()))
-        except PermissionError:
-            # A sandboxed head cannot read the store; `redact` scrubs its own environment instead.
-            if in_head_sandbox():
-                return ()
-            raise TaskError(
-                "backend_unavailable", f"board redaction configuration is unavailable: {values_dir}", 1
-            ) from None
+        if secret_store_refused(values_dir):
+            return ()  # a confined head can neither read nor leak the store; `redact` scrubs its env
+        if values_dir.is_dir():
+            paths.extend(sorted(path for path in values_dir.iterdir() if path.is_file()))
         fingerprint: list[tuple[str, int, int, int]] = []
         for path in paths:
             try:
@@ -704,12 +698,6 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
 
         try:
             values = redaction_values(self.instance_dir)
-        except PermissionError:
-            if in_head_sandbox():
-                return ()
-            raise TaskError(
-                "backend_unavailable", "board redaction configuration is unavailable: the secret store is unreadable", 1
-            ) from None
         except SecretStoreError as exc:
             raise TaskError(
                 "backend_unavailable", f"board redaction configuration is unavailable: {exc}", 1
