@@ -126,8 +126,13 @@ class PolicyTests(Layout):
         expected = {self.data / name for name in (*sandbox.DATA_WRITE_FILES, *sandbox.DATA_WRITE_DIRS)}
         written = {path for path in policy.write if path.is_relative_to(self.data / "board")}
         written |= {path for path in policy.write if path.is_relative_to(self.data / "dispatcher")}
+        written |= {path for path in policy.write if path.is_relative_to(self.data / "artifacts")}
         self.assertEqual(written, expected)
         self.assertTrue(all(path.exists() for path in expected))
+        # The report/verdict body directory the dispatcher names for a head is writable and private.
+        bodies = self.data / "artifacts" / "bodies"
+        self.assertIn(bodies, policy.write)
+        self.assertEqual(bodies.stat().st_mode & 0o777, 0o700)
 
     def test_the_dispatcher_state_stays_readable_after_it_is_replaced(self) -> None:
         state = self.data / "dispatcher" / "production-state.json"
@@ -239,6 +244,7 @@ class LaunchStateTests(Layout):
             {
                 "UMMANU_MEMORY_ACCESS_TOKEN": "m",
                 "TMPDIR": str(self.root / "tmp"),
+                "UMMANU_HEAD_SANDBOX": "1",
                 "XDG_CACHE_HOME": str(self.root / "tmp" / "cache"),
                 "GIT_CONFIG_GLOBAL": os.devnull,
                 "CLAUDE_CONFIG_DIR": str(self.root / "claude"),
@@ -246,6 +252,13 @@ class LaunchStateTests(Layout):
         )
         named = sandbox.child_environment({"GIT_CONFIG_GLOBAL": "/srv/gitconfig"}, claude_home=None, tmp=self.root)
         self.assertEqual(named["GIT_CONFIG_GLOBAL"], "/srv/gitconfig")
+
+    def test_the_child_marker_is_the_one_the_board_redaction_reads(self) -> None:
+        from ummanu.runtime.redact import HEAD_SANDBOX_ENV, in_head_sandbox
+
+        self.assertEqual(sandbox.HEAD_SANDBOX_ENV, HEAD_SANDBOX_ENV)
+        env = sandbox.child_environment({}, claude_home=None, tmp=self.root)
+        self.assertTrue(in_head_sandbox(env))
 
     def test_the_claude_home_holds_trust_rules_skills_and_the_shared_transcripts(self) -> None:
         (self.home / ".claude").mkdir()

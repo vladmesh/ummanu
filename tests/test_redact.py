@@ -167,5 +167,53 @@ class ScrubSecretsTests(unittest.TestCase):
             self.assertEqual(redact(f"board is {url}", env_files=[runtime]), f"board is {REDACTED}:env-value")
 
 
+class HeadSandboxRedactionTests(unittest.TestCase):
+    """A confined head (ummanu#887) cannot read the store or the env files; the kernel refuses them."""
+
+    def _refused(self, root: Path) -> Path:
+        env = root / "runtime.env"
+        env.write_text("SERVICE_TOKEN=unreadable-secret-value\n", encoding="utf-8")
+        return env
+
+    def test_inside_the_sandbox_a_refused_env_file_is_skipped_and_the_own_environment_scrubbed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = self._refused(Path(tmpdir))
+            environ = {"UMMANU_HEAD_SANDBOX": "1", "UMMANU_MEMORY_ACCESS_TOKEN": "visible-head-token-value"}
+            with (
+                mock.patch.dict("os.environ", environ),
+                mock.patch("ummanu.runtime.redact.DEFAULT_ENV_FILES", []),
+                mock.patch.object(Path, "read_bytes", side_effect=PermissionError(13, "denied")),
+            ):
+                output = redact("token visible-head-token-value here", env_files=[env])
+
+        self.assertEqual(output, f"token {REDACTED}:env-value here")
+
+    def test_outside_the_sandbox_a_refused_env_file_still_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = self._refused(Path(tmpdir))
+            with (
+                mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": ""}),
+                mock.patch("ummanu.runtime.redact.DEFAULT_ENV_FILES", []),
+                mock.patch.object(Path, "read_bytes", side_effect=PermissionError(13, "denied")),
+                self.assertRaises(PermissionError),
+            ):
+                redact("text", env_files=[env])
+
+    def test_board_redaction_values_inside_and_outside_the_sandbox(self):
+        from types import SimpleNamespace
+
+        from ummanu.tasks import TaskError, TaskWriter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir)
+            (instance / "secrets" / "values").mkdir(parents=True)
+            writer = SimpleNamespace(instance_dir=instance, _redaction_cache=None)
+            with mock.patch.object(Path, "iterdir", side_effect=PermissionError(13, "denied")):
+                with mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": "1"}):
+                    self.assertEqual(TaskWriter._redaction_values(writer), ())
+                with mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": ""}), self.assertRaises(TaskError):
+                    TaskWriter._redaction_values(writer)
+
+
 if __name__ == "__main__":
     unittest.main()

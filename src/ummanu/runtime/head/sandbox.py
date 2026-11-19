@@ -113,8 +113,11 @@ INSTANCE_READ = ("instance.yaml", "board-store.env", "heads", "projects", "skill
 # The board CLI's lock files and journals beneath the data directory (made before the ruleset).
 DATA_WRITE_FILES = ("board/.create.lock", "board/.audit.lock", "dispatcher/board-bulk.lock",
                     "dispatcher/cleanup.lock")
+# `artifacts/bodies` holds the report/verdict body files the dispatcher names for a head; they are
+# board text, which a head reads through the board anyway.
 DATA_WRITE_DIRS = ("board/assessment-decisions", "board/sql-sprint-locks", "board/product-issue-transactions",
-                   "dispatcher/effects", "dispatcher/admission", "dispatcher/lifecycle")
+                   "dispatcher/effects", "dispatcher/admission", "dispatcher/lifecycle", "artifacts/bodies")
+PRIVATE_DATA_DIRS = ("artifacts/bodies",)
 # A rule binds the inode, and the dispatcher replaces its state files atomically, so its directory is
 # the read root: `ummanu sprint status` and `task show` read the production state from there.
 DATA_READ = ("dispatcher", "data-manifest.json")
@@ -131,6 +134,9 @@ STRIPPED_ENV = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_
                 "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "GPG_AGENT_INFO")
 CLAUDE_SETTINGS = {"skipDangerousModePermissionPrompt": True, "theme": "dark",
                    "env": {"DISABLE_AUTOUPDATER": "1"}}
+# Marks the confined child; must equal `ummanu.runtime.redact.HEAD_SANDBOX_ENV` (this launcher runs
+# with `-I` and imports nothing from the product).
+HEAD_SANDBOX_ENV = "UMMANU_HEAD_SANDBOX"
 # The sandbox's own state, beside the head git config the role env already keeps there.
 STATE_DIR = Path(".local") / "state" / "ummanu" / "head-sandbox"
 # Short, so a test that binds a Unix socket under TMPDIR stays within the 108-byte path limit.
@@ -282,7 +288,8 @@ def build_policy(
 def prepare_data_locks(data_dir: Path) -> None:
     """Create the board's lock files and directories the confined head cannot create itself."""
     for name in DATA_WRITE_DIRS:
-        (data_dir / name).mkdir(parents=True, exist_ok=True)
+        # The body directory is private to this user (`dispatch.host_runtime.packets._private_body_dir`).
+        (data_dir / name).mkdir(mode=0o700 if name in PRIVATE_DATA_DIRS else 0o777, parents=True, exist_ok=True)
     for name in DATA_WRITE_FILES:
         path = data_dir / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -776,6 +783,8 @@ def descendants(root_pid: int) -> set[int]:
 def child_environment(environ: Mapping[str, str], *, claude_home: Path | None, tmp: Path) -> dict[str, str]:
     env = {key: value for key, value in environ.items() if key not in STRIPPED_ENV}
     env["TMPDIR"] = str(tmp)
+    # The board CLI then scrubs with what the head can read rather than failing on the refused store.
+    env[HEAD_SANDBOX_ENV] = "1"
     env["XDG_CACHE_HOME"] = str(tmp / "cache")
     # `~/.gitconfig` is out of reach and git refuses an unreadable one; role env names its own.
     env.setdefault("GIT_CONFIG_GLOBAL", os.devnull)
