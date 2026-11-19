@@ -34,19 +34,20 @@ def in_head_sandbox(environ: Mapping[str, str] | None = None) -> bool:
 
 
 def secret_store_refused(values_dir: Path) -> bool:
-    """Whether this sandboxed process is refused the secret store's `values/` directory by the kernel.
+    """Whether this sandboxed process is refused the secret store (`values/` or the `secrets/` above it).
 
     Only then may board redaction go without the store; outside the sandbox, or when the store can be
     listed, it is read as always and any failure stays an error.
     """
     if not in_head_sandbox():
         return False
-    try:
-        os.listdir(values_dir)
-    except PermissionError:
-        return True
-    except OSError:
-        return False
+    for directory in (values_dir.parent, values_dir):
+        try:
+            os.listdir(directory)
+        except PermissionError:
+            return True
+        except OSError:
+            continue
     return False
 
 
@@ -146,6 +147,10 @@ def redact(
     values = [*(_load_env_values(files)), *(secret_values or ())]
     if in_head_sandbox():
         values.extend(environment_values())
+        # The board credentials stay readable to a sandboxed head (it reaches the board with them).
+        instance = os.environ.get("UMMANU_INSTANCE", "").strip()
+        if instance:
+            values.extend(_load_env_values([Path(instance) / "board-store.env"]))
     for val in sorted(
         {str(value) for value in values if len(str(value)) >= MIN_ENV_VALUE_LEN}, key=len, reverse=True
     ):

@@ -137,7 +137,7 @@ class PolicyTests(Layout):
                 read, write = sandbox.role_paths(self.data, {"BOARD_ROLE": role, "UMMANU_HEAD_CARD": "app-7"})
                 prompts = self.data / "artifacts" / "prompts" / "app-7"
                 bodies = self.data / "artifacts" / "bodies" / "app-7"
-                self.assertEqual((read, write), ([prompts], [bodies, self.data / "sprints"]))
+                self.assertEqual((read, write), ([prompts, self.data / "sprints"], [bodies, *self.locks]))
                 for path in (prompts, prompts.parent, bodies, bodies.parent):
                     self.assertEqual(path.stat().st_mode & 0o777, 0o700, path)
                 policy = self.policy(data_dir=self.data, private=write, extra_read=read)
@@ -146,15 +146,21 @@ class PolicyTests(Layout):
                 self.assertNotIn(bodies.parent, (*policy.read, *policy.write))
                 self.assertNotIn(prompts.parent, (*policy.read, *policy.write))
 
+    @property
+    def locks(self) -> list[Path]:
+        return [self.data / name for name in sandbox.SPRINT_LOCKS]
+
     def test_role_paths_follow_the_bound_role(self) -> None:
         sprints = self.data / "sprints"
-        self.assertEqual(sandbox.role_paths(self.data, {"BOARD_ROLE": "observer"}), ([], [sprints]))
-        self.assertTrue(sprints.is_dir())
+        # `sprints/` is read-only: only its pre-made lock files are writable, never the directory.
+        self.assertEqual(sandbox.role_paths(self.data, {"BOARD_ROLE": "observer"}), ([sprints], self.locks))
+        self.assertTrue(all(lock.is_file() for lock in self.locks))
         # The card binding counts only for a card role; a card role without it gets no artifacts.
         self.assertEqual(
-            sandbox.role_paths(self.data, {"BOARD_ROLE": "observer", "UMMANU_HEAD_CARD": "app-7"}), ([], [sprints])
+            sandbox.role_paths(self.data, {"BOARD_ROLE": "observer", "UMMANU_HEAD_CARD": "app-7"}),
+            ([sprints], self.locks),
         )
-        self.assertEqual(sandbox.role_paths(self.data, {"BOARD_ROLE": "worker"}), ([], [sprints]))
+        self.assertEqual(sandbox.role_paths(self.data, {"BOARD_ROLE": "worker"}), ([sprints], self.locks))
         for environ in ({"BOARD_ROLE": "steward", "UMMANU_HEAD_CARD": "app-7"}, {"BOARD_ROLE": "po"},
                         {"UMMANU_HEAD_CARD": "app-7"}, {}):
             with self.subTest(environ=environ):
@@ -171,6 +177,22 @@ class PolicyTests(Layout):
                 body = Path(_body_file_path(self.data, "verdict", ref, 3))
                 self.assertEqual(body.parent, self.data / "artifacts" / "bodies" / sandbox.card_token(ref))
                 self.assertNotIn("..", body.relative_to(self.data).parts)
+
+    def test_the_dispatcher_s_artifact_overrides_are_followed(self) -> None:
+        environ = {"BOARD_ROLE": "reviewer", "UMMANU_HEAD_CARD": "app-7",
+                   "UMMANU_DISPATCHER_BODY_DIR": str(self.root / "bodies") + "/",
+                   "UMMANU_DISPATCHER_PROMPT_DIR": str(self.root / "prompts")}
+        read, write = sandbox.role_paths(self.data, environ)
+        self.assertEqual((read[0], write[0]), (self.root / "prompts" / "app-7", self.root / "bodies" / "app-7"))
+        with self.assertRaises(sandbox.SandboxError):
+            sandbox.role_paths(self.data, {**environ, "UMMANU_DISPATCHER_BODY_DIR": "relative/bodies"})
+
+    def test_a_planted_link_at_a_sprint_lock_refuses_the_launch(self) -> None:
+        (self.data / "sprints").mkdir(parents=True)
+        (self.data / "sprints" / "admission.lock").symlink_to(self.home / "secrets" / "victim")
+        with self.assertRaises(sandbox.SandboxError):
+            sandbox.role_paths(self.data, {"BOARD_ROLE": "observer"})
+        self.assertFalse((self.home / "secrets" / "victim").exists())
 
     def test_a_card_that_names_a_parent_directory_refuses_the_launch(self) -> None:
         for card in ("..", "."):
@@ -379,6 +401,45 @@ class LaunchStateTests(Layout):
                 sandbox.private_tmp(self.workspace)
 
 
+@unittest.skipIf(os.geteuid() == 0, "root writes a read-only directory")
+class SprintIndexInSandboxTests(unittest.TestCase):
+    """`sprints/` is read-only to a sandboxed head: its refresh of the index is skipped, never fatal,
+    and an index it cannot seed fails its guard closed. Outside the sandbox a refusal stays an error."""
+
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.data = Path(temp.name)
+        self.sprints = self.data / "sprints"
+        self.sprints.mkdir()
+        (self.sprints / "active-repositories.lock").touch()
+        self.sprints.chmod(0o500)
+        self.addCleanup(self.sprints.chmod, 0o700)
+
+    def test_a_refused_refresh_is_skipped_inside_the_sandbox_only(self) -> None:
+        from ummanu.board.sprint_protocol import reservations
+
+        sprint = {"ref": "sprint:1", "status": "open", "reservations": ["app"], "repositories": []}
+        with mock.patch.object(reservations.SprintAdmission, "from_document") as admission:
+            admission.return_value = mock.MagicMock(ref="sprint:1", is_open=False)
+            with mock.patch.dict(os.environ, {"UMMANU_HEAD_SANDBOX": "1"}):
+                reservations.update_active_sprint_projects(self.data, sprint)
+            with mock.patch.dict(os.environ, {"UMMANU_HEAD_SANDBOX": ""}), self.assertRaises(PermissionError):
+                reservations.update_active_sprint_projects(self.data, sprint)
+        self.assertEqual(sorted(path.name for path in self.sprints.iterdir()), ["active-repositories.lock"])
+
+    def test_an_index_a_sandboxed_head_cannot_seed_fails_closed(self) -> None:
+        from ummanu.board.sprint_protocol import reservations
+        from ummanu.kernel.errors import TaskError
+
+        with (
+            mock.patch.dict(os.environ, {"UMMANU_HEAD_SANDBOX": "1"}),
+            mock.patch.object(reservations, "select_sprints", return_value=[]),
+            self.assertRaises(TaskError),
+        ):
+            reservations.refresh_active_sprint_projects(self.data, reader=None)
+
+
 @unittest.skipUnless(
     sys.platform == "linux" and sandbox.landlock_abi() >= 1, "the kernel offers no Landlock"
 )
@@ -438,6 +499,41 @@ class KernelConfinementTests(Layout):
         self.assertEqual(own.read_text(encoding="utf-8"), "green\n")
         self.assertEqual(result.stderr.count("Permission denied"), 4, result.stderr)
         self.assertFalse((bodies / "planted").exists())
+
+    def test_an_observer_takes_the_sprint_locks_but_cannot_plant_in_sprints(self) -> None:
+        sprints = self.data / "sprints"
+        sprints.mkdir(parents=True)
+        (sprints / "active-repositories.json").write_text("{}", encoding="utf-8")
+        victim = self.home / "secrets" / "victim"
+        victim.write_text("keep\n", encoding="utf-8")
+        script = (
+            f"cat {sprints}/active-repositories.json; echo; "
+            f"python3 -c \"import fcntl; h=open('{sprints}/active-repositories.lock', 'a+'); "
+            f"fcntl.flock(h, fcntl.LOCK_EX); print('locked')\"; "
+            f"ln -s {victim} {sprints}/active-repositories.tmp; echo x > {sprints}/active-repositories.tmp; "
+            f"echo x > {sprints}/active-repositories.json; exit 7"
+        )
+        result = self.run_role({"BOARD_ROLE": "observer"}, script)
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertEqual(result.stdout, "{}\nlocked\n")
+        self.assertFalse((sprints / "active-repositories.tmp").is_symlink())
+        self.assertEqual(victim.read_text(encoding="utf-8"), "keep\n")
+        self.assertEqual((sprints / "active-repositories.json").read_text(encoding="utf-8"), "{}")
+        self.assertGreaterEqual(result.stderr.count("Permission denied"), 2, result.stderr)
+
+    def run_role(self, environ: dict[str, str], script: str) -> subprocess.CompletedProcess[str]:
+        launcher = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(REPO_ROOT / 'src')!r})\n"
+            "from pathlib import Path\n"
+            "from ummanu.runtime.head import sandbox\n"
+            f"read, write = sandbox.role_paths(Path({str(self.data)!r}), {environ!r})\n"
+            f"policy = sandbox.build_policy(Path({str(self.workspace)!r}), home=Path({str(self.home)!r}),\n"
+            f"    environ={{}}, product_root=Path({str(self.product)!r}), private=write, extra_read=read)\n"
+            f"sys.exit(sandbox.run(['/bin/sh', '-c', {script!r}], policy, {{'PATH': '/usr/bin:/bin'}}))\n"
+        )
+        return subprocess.run([sys.executable, "-I", "-c", launcher], capture_output=True, text=True,
+                              timeout=60, check=False)
 
     def test_a_unix_socket_outside_the_sandbox_is_refused(self) -> None:
         outside = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

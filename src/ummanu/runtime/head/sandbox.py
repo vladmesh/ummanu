@@ -119,16 +119,21 @@ DATA_WRITE_DIRS = ("board/assessment-decisions", "board/sql-sprint-locks", "boar
                    "dispatcher/effects", "dispatcher/admission", "dispatcher/lifecycle")
 # Per role, from the role env the trusted launch command bound (`BOARD_ROLE`, `UMMANU_HEAD_CARD`): a
 # worker or reviewer reads its own card's task documents and writes its own card's report/verdict
-# bodies (`dispatch.host_runtime.packets`), never another card's. Every sprint role writes the sprint
-# reservation index and its locks (no secrets; the board guard checks it against the live sprints),
-# which the sprint guard of `task move`/`comment` and `sprint resume` refresh.
+# bodies (`dispatch.host_runtime.packets`), never another card's. Every sprint role reads the sprint
+# reservation index and takes its locks (the sprint guard of `task move`/`comment` and `sprint resume`);
+# `sprints/` itself stays read-only, so a head cannot plant a link there that an unconfined writer of
+# the index would follow, and its own index refresh is skipped (`board.sprint_protocol.reservations`).
 ROLE_ENV = "BOARD_ROLE"
 CARD_ENV = "UMMANU_HEAD_CARD"
 CARD_ROLES = ("worker", "reviewer")
 CARD_READ = "artifacts/prompts"
 CARD_WRITE = "artifacts/bodies"
 SPRINT_ROLES = ("worker", "reviewer", "observer")
-SPRINT_WRITE_DIRS = ("sprints",)
+SPRINT_READ = "sprints"
+SPRINT_LOCKS = ("sprints/active-repositories.lock", "sprints/admission.lock")
+# The dispatcher's overrides of the artifacts roots (`dispatch.host_runtime.packets`).
+BODY_DIR_ENV = "UMMANU_DISPATCHER_BODY_DIR"
+PROMPT_DIR_ENV = "UMMANU_DISPATCHER_PROMPT_DIR"
 # A rule binds the inode, and the dispatcher replaces its state files atomically, so its directory is
 # the read root: `ummanu sprint status` and `task show` read the production state from there.
 DATA_READ = ("dispatcher", "data-manifest.json")
@@ -323,16 +328,31 @@ def role_paths(data_dir: Path, environ: Mapping[str, str]) -> tuple[list[Path], 
         token = card_token(card)
         if token in (".", ".."):
             raise SandboxError(f"card {card!r} names no directory of its own")
-        prompts, bodies = data_dir / CARD_READ / token, data_dir / CARD_WRITE / token
+        prompt_root = Path(environ.get(PROMPT_DIR_ENV, "").strip() or data_dir / CARD_READ).expanduser()
+        body_root = Path(environ.get(BODY_DIR_ENV, "").strip().rstrip("/") or data_dir / CARD_WRITE).expanduser()
+        if not (prompt_root.is_absolute() and body_root.is_absolute()):
+            raise SandboxError("the dispatcher's prompt and body directories must be absolute")
+        prompts, bodies = prompt_root / token, body_root / token
         for path in (prompts.parent, prompts, bodies.parent, bodies):
             _owned_private_dir(path)
         read.append(prompts)
         write.append(bodies)
     if role in SPRINT_ROLES:
-        for name in SPRINT_WRITE_DIRS:
-            (data_dir / name).mkdir(parents=True, exist_ok=True)
-            write.append(data_dir / name)
+        (data_dir / SPRINT_READ).mkdir(parents=True, exist_ok=True)
+        read.append(data_dir / SPRINT_READ)
+        for name in SPRINT_LOCKS:
+            write.append(_owned_lock_file(data_dir / name))
     return read, write
+
+
+def _owned_lock_file(path: Path) -> Path:
+    """`path` as a regular file of this user, created if missing; a link or anything else refuses."""
+    with contextlib.suppress(FileExistsError):
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644))
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        raise SandboxError(f"{path} is not a regular file of this user")
+    return path
 
 
 def _owned_private_dir(path: Path) -> None:

@@ -201,6 +201,38 @@ class HeadSandboxRedactionTests(unittest.TestCase):
                 redact("text", env_files=[env])
 
     @unittest.skipIf(os.geteuid() == 0, "root reads a 0000 directory")
+    def test_a_refused_secrets_directory_counts_even_without_values(self):
+        from ummanu.runtime.redact import secret_store_refused
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            secrets = Path(tmpdir) / "secrets"
+            secrets.mkdir()
+            (secrets / "catalog.yaml").write_text("secrets: []\n", encoding="utf-8")
+            secrets.chmod(0)
+            try:
+                with mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": "1"}):
+                    self.assertTrue(secret_store_refused(secrets / "values"))
+                with mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": ""}):
+                    self.assertFalse(secret_store_refused(secrets / "values"))
+            finally:
+                secrets.chmod(0o700)
+            with mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": "1"}):
+                self.assertFalse(secret_store_refused(secrets / "values"))  # readable, no values/: read as always
+
+    def test_inside_the_sandbox_the_readable_board_credentials_are_scrubbed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir)
+            (instance / "board-store.env").write_text(
+                "UMMANU_DB_HOST=127.0.0.1\nUMMANU_DB_PASSWORD=board-db-password-value\n", encoding="utf-8"
+            )
+            text = "dsn password board-db-password-value"
+            with (
+                mock.patch("ummanu.runtime.redact.DEFAULT_ENV_FILES", []),
+                mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": "1", "UMMANU_INSTANCE": str(instance)}),
+            ):
+                self.assertEqual(redact(text), f"dsn password {REDACTED}:env-value")
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a 0000 directory")
     def test_board_redaction_values_inside_and_outside_the_sandbox(self):
         from types import SimpleNamespace
 

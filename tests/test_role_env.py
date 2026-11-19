@@ -137,6 +137,22 @@ class RuntimeEnvRoleTests(unittest.TestCase):
         self.assertNotIn(role_env.MEMORY_ACCESS_TOKEN_ENV, env)
         self.assertEqual(launched[role_env.MEMORY_ACCESS_TOKEN_ENV], "launch-bound")
 
+    def test_the_head_card_the_sandbox_reads_comes_only_from_the_launch_command(self) -> None:
+        """The head sandbox opens `artifacts/*/<card>` from `UMMANU_HEAD_CARD` and `BOARD_ROLE`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / "runtime.env"
+            env_file.write_text("UMMANU_HEAD_CARD=forged-1\n", encoding="utf-8")
+            for role in ("worker", "reviewer"):
+                with self.subTest(role=role):
+                    env = role_env.runtime_env(role, base_env={"PATH": "/usr/bin"}, env_file=env_file)
+                    launched = role_env.runtime_env(
+                        role, base_env={"PATH": "/usr/bin", role_env.HEAD_CARD_ENV: "app-7"}, env_file=env_file
+                    )
+                    self.assertNotIn(role_env.HEAD_CARD_ENV, env)
+                    self.assertEqual((launched[role_env.HEAD_CARD_ENV], launched["BOARD_ROLE"]), ("app-7", role))
+        command = render_head_command_for_card()
+        self.assertIn("UMMANU_HEAD_CARD=app-7", command)
+
     def test_scheduled_memory_roles_accept_only_a_launch_bound_bearer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / "runtime.env"
@@ -440,6 +456,15 @@ class ManagedInterpreterTests(unittest.TestCase):
                     self.assertNotIn("started", result.stdout)
                     self.assertIn(f"no executable managed interpreter at '{python}'", result.stderr)
                     self.assertIn(f"ummanu upgrade --no-pull --product-root {broken}", result.stderr)
+
+
+def render_head_command_for_card() -> str:
+    from ummanu.runtime.head.command import render_head_command
+
+    return render_head_command(
+        {"adapter": "claude"}, workspace="/srv/ws", role="reviewer",
+        identity={role_env.BOARD_ACTOR_ENV: "profile", role_env.HEAD_CARD_ENV: "app-7"},
+    ).command
 
 
 if __name__ == "__main__":

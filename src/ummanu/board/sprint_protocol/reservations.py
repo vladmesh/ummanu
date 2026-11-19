@@ -11,6 +11,7 @@ from ummanu._fsutil import file_lock
 from ummanu.board.sprint_admission import SprintAdmission, SprintReservationIndex
 from ummanu.board.tick_snapshot import select_sprints
 from ummanu.kernel.errors import TaskError
+from ummanu.runtime.redact import in_head_sandbox
 
 _GUARD_INDEX = "sprints/active-repositories.json"
 # Version 1 indexes are rebuilt: guards key by project, not repository path.
@@ -56,6 +57,9 @@ def refresh_active_sprint_projects(data_dir: str | Path, reader: Any) -> None:
     """Seed the index from the live board without racing a sprint mutation."""
     with _sprint_guard_index_lock(data_dir):
         _replace_active_sprint_projects(data_dir, select_sprints(reader, statuses={"open"}, create=False))
+    if not sprint_guard_index_initialized(data_dir):
+        # A sandboxed head may not write the index (`_write_guard_index`); an absent one fails closed.
+        raise TaskError("backend_error", f"the reserved-project index {_GUARD_INDEX} could not be seeded", 1)
 
 
 def _replace_active_sprint_projects(data_dir: str | Path, sprints: list[dict[str, Any]]) -> None:
@@ -70,7 +74,8 @@ def update_active_sprint_projects(data_dir: str | Path, sprint: SprintAdmission 
         index = _read_guard_index(path)
         if index is None and path.exists():
             # Rebuild stale index key spaces from the board.
-            path.unlink()
+            with _refused_in_head_sandbox():
+                path.unlink()
             return
         admission = sprint if isinstance(sprint, SprintAdmission) else SprintAdmission.from_document(sprint)
         index = (index or SprintReservationIndex()).without_sprint(admission.ref)
@@ -95,16 +100,29 @@ def sprint_admission_lock(data_dir: str | Path):
         yield
 
 
+@contextmanager
+def _refused_in_head_sandbox():
+    """A sandboxed head reads the index but may not write it: `sprints/` is read-only to it, so it
+    cannot plant a link there for an unconfined writer to follow. Its refresh is skipped; the
+    dispatcher keeps the index, and every guard still verifies each named sprint on the live board."""
+    try:
+        yield
+    except PermissionError:
+        if not in_head_sandbox():
+            raise
+
+
 def _write_guard_index(data_dir: str | Path, index: SprintReservationIndex) -> None:
     path = Path(data_dir) / _GUARD_INDEX
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(
-        json.dumps(
-            index.to_document(version=_GUARD_INDEX_VERSION),
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+    with _refused_in_head_sandbox():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(
+                index.to_document(version=_GUARD_INDEX_VERSION),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        temporary.replace(path)

@@ -107,14 +107,14 @@ class BodyFileDirectoryTests(unittest.TestCase):
     def test_the_default_body_file_is_under_the_data_dir_not_tmp(self) -> None:
         path = _body_file_path(self.root, "report", "ummanu-241", 1)
 
-        self.assertEqual(path, f"{self.root}/artifacts/bodies/ummanu-report-ummanu-241-1.md")
+        self.assertEqual(path, f"{self.root}/artifacts/bodies/ummanu-241/ummanu-report-ummanu-241-1.md")
 
     def test_the_override_still_names_the_directory(self) -> None:
         os.environ["UMMANU_DISPATCHER_BODY_DIR"] = str(self.root / "bodies") + "/"
 
         path = _body_file_path(Path("/unused"), "verdict", "ummanu-241", 3)
 
-        self.assertEqual(path, f"{self.root}/bodies/ummanu-verdict-ummanu-241-3.md")
+        self.assertEqual(path, f"{self.root}/bodies/ummanu-241/ummanu-verdict-ummanu-241-3.md")
 
     def test_a_new_directory_is_created_private(self) -> None:
         bodies = self.root / "artifacts" / "bodies"
