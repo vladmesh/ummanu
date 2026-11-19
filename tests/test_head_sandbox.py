@@ -605,6 +605,51 @@ class KernelConfinementTests(Layout):
         )
         self.assertEqual(result.stdout.split(), ["PermissionError", "ok"], result.stderr)
 
+    def test_the_broad_check_wrapper_writes_a_receipt_from_inside_the_sandbox(self) -> None:
+        # ummanu-690: the wrapper made its scratch in `/tmp` itself, which the sandbox refuses, so
+        # no sandboxed head could produce the receipt `report:done` asks for.
+        candidate = self.workspace / "candidate"
+        (candidate / "ummanu").mkdir(parents=True)
+        (candidate / "ummanu" / "__init__.py").write_text("", encoding="utf-8")
+        (candidate / ".gitignore").write_text("/state/\n__pycache__/\n", encoding="utf-8")
+        (candidate / "sandboxsuite.py").write_text(
+            "import os, pathlib, socket, tempfile\n"
+            "print('TMPDIR', os.environ['TMPDIR'])\n"
+            "with tempfile.TemporaryDirectory() as nested:\n"
+            "    with socket.socket(socket.AF_UNIX) as listener:\n"
+            "        listener.bind(str(pathlib.Path(nested) / 'head.sock'))\n",
+            encoding="utf-8",
+        )
+        for args in (["init", "-q"], ["add", "-A"],
+                     ["-c", "user.name=w", "-c", "user.email=w@example.invalid", "commit", "-q", "-m", "c"]):
+            subprocess.run(["git", "-C", str(candidate), *args], check=True, capture_output=True)
+        probe = (
+            "import io, json, sys\n"
+            f"sys.path.insert(0, {str(REPO_ROOT / 'src')!r})\n"
+            "from pathlib import Path\n"
+            "from ummanu.broad_check import CheckSpec, run_broad_check, usable_receipt\n"
+            f"root = Path({str(candidate)!r})\n"
+            "spec = CheckSpec.for_module('sandboxsuite')\n"
+            "code, receipt = run_broad_check(spec, root=root, stream=io.StringIO())\n"
+            "print(json.dumps({'code': code, 'tail': receipt['tail'],\n"
+            "                  'tmpdir': receipt['environment_provenance']['TMPDIR'],\n"
+            "                  'usable': usable_receipt(root, spec).usable}))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", str(LAUNCHER), "--workspace", str(self.workspace),
+             "--product-root", str(REPO_ROOT), "--", "/usr/bin/python3", "-I", "-c", probe],
+            env={"HOME": str(self.home), "PATH": "/usr/bin:/bin"},
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outcome = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(outcome["code"], 0, outcome["tail"])
+        self.assertTrue(outcome["usable"])
+        scratch = Path(outcome["tmpdir"])
+        self.assertEqual(scratch.parent, sandbox.private_tmp(self.workspace.resolve()))
+        self.assertIn(f"TMPDIR {scratch}", outcome["tail"])
+        self.assertFalse(scratch.exists())
+
     def test_a_home_wide_workspace_never_starts(self) -> None:
         result = subprocess.run(
             [sys.executable, "-I", str(LAUNCHER), "--workspace", str(self.home),

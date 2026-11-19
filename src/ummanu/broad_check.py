@@ -46,6 +46,7 @@ from signal import NSIG
 from typing import IO, Any
 
 from ummanu._fsutil import write_text_atomic
+from ummanu.runtime.redact import in_head_sandbox
 from ummanu.runtime.role_env import dispatcher_workspace_namespace
 
 SCHEMA_VERSION = 1
@@ -607,7 +608,7 @@ def run_broad_check(
 
     # A head's workspace TMPDIR can exceed Unix socket address limits before a check
     # creates anything. Keep the child root short, private and owned by this invocation.
-    with tempfile.TemporaryDirectory(prefix="u", dir="/tmp") as scratch:
+    with tempfile.TemporaryDirectory(prefix="u", dir=_scratch_parent()) as scratch:
         environment["TMPDIR"] = scratch
         # Keep provenance outside the workspace whose contents the receipt names.
         record = Path(scratch) / "provenance.json" if spec.attests_provenance else None
@@ -623,6 +624,19 @@ def run_broad_check(
             sink=sink,
             timeout_seconds=timeout_seconds,
         )
+
+
+def _scratch_parent() -> str:
+    """The directory the per-invocation scratch is made in.
+
+    `/tmp` itself everywhere but inside the head sandbox, which refuses `/tmp` and lets a head
+    write only its launcher's private temp dir (`/tmp/ummanu-sandbox-<uid>/<digest>`, exported as
+    TMPDIR). That dir is short too: with the scratch's own name a check's TMPDIR there is 51 bytes
+    for uid 1000, leaving 56 of the 108-byte Unix socket path for the check's own names.
+    """
+    if in_head_sandbox():
+        return os.environ.get("TMPDIR") or tempfile.gettempdir()
+    return "/tmp"
 
 
 def _normalize_pythonpath_for_child(environment: dict[str, str]) -> dict[str, str]:

@@ -328,8 +328,9 @@ installation's configuration (`instance.yaml`, `board-store.env`, `heads`, `proj
 `~/.profile`, its project's git store, its profile's `claude_settings` file and the `sandbox_read`
 roots (a single file there is bound to its inode: a file its owner replaces by renaming over it is
 refused from then on, so name its directory instead). It writes its workspace, that store's objects, refs and its own worktree admin dir, the cargo
-caches, its own transcript directory, a private `/tmp/ummanu-sandbox-<uid>/<digest>` (its `TMPDIR`)
-and the board's lock files. Its role, bound by the launch command (`BOARD_ROLE`, and for a worker or
+caches, its own transcript directory, a private `/tmp/ummanu-sandbox-<uid>/<digest>` (its `TMPDIR`;
+`/tmp` itself is refused, so the broad-check wrapper makes its per-run scratch there instead of in
+`/tmp`, leaving a check 56 of the 108-byte Unix socket path for uid 1000) and the board's lock files. Its role, bound by the launch command (`BOARD_ROLE`, and for a worker or
 reviewer `UMMANU_HEAD_CARD`), adds only what that role's board commands write: a worker or reviewer
 reads its own card's `DATA_DIR/artifacts/prompts/<card>/` and writes its own card's
 `DATA_DIR/artifacts/bodies/<card>/` (both kept `0700`; other cards' prompts and bodies stay refused), and
