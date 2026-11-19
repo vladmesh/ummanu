@@ -129,6 +129,15 @@ class PolicyTests(Layout):
         self.assertEqual(written, expected)
         self.assertTrue(all(path.exists() for path in expected))
 
+    def test_the_dispatcher_state_stays_readable_after_it_is_replaced(self) -> None:
+        state = self.data / "dispatcher" / "production-state.json"
+        state.parent.mkdir(parents=True)
+        state.write_text("{}", encoding="utf-8")
+        policy = self.policy(data_dir=self.data)
+        self.assertIn(self.data / "dispatcher", policy.read)
+        self.assertNotIn(self.data / "board", policy.read)
+        self.assertNotIn(self.data, policy.read)
+
     def test_a_root_that_holds_the_home_is_refused(self) -> None:
         for extra in ([self.home], [self.root], [Path("/")], [self.home / "secrets" / ".."]):
             with self.subTest(extra=extra), self.assertRaisesRegex(sandbox.SandboxError, "holds the home"):
