@@ -39,6 +39,12 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Executed by absolute path under -I: only this product's source is importable.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from ummanu.runtime.procfs import proc_stat_fields
+
 # Landlock filesystem rights (uapi/linux/landlock.h) and the ABI that introduced each.
 FS_EXECUTE = 1 << 0
 FS_WRITE_FILE = 1 << 1
@@ -236,13 +242,10 @@ def prepare_data_locks(data_dir: Path) -> None:
             os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644))
 
 
-def installation_data_dir(product_root: Path, instance: str) -> Path | None:
+def installation_data_dir(instance: str) -> Path | None:
     """The data directory the installation's `instance.yaml` names, read by the product's own parser."""
     if not instance:
         return None
-    source = str(product_root / "src")
-    if source not in sys.path:
-        sys.path.insert(0, source)
     from ummanu.config import instance_data_dir
 
     return instance_data_dir(Path(instance))
@@ -542,10 +545,10 @@ def descendants(root_pid: int) -> set[int]:
         if not entry.isdigit():
             continue
         try:
-            line = Path(f"/proc/{entry}/stat").read_text(encoding="ascii")
-        except OSError:
+            fields = proc_stat_fields(Path(f"/proc/{entry}/stat").read_text(encoding="ascii"))
+        except (OSError, ValueError):
             continue
-        parents[int(entry)] = int(line[line.rfind(")") + 2 :].split()[1])
+        parents[int(entry)] = int(fields[1])
     found = {root_pid}
     changed = True
     while changed:
@@ -686,7 +689,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             prepare_claude_home(claude_home, workspace, home=home, skills=skills)
             private.append(claude_home)
             args.read += skills
-        data_dir = installation_data_dir(product_root, instance)
+        data_dir = installation_data_dir(instance)
         if data_dir is not None:
             prepare_data_locks(data_dir)
         policy = build_policy(
