@@ -324,8 +324,10 @@ Each head of the profile then starts under `src/ummanu/runtime/head/sandbox.py`,
 `landlock`) and brokers its `connect()` calls through seccomp user notification. The head reads the
 system, `~/.local/bin`, `~/.local/share/claude`, `~/.rustup`, `~/.cargo`, the product checkout, the
 installation's configuration (`instance.yaml`, `board-store.env`, `heads`, `projects`, `skills`,
-`adapters`), its project's git store, its profile's `claude_settings` file and the `sandbox_read`
-roots. It writes its workspace, that store's objects, refs and its own worktree admin dir, the cargo
+`adapters`), the dispatcher's state directory and `DATA_DIR/data-manifest.json`, `~/.bashrc` and
+`~/.profile`, its project's git store, its profile's `claude_settings` file and the `sandbox_read`
+roots (a single file there is bound to its inode: a file its owner replaces by renaming over it is
+refused from then on, so name its directory instead). It writes its workspace, that store's objects, refs and its own worktree admin dir, the cargo
 caches, its own transcript directory, a private `/tmp/ummanu-sandbox-<uid>/<digest>` (its `TMPDIR`)
 and the board's lock files. Everything else in the home is refused by the kernel. The git store is
 the `repo` of `projects/<project>.yaml` for a workspace under `DATA_DIR/workspaces/<project>/`, or

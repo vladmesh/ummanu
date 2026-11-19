@@ -106,7 +106,7 @@ X32_SYSCALL_BIT = 0x40000000
 SYSTEM_READ = ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc", "/opt",
                "/run/systemd/resolve", "/sys")
 HOME_READ = (".local/bin", ".local/share/claude", ".rustup", ".cargo/bin", ".cargo/env",
-             ".cargo/config.toml", ".local/state/ummanu/head-config")
+             ".cargo/config.toml", ".local/state/ummanu/head-config", ".bashrc", ".profile")
 HOME_WRITE = (".cargo/registry", ".cargo/git")
 INSTANCE_READ = ("instance.yaml", "board-store.env", "heads", "projects", "skills", "adapters",
                  "CONTEXT.md", "README.md")
@@ -115,7 +115,9 @@ DATA_WRITE_FILES = ("board/.create.lock", "board/.audit.lock", "dispatcher/board
                     "dispatcher/cleanup.lock")
 DATA_WRITE_DIRS = ("board/assessment-decisions", "board/sql-sprint-locks", "board/product-issue-transactions",
                    "dispatcher/effects", "dispatcher/admission", "dispatcher/lifecycle")
-DATA_READ = ("dispatcher/production-state.json", "dispatcher/cleanup")
+# A rule binds the inode, and the dispatcher replaces its state files atomically, so its directory is
+# the read root: `ummanu sprint status` and `task show` read the production state from there.
+DATA_READ = ("dispatcher", "data-manifest.json")
 # Unix sockets outside the write roots a head may still reach: name resolution only.
 ALLOWED_SOCKETS = ("/run/systemd/resolve/io.systemd.Resolve",)
 # The memory service every head's MCP config names.
