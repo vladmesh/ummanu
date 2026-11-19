@@ -137,7 +137,7 @@ class PolicyTests(Layout):
                 read, write = sandbox.role_paths(self.data, {"BOARD_ROLE": role, "UMMANU_HEAD_CARD": "app-7"})
                 prompts = self.data / "artifacts" / "prompts" / "app-7"
                 bodies = self.data / "artifacts" / "bodies" / "app-7"
-                self.assertEqual((read, write), ([prompts], [bodies]))
+                self.assertEqual((read, write), ([prompts], [bodies, self.data / "sprints"]))
                 for path in (prompts, prompts.parent, bodies, bodies.parent):
                     self.assertEqual(path.stat().st_mode & 0o777, 0o700, path)
                 policy = self.policy(data_dir=self.data, private=write, extra_read=read)
@@ -154,7 +154,8 @@ class PolicyTests(Layout):
         self.assertEqual(
             sandbox.role_paths(self.data, {"BOARD_ROLE": "observer", "UMMANU_HEAD_CARD": "app-7"}), ([], [sprints])
         )
-        for environ in ({"BOARD_ROLE": "worker"}, {"BOARD_ROLE": "steward", "UMMANU_HEAD_CARD": "app-7"},
+        self.assertEqual(sandbox.role_paths(self.data, {"BOARD_ROLE": "worker"}), ([], [sprints]))
+        for environ in ({"BOARD_ROLE": "steward", "UMMANU_HEAD_CARD": "app-7"}, {"BOARD_ROLE": "po"},
                         {"UMMANU_HEAD_CARD": "app-7"}, {}):
             with self.subTest(environ=environ):
                 self.assertEqual(sandbox.role_paths(self.data, environ), ([], []))

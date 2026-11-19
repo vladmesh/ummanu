@@ -119,14 +119,16 @@ DATA_WRITE_DIRS = ("board/assessment-decisions", "board/sql-sprint-locks", "boar
                    "dispatcher/effects", "dispatcher/admission", "dispatcher/lifecycle")
 # Per role, from the role env the trusted launch command bound (`BOARD_ROLE`, `UMMANU_HEAD_CARD`): a
 # worker or reviewer reads its own card's task documents and writes its own card's report/verdict
-# bodies (`dispatch.host_runtime.packets`), never another card's; an observer writes the sprint
-# reservation index and its locks, which `sprint resume` and `task move` update.
+# bodies (`dispatch.host_runtime.packets`), never another card's. Every sprint role writes the sprint
+# reservation index and its locks (no secrets; the board guard checks it against the live sprints),
+# which the sprint guard of `task move`/`comment` and `sprint resume` refresh.
 ROLE_ENV = "BOARD_ROLE"
 CARD_ENV = "UMMANU_HEAD_CARD"
 CARD_ROLES = ("worker", "reviewer")
 CARD_READ = "artifacts/prompts"
 CARD_WRITE = "artifacts/bodies"
-OBSERVER_WRITE_DIRS = ("sprints",)
+SPRINT_ROLES = ("worker", "reviewer", "observer")
+SPRINT_WRITE_DIRS = ("sprints",)
 # A rule binds the inode, and the dispatcher replaces its state files atomically, so its directory is
 # the read root: `ummanu sprint status` and `task show` read the production state from there.
 DATA_READ = ("dispatcher", "data-manifest.json")
@@ -315,19 +317,22 @@ def role_paths(data_dir: Path, environ: Mapping[str, str]) -> tuple[list[Path], 
     """Extra read and write roots of this head's role, made private (0700) before the ruleset."""
     role = environ.get(ROLE_ENV, "").strip()
     card = environ.get(CARD_ENV, "").strip()
+    read: list[Path] = []
+    write: list[Path] = []
     if role in CARD_ROLES and card:
         token = card_token(card)
         if token in (".", ".."):
             raise SandboxError(f"card {card!r} names no directory of its own")
-        read, write = data_dir / CARD_READ / token, data_dir / CARD_WRITE / token
-        for path in (read.parent, read, write.parent, write):
+        prompts, bodies = data_dir / CARD_READ / token, data_dir / CARD_WRITE / token
+        for path in (prompts.parent, prompts, bodies.parent, bodies):
             _owned_private_dir(path)
-        return [read], [write]
-    if role == "observer":
-        for name in OBSERVER_WRITE_DIRS:
+        read.append(prompts)
+        write.append(bodies)
+    if role in SPRINT_ROLES:
+        for name in SPRINT_WRITE_DIRS:
             (data_dir / name).mkdir(parents=True, exist_ok=True)
-        return [], [data_dir / name for name in OBSERVER_WRITE_DIRS]
-    return [], []
+            write.append(data_dir / name)
+    return read, write
 
 
 def _owned_private_dir(path: Path) -> None:

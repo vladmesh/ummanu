@@ -332,9 +332,9 @@ caches, its own transcript directory, a private `/tmp/ummanu-sandbox-<uid>/<dige
 and the board's lock files. Its role, bound by the launch command (`BOARD_ROLE`, and for a worker or
 reviewer `UMMANU_HEAD_CARD`), adds only what that role's board commands write: a worker or reviewer
 reads its own card's `DATA_DIR/artifacts/prompts/<card>/` and writes its own card's
-`DATA_DIR/artifacts/bodies/<card>/` (both kept `0700`; other cards' prompts and bodies stay refused), an
-observer writes `DATA_DIR/sprints/` (the reserved-project index and its locks, which `task move` and
-`sprint resume` update). Everything else in the home is refused by the kernel.
+`DATA_DIR/artifacts/bodies/<card>/` (both kept `0700`; other cards' prompts and bodies stay refused), and
+a worker, reviewer or observer writes `DATA_DIR/sprints/` (the reserved-project index and its locks, no
+secrets, which the sprint guard of `task move`/`task comment` and `sprint resume` refresh). Everything else in the home is refused by the kernel.
 
 The board commands scrub secrets before they write, and the head can read neither the secret store
 nor `runtime.env`. The launcher marks its child `UMMANU_HEAD_SANDBOX=1`; in a marked process a secret
