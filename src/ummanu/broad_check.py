@@ -634,10 +634,11 @@ def _scratch_parent() -> str:
     `/tmp` itself everywhere but inside the head sandbox, which refuses `/tmp` and lets a head
     write only its launcher's private temp dir (`/tmp/ummanu-sandbox-<uid>/<digest>`, exported as
     TMPDIR). That dir is short too: with the scratch's own name a check's TMPDIR there is 51 bytes
-    for uid 1000, leaving 56 of the 108-byte Unix socket path for the check's own names.
+    for uid 1000, leaving 56 of the 108-byte Unix socket path for the check's own names. A sandboxed
+    process without a TMPDIR keeps `/tmp` and fails plainly rather than drift into the workspace.
     """
     if os.environ.get(HEAD_SANDBOX_ENV) == "1":
-        return os.environ.get("TMPDIR") or tempfile.gettempdir()
+        return os.environ.get("TMPDIR") or "/tmp"
     return "/tmp"
 
 
