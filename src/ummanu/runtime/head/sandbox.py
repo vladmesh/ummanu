@@ -34,6 +34,8 @@ import socket
 import stat
 import struct
 import sys
+import tempfile
+import threading
 import tomllib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -75,15 +77,29 @@ SECCOMP_FILTER_FLAG_NEW_LISTENER = 1 << 3
 SECCOMP_RET_ALLOW = 0x7FFF0000
 SECCOMP_RET_ERRNO = 0x00050000
 SECCOMP_RET_USER_NOTIF = 0x7FC00000
-SECCOMP_USER_NOTIF_FLAG_CONTINUE = 1
 NOTIF_RECV = 0xC0502100
 NOTIF_SEND = 0xC0182101
 NOTIF_ID_VALID = 0x40082102
 
+MSG_FASTOPEN = 0x20000000
+
+
+@dataclass(frozen=True)
+class _Abi:
+    audit: int
+    landlock_create_ruleset: int
+    seccomp: int
+    connect: int
+    sendto: int
+    sendmsg: int
+    sendmmsg: int
+    io_uring_setup: int
+    pidfd_getfd: int
+
+
 _ARCHES = {
-    # audit arch, landlock_create_ruleset, seccomp, connect, io_uring_setup
-    "x86_64": (0xC000003E, 444, 317, 42, 425),
-    "aarch64": (0xC00000B7, 444, 277, 203, 425),
+    "x86_64": _Abi(0xC000003E, 444, 317, 42, 44, 46, 307, 425, 438),
+    "aarch64": _Abi(0xC00000B7, 444, 277, 203, 206, 211, 269, 425, 438),
 }
 X32_SYSCALL_BIT = 0x40000000
 
@@ -138,25 +154,49 @@ class Policy:
                 raise SandboxError(f"{root} holds the home directory {home}; refusing to expose it")
 
 
-def git_paths(workspace: Path) -> tuple[list[Path], list[Path]]:
-    """Read and write roots for the repository a workspace is a linked worktree of.
+def trusted_git_store(workspace: Path, *, data_dir: Path | None, instance: str) -> Path | None:
+    """The git dir a dispatcher workspace was cut from, named by the installation, never by the workspace.
 
-    The shared git dir stays read-only apart from objects, refs, logs and this worktree's own admin
-    directory, so a head can commit but cannot plant config or hooks the host later runs. The main
-    checkout's working tree is not a root: the head has its own.
+    `<data>/workspaces/<project>/<card>` belongs to the `repo` of `<instance>/projects/<project>.yaml`
+    and `<data>/workspaces/observers/<sprint>` to the dispatcher's observer repository. The head can
+    rewrite its own `.git` pointer and worktree admin files, so they only select a worktree of this
+    store; any other workspace gets no git roots.
+    """
+    if data_dir is None or workspace.parent.parent != data_dir / "workspaces":
+        return None
+    group = workspace.parent.name
+    if group == "observers":
+        return (data_dir / "dispatcher" / "observer-root" / "observers" / ".git").resolve()
+    if not instance:
+        return None
+    import yaml
+
+    try:
+        record = yaml.safe_load((Path(instance) / "projects" / f"{group}.yaml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+    repo = record.get("repo") if isinstance(record, dict) else None
+    return (Path(str(repo)).expanduser() / ".git").resolve() if repo else None
+
+
+def git_paths(workspace: Path, store: Path | None) -> tuple[list[Path], list[Path]]:
+    """Read and write roots for a linked worktree of `store`.
+
+    The store stays read-only apart from objects, refs, logs and this worktree's own admin directory,
+    so a head can commit but cannot plant config or hooks the host later runs. The main checkout's
+    working tree is not a root: the head has its own. A `.git` pointer that leaves the store's
+    `worktrees/` gets nothing.
     """
     marker = workspace / ".git"
-    if not marker.is_file():
+    if store is None or marker.is_symlink() or not marker.is_file():
         return [], []
     text = marker.read_text(encoding="utf-8").strip()
     if not text.startswith("gitdir:"):
-        raise SandboxError(f"{marker} is not a gitdir pointer")
+        return [], []
     gitdir = (workspace / text.removeprefix("gitdir:").strip()).resolve()
-    common_file = gitdir / "commondir"
-    common = (gitdir / common_file.read_text(encoding="utf-8").strip()).resolve() if common_file.is_file() else gitdir
-    read = [common]
-    write = [gitdir, *(common / name for name in ("objects", "refs", "logs", "FETCH_HEAD"))]
-    return read, write
+    if gitdir.parent != store / "worktrees" or not store.is_dir():
+        return [], []
+    return [store], [gitdir, *(store / name for name in ("objects", "refs", "logs", "FETCH_HEAD"))]
 
 
 def board_port(instance: Path) -> int | None:
@@ -196,6 +236,7 @@ def build_policy(
     product_root: Path,
     private: Sequence[Path] = (),
     data_dir: Path | None = None,
+    git_store: Path | None = None,
     extra_read: Sequence[Path] = (),
     loopback_ports: Iterable[int] = (),
 ) -> Policy:
@@ -209,7 +250,7 @@ def build_policy(
     write = [workspace, *private, *(home / p for p in HOME_WRITE)]
     write.append(home / ".claude" / "projects" / claude_project_dir_name(workspace))
     write.append(Path("/dev/shm"))
-    repo_read, repo_write = git_paths(workspace)
+    repo_read, repo_write = git_paths(workspace, git_store)
     read += repo_read
     write += repo_write
     ports = {MEMORY_PORT, *loopback_ports}
@@ -222,12 +263,13 @@ def build_policy(
     if data_dir is not None:
         read += [data_dir / name for name in DATA_READ]
         write += [data_dir / name for name in (*DATA_WRITE_FILES, *DATA_WRITE_DIRS)]
+    # Landlock opens each root through its symlinks; the guard below must judge the same directory.
     policy = Policy(
-        read=tuple(dict.fromkeys(p for p in read if p.exists())),
-        write=tuple(dict.fromkeys(p for p in write if p.exists())),
+        read=tuple(dict.fromkeys(p.resolve() for p in read if p.exists())),
+        write=tuple(dict.fromkeys(p.resolve() for p in write if p.exists())),
         loopback_ports=frozenset(ports),
     )
-    policy.refuse_home_roots(home)
+    policy.refuse_home_roots(home.resolve())
     return policy
 
 
@@ -283,58 +325,107 @@ def role_skills(product_root: Path, instance: str) -> set[str]:
 def prepare_claude_home(
     claude_home: Path, workspace: Path, *, home: Path, skills: Sequence[Path]
 ) -> None:
-    """A Claude config dir holding only this sandbox's state: settings, trust, global rules, skills.
+    """A Claude config dir holding only this workspace's state: settings, trust, global rules, skills.
 
-    Its `projects/<workspace>` links to the same directory under `~/.claude/projects`, so the
-    product's transcript readers find the session where they always look.
+    One per workspace, so heads never share history or plant settings for each other. The head may
+    write this directory, so every entry the launcher (unconfined) touches is checked or replaced, never
+    followed: files are written to a fresh temp name and renamed over, a planted symlink or file
+    where a directory belongs is removed, and `skills/` is rebuilt. Its `projects/<workspace>` links to
+    the same directory under `~/.claude/projects`, so the product's transcript readers find the
+    session where they always look.
     """
-    claude_home.mkdir(mode=0o700, parents=True, exist_ok=True)
-    _write_json(claude_home / "settings.json", CLAUDE_SETTINGS)
-    state_path = claude_home / ".claude.json"
-    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
+    _private_dir(claude_home)
+    _write_private(claude_home, "settings.json", _json(CLAUDE_SETTINGS))
+    state = _read_json(claude_home / ".claude.json")
     state.update({"hasCompletedOnboarding": True, "theme": state.get("theme") or "dark",
                   "bypassPermissionsModeAccepted": True})
-    state.setdefault("projects", {}).setdefault(str(workspace), {})["hasTrustDialogAccepted"] = True
-    _write_json(state_path, state)
+    projects = state.get("projects") if isinstance(state.get("projects"), dict) else {}
+    projects.setdefault(str(workspace), {})["hasTrustDialogAccepted"] = True
+    state["projects"] = projects
+    _write_private(claude_home, ".claude.json", _json(state))
     rules = home / ".claude" / "CLAUDE.md"
     if rules.is_file():
-        shutil.copyfile(rules, claude_home / "CLAUDE.md")
+        _write_private(claude_home, "CLAUDE.md", rules.read_text(encoding="utf-8"))
     skills_dir = claude_home / "skills"
-    skills_dir.mkdir(exist_ok=True)
+    _remove(skills_dir)
+    skills_dir.mkdir(mode=0o700)
     for source in skills:
-        _link(skills_dir / source.name, source)
+        (skills_dir / source.name).symlink_to(source)
     name = claude_project_dir_name(workspace)
     transcripts = home / ".claude" / "projects" / name
     transcripts.mkdir(mode=0o700, parents=True, exist_ok=True)
-    (claude_home / "projects").mkdir(exist_ok=True)
-    _link(claude_home / "projects" / name, transcripts)
+    links = claude_home / "projects"
+    _private_dir(links)
+    link = links / name
+    if not (link.is_symlink() and Path(os.readlink(link)) == transcripts):
+        _remove(link)
+    if not link.is_symlink():
+        link.symlink_to(transcripts)
 
 
-def _write_json(path: Path, value: object) -> None:
-    text = json.dumps(value, indent=2, sort_keys=True) + "\n"
-    if path.is_file() and path.read_text(encoding="utf-8") == text:
+def _json(value: object) -> str:
+    return json.dumps(value, indent=2, sort_keys=True) + "\n"
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return {}
+    try:
+        with os.fdopen(fd, encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _private_dir(path: Path) -> None:
+    """`path` as a real directory of this user: anything else there is removed first."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        path.mkdir(mode=0o700, parents=True)
         return
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(text, encoding="utf-8")
-    os.chmod(temporary, 0o600)
-    temporary.replace(path)
-
-
-def _link(link: Path, target: Path) -> None:
-    if link.is_symlink() and Path(os.readlink(link)) == target:
+    if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid():
         return
-    if link.is_symlink():
-        link.unlink()
-    link.symlink_to(target)
+    _remove(path)
+    path.mkdir(mode=0o700)
+
+
+def _remove(path: Path) -> None:
+    """Remove a file, symlink or directory tree without following any link."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(info.st_mode):
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _write_private(directory: Path, name: str, text: str) -> None:
+    """Replace `directory/name` by a fresh 0600 file: a link planted at either name is never followed."""
+    fd, temporary = tempfile.mkstemp(prefix=f".{name}.", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(temporary, directory / name)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
 
 
 # --- kernel interfaces -------------------------------------------------------------------------
 
 _libc = ctypes.CDLL(None, use_errno=True)
 _libc.syscall.restype = ctypes.c_long
+_libc.connect.restype = ctypes.c_int
 
 
-def _arch() -> tuple[int, int, int, int, int]:
+def _arch() -> _Abi:
     machine = platform.machine()
     if machine not in _ARCHES:
         raise SandboxError(f"no sandbox support for the {machine} architecture")
@@ -352,7 +443,7 @@ def _syscall(number: int, *args: object) -> int:
 def landlock_abi() -> int:
     """The running kernel's Landlock ABI version, 0 when Landlock is unavailable."""
     try:
-        return _syscall(_arch()[1], None, ctypes.c_size_t(0), ctypes.c_uint32(CREATE_RULESET_VERSION))
+        return _syscall(_arch().landlock_create_ruleset, None, ctypes.c_size_t(0), ctypes.c_uint32(CREATE_RULESET_VERSION))
     except OSError:
         return 0
 
@@ -366,7 +457,7 @@ def apply_landlock(policy: Policy) -> None:
     abi = landlock_abi()
     if abi < 1:
         raise SandboxError("the kernel offers no Landlock")
-    create = _arch()[1]
+    create = _arch().landlock_create_ruleset
     handled = _handled_fs(abi)
     if abi >= 6:
         attr = struct.pack("<QQQ", handled, 0, SCOPE_ABSTRACT_UNIX | SCOPE_SIGNAL)
@@ -407,21 +498,62 @@ class _Program(ctypes.Structure):
 
 
 def _connect_filter() -> list[tuple[int, int, int, int]]:
-    """cBPF: foreign ABIs refused, connect() to the broker, io_uring refused, the rest allowed."""
-    audit_arch, _, _, connect, io_uring_setup = _arch()
-    load, jeq, jge, ret = 0x20, 0x15, 0x35, 0x06
-    return [
-        (load, 0, 0, 4),
-        (jeq, 0, 7, audit_arch),
-        (load, 0, 0, 0),
-        (jge, 5, 0, X32_SYSCALL_BIT),
-        (jeq, 3, 0, connect),
-        (jeq, 1, 0, io_uring_setup),
-        (ret, 0, 0, SECCOMP_RET_ALLOW),
-        (ret, 0, 0, SECCOMP_RET_ERRNO | errno.ENOSYS),
-        (ret, 0, 0, SECCOMP_RET_USER_NOTIF),
-        (ret, 0, 0, SECCOMP_RET_ERRNO | errno.EPERM),
+    """cBPF: foreign ABIs and io_uring refused, connect() to the broker, TCP Fast Open sends refused.
+
+    A `sendto`/`sendmsg` with `MSG_FASTOPEN` opens a TCP connection without `connect()`; it gets
+    EOPNOTSUPP, the answer of a kernel without Fast Open, so callers fall back to `connect()`.
+    """
+    abi = _arch()
+    program: list[tuple[str, int, str] | tuple[str, int] | str] = [
+        ("ld", 4),
+        ("jne", abi.audit, "foreign"),
+        ("ld", 0),
+        ("jge", X32_SYSCALL_BIT, "foreign"),
+        ("jeq", abi.connect, "notify"),
+        ("jeq", abi.io_uring_setup, "unsupported"),
+        ("jeq", abi.sendto, "flags3"),
+        ("jeq", abi.sendmmsg, "flags3"),
+        ("jeq", abi.sendmsg, "flags2"),
+        ("ret", SECCOMP_RET_ALLOW),
+        "flags3",
+        ("ld", 16 + 8 * 3),
+        ("jset", MSG_FASTOPEN, "fastopen"),
+        ("ret", SECCOMP_RET_ALLOW),
+        "flags2",
+        ("ld", 16 + 8 * 2),
+        ("jset", MSG_FASTOPEN, "fastopen"),
+        ("ret", SECCOMP_RET_ALLOW),
+        "notify",
+        ("ret", SECCOMP_RET_USER_NOTIF),
+        "fastopen",
+        ("ret", SECCOMP_RET_ERRNO | errno.EOPNOTSUPP),
+        "unsupported",
+        ("ret", SECCOMP_RET_ERRNO | errno.ENOSYS),
+        "foreign",
+        ("ret", SECCOMP_RET_ERRNO | errno.EPERM),
     ]
+    return _assemble(program)
+
+
+def _assemble(program: Sequence[tuple[str, int, str] | tuple[str, int] | str]) -> list[tuple[int, int, int, int]]:
+    """Labels to cBPF: `jeq`/`jge`/`jset` jump to the label when true, `jne` when false."""
+    labels: dict[str, int] = {}
+    for item in program:
+        if isinstance(item, str):
+            labels[item] = sum(1 for entry in program[: program.index(item)] if not isinstance(entry, str))
+    codes = {"ld": 0x20, "ret": 0x06, "jeq": 0x15, "jne": 0x15, "jge": 0x35, "jset": 0x45}
+    out: list[tuple[int, int, int, int]] = []
+    for item in program:
+        if isinstance(item, str):
+            continue
+        op, value = item[0], item[1]
+        if len(item) == 2:
+            out.append((codes[op], 0, 0, value))
+            continue
+        offset = labels[str(item[2])] - len(out) - 1
+        jt, jf = (0, offset) if op == "jne" else (offset, 0)
+        out.append((codes[op], jt, jf, value))
+    return out
 
 
 def install_connect_filter() -> int:
@@ -429,13 +561,13 @@ def install_connect_filter() -> int:
     program = _connect_filter()
     filters = (_Filter * len(program))(*(_Filter(*item) for item in program))
     fprog = _Program(len(program), filters)
-    return _syscall(_arch()[2], ctypes.c_uint(SECCOMP_SET_MODE_FILTER),
+    return _syscall(_arch().seccomp, ctypes.c_uint(SECCOMP_SET_MODE_FILTER),
                     ctypes.c_uint(SECCOMP_FILTER_FLAG_NEW_LISTENER), ctypes.byref(fprog))
 
 
 def _notif_sizes() -> tuple[int, int]:
     sizes = ctypes.create_string_buffer(6)
-    _syscall(_arch()[2], ctypes.c_uint(SECCOMP_GET_NOTIF_SIZES), ctypes.c_uint(0), sizes)
+    _syscall(_arch().seccomp, ctypes.c_uint(SECCOMP_GET_NOTIF_SIZES), ctypes.c_uint(0), sizes)
     notif, response, _ = struct.unpack("<HHH", sizes.raw)
     return notif, response
 
@@ -444,73 +576,128 @@ def _notif_sizes() -> tuple[int, int]:
 
 
 class Broker:
-    """Answers the sandbox's connect() calls; denies whatever it cannot read or prove allowed."""
+    """Makes the sandbox's connect() calls itself, from its own copy of the address it approved.
+
+    The kernel never re-reads the head's memory after the check (no `SECCOMP_USER_NOTIF_FLAG_CONTINUE`):
+    the broker takes a duplicate of the head's socket (`pidfd_getfd`, which shares the open file) and
+    connects it, reaching a Unix socket through an `O_PATH` handle of the file it checked. Each call
+    runs on its own thread, so one slow connect blocks only the head thread that made it. Anything the
+    broker cannot read, prove allowed or perform is refused with EACCES.
+    """
 
     def __init__(self, listener: int, policy: Policy, root_pid: int) -> None:
         self.listener = listener
         self.policy = policy
         self.root_pid = root_pid
+        self.local = local_addresses()
         self.notif_size, self.response_size = _notif_sizes()
 
     def serve_one(self) -> None:
         buffer = bytearray(self.notif_size)
         try:
             fcntl.ioctl(self.listener, NOTIF_RECV, buffer, True)
-        except OSError as exc:
-            if exc.errno in (errno.ENOENT, errno.EINTR):
-                return
-            raise
+        except OSError:
+            return  # the caller left, or a signal interrupted the wait; the head keeps running
         notif_id, pid = struct.unpack_from("<QI", buffer, 0)
         args = struct.unpack_from("<6Q", buffer, 32)
-        try:
-            allowed = self.decide(pid, args[1], args[2], notif_id)
-        except OSError:
-            allowed = False
-        response = bytearray(self.response_size)
-        if allowed:
-            struct.pack_into("<QqiI", response, 0, notif_id, 0, 0, SECCOMP_USER_NOTIF_FLAG_CONTINUE)
-        else:
-            struct.pack_into("<QqiI", response, 0, notif_id, 0, -errno.EACCES, 0)
-        try:
-            fcntl.ioctl(self.listener, NOTIF_SEND, response, True)
-        except OSError as exc:
-            if exc.errno not in (errno.ENOENT, errno.EINTR):
-                raise
+        threading.Thread(target=self._answer, args=(notif_id, pid, args), daemon=True).start()
 
-    def decide(self, pid: int, address: int, length: int, notif_id: int) -> bool:
+    def _answer(self, notif_id: int, pid: int, args: Sequence[int]) -> None:
+        try:
+            error = self.handle(notif_id, pid, args[0], args[1], args[2])
+        except Exception:  # noqa: BLE001 - whatever goes wrong is a refusal, never a crash
+            error = errno.EACCES
+        response = bytearray(self.response_size)
+        struct.pack_into("<QqiI", response, 0, notif_id, 0, -error if error else 0, 0)
+        with contextlib.suppress(OSError):
+            fcntl.ioctl(self.listener, NOTIF_SEND, response, True)
+
+    def handle(self, notif_id: int, pid: int, fd: int, address: int, length: int) -> int:
+        """Connect the head's socket `fd` to its address if allowed; the errno to answer with, 0 on success."""
         length = min(int(length), 128)
-        if length < 2:
-            return True
         with open(f"/proc/{pid}/mem", "rb", buffering=0) as memory:
             memory.seek(address)
             raw = memory.read(length)
         cwd = os.readlink(f"/proc/{pid}/cwd")
-        # The pid may have been reused between receipt and read; the id check pins it.
+        # The pid may have been reused between receipt and these reads; the id check pins it.
         fcntl.ioctl(self.listener, NOTIF_ID_VALID, struct.pack("<Q", notif_id))
-        return self.permits(raw, cwd)
+        family = struct.unpack_from("<H", raw, 0)[0] if len(raw) >= 2 else socket.AF_UNSPEC
+        if family != socket.AF_UNIX:
+            if not self.permits(raw, cwd):
+                return errno.EACCES
+            return self.connect_as(notif_id, pid, int(fd), raw)
+        path = raw[2:].split(b"\0", 1)[0]
+        if not path:
+            return errno.EACCES  # abstract namespace
+        target = os.path.realpath(os.path.join(cwd, os.fsdecode(path)))
+        if not self.policy.socket_allowed(Path(target)):
+            return errno.EACCES
+        handle = os.open(target, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            # What was opened, not what the path names now: a swapped directory cannot redirect it.
+            opened = Path(os.readlink(f"/proc/self/fd/{handle}"))
+            if not stat.S_ISSOCK(os.fstat(handle).st_mode) or not self.policy.socket_allowed(opened):
+                return errno.EACCES
+            via = os.fsencode(f"/proc/self/fd/{handle}")
+            return self.connect_as(notif_id, pid, int(fd), struct.pack("<H", socket.AF_UNIX) + via + b"\0")
+        finally:
+            os.close(handle)
+
+    def connect_as(self, notif_id: int, pid: int, fd: int, raw: bytes) -> int:
+        pidfd = os.pidfd_open(pid)
+        try:
+            duplicate = _syscall(_arch().pidfd_getfd, ctypes.c_int(pidfd), ctypes.c_int(fd), ctypes.c_uint(0))
+        finally:
+            os.close(pidfd)
+        try:
+            fcntl.ioctl(self.listener, NOTIF_ID_VALID, struct.pack("<Q", notif_id))
+            buffer = ctypes.create_string_buffer(raw, len(raw))
+            if _libc.connect(ctypes.c_int(duplicate), buffer, ctypes.c_uint(len(raw))) == 0:
+                return 0
+            return ctypes.get_errno() or errno.EACCES
+        finally:
+            os.close(duplicate)
 
     def permits(self, raw: bytes, cwd: str) -> bool:
-        family = struct.unpack_from("<H", raw, 0)[0]
-        if family == socket.AF_UNIX:
-            path = raw[2:].split(b"\0", 1)[0]
-            if not path:
-                return False  # abstract namespace
-            target = Path(os.path.realpath(os.path.join(cwd, os.fsdecode(path))))
-            return self.policy.socket_allowed(target)
-        if family == socket.AF_INET and len(raw) >= 8:
+        """Whether a non-Unix address may be reached: loopback and this host's own addresses only on
+        an allowed port, any other network address, any other family (it cannot reach this host)."""
+        del cwd
+        family = struct.unpack_from("<H", raw, 0)[0] if len(raw) >= 2 else socket.AF_UNSPEC
+        if family == socket.AF_INET:
+            if len(raw) < 8:
+                return False
             port = struct.unpack_from(">H", raw, 2)[0]
-            host = ipaddress.IPv4Address(raw[4:8])
-            return not (host.is_loopback or host.is_unspecified) or self.loopback_allowed(port)
-        if family == socket.AF_INET6 and len(raw) >= 24:
+            return not self.is_local(ipaddress.IPv4Address(raw[4:8])) or self.loopback_allowed(port)
+        if family == socket.AF_INET6:
+            if len(raw) < 24:
+                return False
             port = struct.unpack_from(">H", raw, 2)[0]
-            host6 = ipaddress.IPv6Address(raw[8:24])
-            mapped = host6.ipv4_mapped
-            local = host6.is_loopback or host6.is_unspecified or bool(mapped and (mapped.is_loopback or mapped.is_unspecified))
-            return not local or self.loopback_allowed(port)
-        return True
+            return not self.is_local(ipaddress.IPv6Address(raw[8:24])) or self.loopback_allowed(port)
+        return family != socket.AF_UNIX
+
+    def is_local(self, host: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+        if isinstance(host, ipaddress.IPv6Address) and host.ipv4_mapped is not None:
+            host = host.ipv4_mapped
+        return host.is_loopback or host.is_unspecified or host in self.local
 
     def loopback_allowed(self, port: int) -> bool:
         return port in self.policy.loopback_ports or port in sandbox_listening_ports(self.root_pid)
+
+
+def local_addresses() -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """This host's own addresses: a service bound to all interfaces answers on them as on loopback."""
+    found: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+    with contextlib.suppress(OSError):
+        lines = Path("/proc/net/fib_trie").read_text(encoding="ascii").splitlines()
+        for previous, line in zip(lines, lines[1:], strict=False):
+            if "/32 host LOCAL" in line:
+                with contextlib.suppress(ValueError):
+                    found.add(ipaddress.IPv4Address(previous.split()[-1]))
+    with contextlib.suppress(OSError):
+        for line in Path("/proc/net/if_inet6").read_text(encoding="ascii").splitlines():
+            with contextlib.suppress(ValueError, IndexError):
+                found.add(ipaddress.IPv6Address(int(line.split()[0], 16)))
+    return found
 
 
 def sandbox_listening_ports(root_pid: int) -> set[int]:
@@ -680,7 +867,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         private = [tmp]
         claude_home = None
         if args.claude:
-            claude_home = state / "claude"
+            claude_home = state / "claude" / hashlib.sha256(str(workspace).encode()).hexdigest()[:16]
             skills = sorted(
                 (home / ".claude" / "skills" / name).resolve()
                 for name in role_skills(product_root, instance)
@@ -691,10 +878,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.read += skills
         data_dir = installation_data_dir(instance)
         if data_dir is not None:
+            data_dir = data_dir.resolve()
             prepare_data_locks(data_dir)
         policy = build_policy(
             workspace, home=home, environ=os.environ, product_root=product_root, private=private,
-            data_dir=data_dir, extra_read=args.read, loopback_ports=args.loopback_port,
+            data_dir=data_dir, git_store=trusted_git_store(workspace, data_dir=data_dir, instance=instance),
+            extra_read=args.read, loopback_ports=args.loopback_port,
         )
         env = child_environment(os.environ, claude_home=claude_home, tmp=tmp)
         return run(args.command, policy, env)

@@ -6,6 +6,7 @@ skipped on a kernel without Landlock or seccomp user notification.
 
 from __future__ import annotations
 
+import errno
 import ipaddress
 import json
 import os
@@ -61,6 +62,8 @@ class Layout(unittest.TestCase):
         (self.instance / "board-store.env").write_text(
             "UMMANU_DB_HOST=127.0.0.1\nUMMANU_DB_PORT=5432\n", encoding="utf-8"
         )
+        (self.instance / "projects").mkdir()
+        (self.instance / "projects" / "app.yaml").write_text(f"id: app\nrepo: {self.repo}\n", encoding="utf-8")
         (self.home / "secrets").mkdir()
         self.product = self.root / "product"
         self.product.mkdir()
@@ -70,6 +73,7 @@ class Layout(unittest.TestCase):
             "home": self.home,
             "environ": {"UMMANU_INSTANCE": str(self.instance)},
             "product_root": self.product,
+            "git_store": self.common,
             **kwargs,
         }
         return sandbox.build_policy(self.workspace, **options)
@@ -85,6 +89,29 @@ class PolicyTests(Layout):
             [self.admin, *(self.common / name for name in ("objects", "refs", "logs"))],
         )
         self.assertIn(self.workspace, policy.write)
+
+    def test_the_git_store_comes_from_the_installation_not_the_workspace(self) -> None:
+        store = sandbox.trusted_git_store(self.workspace, data_dir=self.data, instance=str(self.instance))
+        self.assertEqual(store, self.common)
+        observer = self.data / "workspaces" / "observers" / "sprint-1"
+        self.assertEqual(
+            sandbox.trusted_git_store(observer, data_dir=self.data, instance=str(self.instance)),
+            self.data / "dispatcher" / "observer-root" / "observers" / ".git",
+        )
+        elsewhere = self.home / "scratch" / "card-1"
+        self.assertIsNone(sandbox.trusted_git_store(elsewhere, data_dir=self.data, instance=str(self.instance)))
+
+    def test_a_rewritten_git_pointer_opens_nothing(self) -> None:
+        for target in (self.home / "secrets", self.home / ".hermes", self.common.parent):
+            with self.subTest(target=target):
+                (self.workspace / ".git").write_text(f"gitdir: {target}\n", encoding="utf-8")
+                policy = self.policy()
+                self.assertFalse(any(root.is_relative_to(self.home / "secrets") for root in policy.read))
+                self.assertNotIn(self.common, policy.read)
+        (self.workspace / ".git").write_text(f"gitdir: {self.admin}\n", encoding="utf-8")
+        (self.admin / "commondir").write_text(f"{self.home / 'secrets'}\n", encoding="utf-8")
+        self.assertIn(self.common, self.policy().read)
+        self.assertNotIn(self.home / "secrets", self.policy().read)
 
     def test_installation_configuration_is_read_and_its_state_is_not(self) -> None:
         policy = self.policy()
@@ -103,7 +130,7 @@ class PolicyTests(Layout):
         self.assertTrue(all(path.exists() for path in expected))
 
     def test_a_root_that_holds_the_home_is_refused(self) -> None:
-        for extra in ([self.home], [self.root], [Path("/")]):
+        for extra in ([self.home], [self.root], [Path("/")], [self.home / "secrets" / ".."]):
             with self.subTest(extra=extra), self.assertRaisesRegex(sandbox.SandboxError, "holds the home"):
                 self.policy(extra_read=extra)
 
@@ -122,17 +149,17 @@ class BrokerTests(unittest.TestCase):
         self.broker = object.__new__(sandbox.Broker)
         self.broker.policy = sandbox.Policy(read=(), write=(self.write,), loopback_ports=frozenset({5432}))
         self.broker.root_pid = os.getpid()
+        self.broker.local = {ipaddress.IPv4Address("10.1.2.3"), ipaddress.IPv6Address("2001:db8::7")}
 
     def test_unix_sockets_inside_a_write_root_only(self) -> None:
-        self.assertTrue(self.broker.permits(unix_address(f"{self.write}/s"), "/"))
-        self.assertTrue(self.broker.permits(unix_address("s"), str(self.write)))
-        self.assertTrue(self.broker.permits(unix_address(sandbox.ALLOWED_SOCKETS[0]), "/"))
-        for path in ("/run/docker.sock", "/run/user/1000/bus", f"{self.write}/../other/s"):
+        policy = self.broker.policy
+        self.assertTrue(policy.socket_allowed(self.write / "s"))
+        self.assertTrue(policy.socket_allowed(Path(sandbox.ALLOWED_SOCKETS[0])))
+        for path in ("/run/docker.sock", "/run/user/1000/bus", "/srv/work/other/s"):
             with self.subTest(path=path):
-                self.assertFalse(self.broker.permits(unix_address(path), "/"))
+                self.assertFalse(policy.socket_allowed(Path(path)))
+        self.assertFalse(self.broker.permits(unix_address(f"{self.write}/s"), "/"))
 
-    def test_abstract_unix_sockets_are_refused(self) -> None:
-        self.assertFalse(self.broker.permits(struct.pack("<H", socket.AF_UNIX) + b"\0name", "/"))
 
     def test_loopback_reaches_listed_ports_and_the_network_is_open(self) -> None:
         with mock.patch.object(sandbox, "sandbox_listening_ports", return_value=set()):
@@ -141,12 +168,53 @@ class BrokerTests(unittest.TestCase):
             self.assertFalse(self.broker.permits(inet_address("0.0.0.0", 8787), "/"))
             self.assertFalse(self.broker.permits(inet6_address("::1", 8787), "/"))
             self.assertFalse(self.broker.permits(inet6_address("::ffff:127.0.0.1", 8787), "/"))
+            self.assertFalse(self.broker.permits(inet_address("10.1.2.3", 8787), "/"))
+            self.assertFalse(self.broker.permits(inet6_address("2001:db8::7", 8787), "/"))
+            self.assertTrue(self.broker.permits(inet_address("10.1.2.3", 5432), "/"))
             self.assertTrue(self.broker.permits(inet_address("140.82.112.3", 443), "/"))
             self.assertTrue(self.broker.permits(inet6_address("2606:4700::6810:84e5", 443), "/"))
 
     def test_a_listener_inside_the_sandbox_is_reachable(self) -> None:
         with mock.patch.object(sandbox, "sandbox_listening_ports", return_value={41000}):
             self.assertTrue(self.broker.permits(inet_address("127.0.0.1", 41000), "/"))
+
+
+class FilterTests(unittest.TestCase):
+    """The cBPF program, run by a small interpreter over hand-made seccomp_data."""
+
+    def evaluate(self, nr: int, *, arch: int | None = None, args: tuple[int, ...] = (0,) * 6) -> int:
+        abi = sandbox._arch()
+        data = struct.pack("<iIQ6Q", nr, abi.audit if arch is None else arch, 0, *args)
+        pc, accumulator = 0, 0
+        program = sandbox._connect_filter()
+        while True:
+            code, jt, jf, k = program[pc]
+            if code == 0x20:
+                accumulator = struct.unpack_from("<I", data, k)[0]
+                pc += 1
+            elif code == 0x06:
+                return k
+            else:
+                taken = {0x15: accumulator == k, 0x35: accumulator >= k, 0x45: bool(accumulator & k)}[code]
+                pc += 1 + (jt if taken else jf)
+
+    def test_connect_goes_to_the_broker_and_other_calls_pass(self) -> None:
+        abi = sandbox._arch()
+        self.assertEqual(self.evaluate(abi.connect), sandbox.SECCOMP_RET_USER_NOTIF)
+        self.assertEqual(self.evaluate(0), sandbox.SECCOMP_RET_ALLOW)
+        self.assertEqual(self.evaluate(abi.sendto), sandbox.SECCOMP_RET_ALLOW)
+
+    def test_fast_open_sends_io_uring_and_foreign_abis_are_refused(self) -> None:
+        abi = sandbox._arch()
+        fastopen = sandbox.MSG_FASTOPEN
+        errno_of = sandbox.SECCOMP_RET_ERRNO
+        self.assertEqual(self.evaluate(abi.sendto, args=(3, 0, 0, fastopen, 0, 0)), errno_of | errno.EOPNOTSUPP)
+        self.assertEqual(self.evaluate(abi.sendmmsg, args=(3, 0, 0, fastopen, 0, 0)), errno_of | errno.EOPNOTSUPP)
+        self.assertEqual(self.evaluate(abi.sendmsg, args=(3, 0, fastopen, 0, 0, 0)), errno_of | errno.EOPNOTSUPP)
+        self.assertEqual(self.evaluate(abi.sendmsg, args=(3, 0, 0x40, 0, 0, 0)), sandbox.SECCOMP_RET_ALLOW)
+        self.assertEqual(self.evaluate(abi.io_uring_setup), errno_of | errno.ENOSYS)
+        self.assertEqual(self.evaluate(0, arch=0x40000003), errno_of | errno.EPERM)
+        self.assertEqual(self.evaluate(abi.connect | sandbox.X32_SYSCALL_BIT), errno_of | errno.EPERM)
 
 
 class LaunchStateTests(Layout):
@@ -181,6 +249,28 @@ class LaunchStateTests(Layout):
         self.assertEqual(
             (claude_home / "projects" / name).resolve(), self.home / ".claude" / "projects" / name
         )
+
+    def test_links_planted_in_the_claude_home_are_replaced_not_followed(self) -> None:
+        credentials = self.home / "secrets" / "credentials.json"
+        credentials.write_text('{"token": "owner"}', encoding="utf-8")
+        victim = self.home / "secrets" / "victim"
+        victim.write_text("kept\n", encoding="utf-8")
+        (self.home / ".claude").mkdir()
+        (self.home / ".claude" / "CLAUDE.md").write_text("rules\n", encoding="utf-8")
+        claude_home = self.root / "state" / "claude"
+        claude_home.mkdir(parents=True)
+        (claude_home / ".claude.json").symlink_to(credentials)
+        (claude_home / "CLAUDE.md").symlink_to(victim)
+        (claude_home / "skills").symlink_to(self.home / "secrets")
+        (claude_home / "projects").symlink_to(self.home / "secrets")
+        sandbox.prepare_claude_home(claude_home, self.workspace, home=self.home, skills=[])
+        self.assertEqual(credentials.read_text(encoding="utf-8"), '{"token": "owner"}')
+        self.assertEqual(victim.read_text(encoding="utf-8"), "kept\n")
+        for name in (".claude.json", "CLAUDE.md", "skills", "projects"):
+            with self.subTest(name=name):
+                self.assertFalse((claude_home / name).is_symlink())
+        self.assertNotIn("owner", (claude_home / ".claude.json").read_text(encoding="utf-8"))
+        self.assertEqual(sorted(path.name for path in (self.home / "secrets").iterdir()), ["credentials.json", "victim"])
 
     def test_role_skills_come_from_the_product_and_installation_manifests(self) -> None:
         (self.product / "skills").mkdir()
@@ -253,6 +343,29 @@ class KernelConfinementTests(Layout):
             f"/usr/bin/python3 -I -c {shlex.quote(probe)} {self.home}/secrets/s {self.workspace}"
         )
         self.assertEqual(result.stdout.split(), ["PermissionError", "ok"], result.stderr)
+
+    def test_loopback_reaches_only_the_sandbox_s_own_listeners(self) -> None:
+        outside = socket.socket()
+        self.addCleanup(outside.close)
+        outside.bind(("127.0.0.1", 0))
+        outside.listen()
+        probe = (
+            "import socket,sys\n"
+            "def attempt(port):\n"
+            "    try:\n"
+            "        socket.create_connection(('127.0.0.1', port), 5).close(); return 'ok'\n"
+            "    except OSError as exc:\n"
+            "        return exc.__class__.__name__\n"
+            "own = socket.socket(); own.bind(('127.0.0.1', 0)); own.listen()\n"
+            "fast = socket.socket()\n"
+            "try:\n"
+            "    fast.sendto(b'x', 0x20000000, ('127.0.0.1', int(sys.argv[1]))); opened = 'sent'\n"
+            "except OSError as exc:\n"
+            "    opened = exc.__class__.__name__\n"
+            "print(attempt(int(sys.argv[1])), attempt(own.getsockname()[1]), opened)\n"
+        )
+        result = self.launch(f"/usr/bin/python3 -I -c {shlex.quote(probe)} {outside.getsockname()[1]}")
+        self.assertEqual(result.stdout.split(), ["PermissionError", "ok", "OSError"], result.stderr)
 
     def test_a_home_wide_workspace_never_starts(self) -> None:
         result = subprocess.run(

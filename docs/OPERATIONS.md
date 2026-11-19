@@ -324,24 +324,36 @@ Each head of the profile then starts under `src/ummanu/runtime/head/sandbox.py`,
 `landlock`) and brokers its `connect()` calls through seccomp user notification. The head reads the
 system, `~/.local/bin`, `~/.local/share/claude`, `~/.rustup`, `~/.cargo`, the product checkout, the
 installation's configuration (`instance.yaml`, `board-store.env`, `heads`, `projects`, `skills`,
-`adapters`), the git store its workspace belongs to, its profile's `claude_settings` file and the
-`sandbox_read` roots. It writes its workspace, that store's objects, refs and its own worktree admin
-dir, the cargo caches, its own transcript directory, a private `/tmp/ummanu-sandbox-<uid>/<digest>`
-(its `TMPDIR`) and the board's lock files. Everything else in the home is refused by the kernel, as is
-any Unix socket outside the write roots and loopback TCP other than the board, the memory service and
-listeners the head opened itself. The network beyond loopback stays open (GitHub, Anthropic).
+`adapters`), its project's git store, its profile's `claude_settings` file and the `sandbox_read`
+roots. It writes its workspace, that store's objects, refs and its own worktree admin dir, the cargo
+caches, its own transcript directory, a private `/tmp/ummanu-sandbox-<uid>/<digest>` (its `TMPDIR`)
+and the board's lock files. Everything else in the home is refused by the kernel. The git store is
+the `repo` of `projects/<project>.yaml` for a workspace under `DATA_DIR/workspaces/<project>/`, or
+the observer repository for `DATA_DIR/workspaces/observers/`; the head's own `.git` pointer only picks
+a worktree inside it.
 
-Claude Code runs with `CLAUDE_CONFIG_DIR=~/.local/state/ummanu/head-sandbox/claude`, shared by the
-sandboxed heads: settings, trust, `~/.claude/CLAUDE.md` and the skills the product and installation
-manifests declare. Its `projects/` links each workspace to the usual `~/.claude/projects/<workspace>`,
-so transcript and vitality readers are unchanged. The user's hooks, status line and
-`CLAUDE_CODE_OAUTH_TOKEN` are not inherited, so the account comes from `claude_settings` alone.
+The broker performs each `connect()` itself, on a duplicate of the head's socket and from its own copy
+of the address, so the head cannot change the address after the check. It allows a Unix socket inside
+a write root (and systemd-resolved), loopback or this host's own addresses only on the board port, the
+memory service (8077) and listeners the head opened itself, and any other network address (GitHub,
+Anthropic). TCP Fast Open sends and io_uring are refused.
+
+Claude Code runs with `CLAUDE_CONFIG_DIR=~/.local/state/ummanu/head-sandbox/claude/<digest>`, one per
+workspace: settings, trust, `~/.claude/CLAUDE.md` and the skills the product and installation
+manifests declare, rewritten at each launch without following anything the head left there. Its
+`projects/` links the workspace to the usual `~/.claude/projects/<workspace>`, so transcript and
+vitality readers are unchanged. The user's hooks, status line and `CLAUDE_CODE_OAUTH_TOKEN` are not
+inherited, so the account comes from `claude_settings` alone.
 
 The launcher refuses to start the head, never runs it unconfined, when the kernel lacks Landlock or
-seccomp user notification, or when any root is the home directory or holds it. Known limits: the
-board store is reached with the installation's credentials, so `ummanu task`, `sprint` and `issue`
-still read every project's cards; `ummanu knowledge write` fails because the knowledge tree is not
-writable. Check a profile by hand from a worktree of its project:
+seccomp user notification, or when any root resolves to the home directory or a directory above it.
+Known limits: the board store is reached with the installation's credentials, so `ummanu task`,
+`sprint` and `issue` still read every project's cards; `ummanu knowledge write` fails because the
+knowledge tree is not writable; on a kernel before Landlock ABI 6 the head can still signal the
+runtime user's other processes and read their `/proc/<pid>/cmdline` (not their environment, memory or
+files); and the host's own git commands in the workspace still read the config the workspace points to.
+
+Check a profile by hand from a worktree of its project:
 
 ```bash
 cd DATA_DIR/workspaces/PROJECT/SOME-WORKTREE
