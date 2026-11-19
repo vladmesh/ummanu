@@ -16,6 +16,7 @@ import os
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 from ummanu.runtime import role_env
@@ -41,6 +42,10 @@ CODEX_EFFORTS = {
 CLAUDE_EFFORTS = {"default", "low", "medium", "high", "xhigh", "max"}
 # A claude profile's own settings file, passed as `--settings` (another account, for one).
 CLAUDE_SETTINGS_KEY = "claude_settings"
+# `sandbox = true` runs a claude profile's heads under `sandbox.py`; `sandbox_read` adds read roots.
+SANDBOX_KEY = "sandbox"
+SANDBOX_READ_KEY = "sandbox_read"
+SANDBOX_SCRIPT = Path("src") / "ummanu" / "runtime" / "head" / "sandbox.py"
 
 # Interactive adapters receive prompts through their live pane.
 PROMPT_AFTER_START_ADAPTERS = {"codex"}
@@ -106,10 +111,13 @@ def validate_launch_shape(profile_id: str, profile: Mapping[str, Any]) -> None:
                 f"profile {profile_id!r} has unknown claude effort {effort!r} (known: {known})"
             )
         claude_settings_path(profile, profile_id)
-    elif CLAUDE_SETTINGS_KEY in profile:
-        raise HeadCommandError(
-            f"profile {profile_id!r} sets {CLAUDE_SETTINGS_KEY} but its adapter is {adapter!r}, not 'claude'"
-        )
+        sandbox_reads(profile, profile_id)
+    else:
+        for key in (CLAUDE_SETTINGS_KEY, SANDBOX_KEY, SANDBOX_READ_KEY):
+            if key in profile:
+                raise HeadCommandError(
+                    f"profile {profile_id!r} sets {key} but its adapter is {adapter!r}, not 'claude'"
+                )
     # Backend validity is independent of the CLI adapter.
     runtime = _named(profile.get("runtime", DEFAULT_HEAD_RUNTIME), f"profile {profile_id!r} runtime")
     if runtime not in HEAD_RUNTIMES:
@@ -144,6 +152,47 @@ def claude_settings_path(profile: Mapping[str, Any], profile_id: str = "head") -
             f"profile {profile_id!r} {CLAUDE_SETTINGS_KEY} must be an absolute path, got {value!r}"
         )
     return value
+
+
+def sandbox_reads(profile: Mapping[str, Any], profile_id: str = "head") -> tuple[str, ...] | None:
+    """The extra read roots of a sandboxed profile, or None when its heads run unconfined.
+
+    `sandbox = true` confines every head of the profile to its workspace (`sandbox.py`);
+    `sandbox_read` lists absolute paths it may also read, such as a reference source tree.
+    """
+    enabled = profile.get(SANDBOX_KEY, False)
+    if not isinstance(enabled, bool):
+        raise HeadCommandError(f"profile {profile_id!r} {SANDBOX_KEY} must be true or false")
+    reads = profile.get(SANDBOX_READ_KEY, [])
+    if not isinstance(reads, list) or not all(isinstance(path, str) and os.path.isabs(path) for path in reads):
+        raise HeadCommandError(f"profile {profile_id!r} {SANDBOX_READ_KEY} must be a list of absolute paths")
+    if reads and not enabled:
+        raise HeadCommandError(f"profile {profile_id!r} sets {SANDBOX_READ_KEY} without {SANDBOX_KEY} = true")
+    return tuple(reads) if enabled else None
+
+
+def sandboxed(command: str, profile: Mapping[str, Any], workspace: str) -> str:
+    """`command` run under the product's sandbox launcher, or as is for an unconfined profile."""
+    reads = sandbox_reads(profile)
+    if reads is None:
+        return command
+    if not workspace:
+        raise HeadCommandError("a sandboxed head needs its workspace to confine it to")
+    settings = claude_settings_path(profile)
+    root = role_env.runtime_product_root()
+    args = [
+        str(role_env.managed_venv_bin(root) / "python3"),
+        "-I",
+        str(root / SANDBOX_SCRIPT),
+        "--workspace",
+        workspace,
+        "--product-root",
+        str(root),
+        "--claude",
+    ]
+    for path in (*reads, *([settings] if settings else [])):
+        args += ["--read", path]
+    return f"{shlex.join(args)} -- {command}"
 
 
 def _named(value: object, what: str) -> str:
@@ -312,7 +361,6 @@ if record.get('leaf') != before:
 
 
 def _render_claude(profile: Mapping[str, Any], *, prompt: str | None, workspace: str) -> str:
-    del workspace
     memory = json.dumps(
         {
             "mcpServers": {
@@ -345,7 +393,8 @@ def _render_claude(profile: Mapping[str, Any], *, prompt: str | None, workspace:
     if effort != "default":
         args += ["--effort", effort]
     command = shlex.join(args)
-    return command if prompt is None else f"{command} {prompt!r}"
+    command = command if prompt is None else f"{command} {prompt!r}"
+    return sandboxed(command, profile, workspace)
 
 
 def _render_hermes(profile: Mapping[str, Any], *, prompt: str | None, workspace: str) -> str:

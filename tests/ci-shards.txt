@@ -375,3 +375,4 @@ unit tests/test_automation_run_findings.py
 unit tests/test_dispatcher_tick_exit.py
 unit tests/test_ready_skips.py
 unit tests/test_runs_journal.py
+runtime-component tests/test_head_sandbox.py

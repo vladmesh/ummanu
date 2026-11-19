@@ -306,6 +306,63 @@ Route work onto it by pinning the profile on a sprint (`sprint create --observer
 or a card; role defaults keep their profiles. Check a file before routing to it:
 `claude --settings FILE -p --model haiku "Reply only PONG" </dev/null`.
 
+### Confining a profile's heads (`sandbox`)
+
+A head runs as the runtime user and can read whatever that user can: other projects' checkouts,
+agent profiles, every transcript under `~/.claude/projects`, the installation's state. A `claude`
+profile whose heads must not see that (one on an account other people can see, for one) sets:
+
+```toml
+[profiles.claude-opus-high-second]
+# ... as above, plus:
+sandbox = true
+sandbox_read = ["/home/dev/.hermes/hermes-agent"]   # optional extra read-only roots
+```
+
+Each head of the profile then starts under `src/ummanu/runtime/head/sandbox.py`, which forks the
+`claude` command into a Landlock ruleset (Linux 5.13 or later; `cat /sys/kernel/security/lsm` must list
+`landlock`) and brokers its `connect()` calls through seccomp user notification. The head reads the
+system, `~/.local/bin`, `~/.local/share/claude`, `~/.rustup`, `~/.cargo`, the product checkout, the
+installation's configuration (`instance.yaml`, `board-store.env`, `heads`, `projects`, `skills`,
+`adapters`), its project's git store, its profile's `claude_settings` file and the `sandbox_read`
+roots. It writes its workspace, that store's objects, refs and its own worktree admin dir, the cargo
+caches, its own transcript directory, a private `/tmp/ummanu-sandbox-<uid>/<digest>` (its `TMPDIR`)
+and the board's lock files. Everything else in the home is refused by the kernel. The git store is
+the `repo` of `projects/<project>.yaml` for a workspace under `DATA_DIR/workspaces/<project>/`, or
+the observer repository for `DATA_DIR/workspaces/observers/`; the head's own `.git` pointer only picks
+a worktree inside it.
+
+The broker performs each `connect()` itself, on a duplicate of the head's socket and from its own copy
+of the address, so the head cannot change the address after the check. It allows a Unix socket inside
+a write root (and systemd-resolved). Loopback, this host's own addresses and private, link-local and
+shared ranges (containers, the LAN) are reachable only on the board port, the memory service (8077),
+DNS (53) and listeners the head opened itself; any public address is reachable (GitHub, Anthropic). TCP Fast Open sends and io_uring are refused.
+
+Claude Code runs with `CLAUDE_CONFIG_DIR=~/.local/state/ummanu/head-sandbox/claude/<digest>`, one per
+workspace: settings, trust, `~/.claude/CLAUDE.md` and the skills the product and installation
+manifests declare, rewritten at each launch without following anything the head left there. Its
+`projects/` links the workspace to the usual `~/.claude/projects/<workspace>`, so transcript and
+vitality readers are unchanged. The user's hooks, status line and `CLAUDE_CODE_OAUTH_TOKEN` are not
+inherited, so the account comes from `claude_settings` alone.
+
+The launcher refuses to start the head, never runs it unconfined, when the kernel lacks Landlock or
+seccomp user notification, or when any root resolves to the home directory or a directory above it.
+Known limits: the board store is reached with the installation's credentials, so `ummanu task`,
+`sprint` and `issue` still read every project's cards; `ummanu knowledge write` fails because the
+knowledge tree is not writable; on a kernel before Landlock ABI 6 the head can still signal the
+runtime user's other processes and read their `/proc/<pid>/cmdline` (not their environment, memory or
+files); and the host's own git commands in the workspace still read the config the workspace points to.
+
+Check a profile by hand from a worktree of its project:
+
+```bash
+cd DATA_DIR/workspaces/PROJECT/SOME-WORKTREE
+~/ummanu/.venv/bin/python3 -I ~/ummanu/src/ummanu/runtime/head/sandbox.py \
+  --workspace "$PWD" --product-root ~/ummanu -- /bin/sh -c 'ls ~/projects; ls ~/.claude/projects'
+```
+
+Both listings must end in `Permission denied`.
+
 ### Codex home (`CODEX_HOME`)
 
 Every Codex head launched by the dispatcher, and the `openai-sub` resource probe, runs with one
