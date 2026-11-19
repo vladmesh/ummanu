@@ -222,7 +222,7 @@ class PrivateCheckTmpdirTests(BroadCheckTestCase):
                 self.assertEqual(receipt["environment_provenance"], {"TMPDIR": directory})
 
     def test_a_sandboxed_head_s_scratch_lives_in_its_own_temp_dir(self) -> None:
-        # ummanu-690: the head sandbox refuses `/tmp` itself; only its TMPDIR is writable.
+        # The head sandbox refuses `/tmp` itself; only its TMPDIR is writable.
         suite = self._suite("sandboxedsuite", "import os\nprint(os.environ['TMPDIR'])\n")
         private = Path(self.tmpdir.name) / "private-tmp"
         private.mkdir(mode=0o700)

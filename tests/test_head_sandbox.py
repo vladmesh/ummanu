@@ -606,8 +606,8 @@ class KernelConfinementTests(Layout):
         self.assertEqual(result.stdout.split(), ["PermissionError", "ok"], result.stderr)
 
     def test_the_broad_check_wrapper_writes_a_receipt_from_inside_the_sandbox(self) -> None:
-        # ummanu-690: the wrapper made its scratch in `/tmp` itself, which the sandbox refuses, so
-        # no sandboxed head could produce the receipt `report:done` asks for.
+        # The wrapper's scratch must not be in `/tmp` itself, which the sandbox refuses: no sandboxed
+        # head could produce the receipt `report:done` asks for.
         candidate = self.workspace / "candidate"
         (candidate / "ummanu").mkdir(parents=True)
         (candidate / "ummanu" / "__init__.py").write_text("", encoding="utf-8")
