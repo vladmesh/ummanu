@@ -11,7 +11,8 @@ refuses the launch; nothing ever runs unconfined.
 What a head reads: the system, its toolchain, the product checkout, its workspace and the git store
 the workspace belongs to, the installation's configuration, and the roots its profile names. What
 it writes: the workspace, its own Claude config dir and temp dir, the cargo caches, its transcript
-directory and the board's lock files. The rest of the home (other projects, agent profiles, other
+directory, the board's lock files and what its role needs (a worker or reviewer: its own card's task
+documents and report/verdict bodies; an observer: the sprint reservation index). The rest of the home (other projects, agent profiles, other
 transcripts, installation state) is refused by the kernel.
 """
 
@@ -27,6 +28,7 @@ import ipaddress
 import json
 import os
 import platform
+import re
 import select
 import shutil
 import signal
@@ -115,6 +117,23 @@ DATA_WRITE_FILES = ("board/.create.lock", "board/.audit.lock", "dispatcher/board
                     "dispatcher/cleanup.lock")
 DATA_WRITE_DIRS = ("board/assessment-decisions", "board/sql-sprint-locks", "board/product-issue-transactions",
                    "dispatcher/effects", "dispatcher/admission", "dispatcher/lifecycle")
+# Per role, from the role env the trusted launch command bound (`BOARD_ROLE`, `UMMANU_HEAD_CARD`): a
+# worker or reviewer reads its own card's task documents and writes its own card's report/verdict
+# bodies (`dispatch.host_runtime.packets`), never another card's. Every sprint role reads the sprint
+# reservation index and takes its locks (the sprint guard of `task move`/`comment` and `sprint resume`);
+# `sprints/` itself stays read-only, so a head cannot plant a link there that an unconfined writer of
+# the index would follow, and its own index refresh is skipped (`board.sprint_protocol.reservations`).
+ROLE_ENV = "BOARD_ROLE"
+CARD_ENV = "UMMANU_HEAD_CARD"
+CARD_ROLES = ("worker", "reviewer")
+CARD_READ = "artifacts/prompts"
+CARD_WRITE = "artifacts/bodies"
+SPRINT_ROLES = ("worker", "reviewer", "observer")
+SPRINT_READ = "sprints"
+SPRINT_LOCKS = ("sprints/active-repositories.lock", "sprints/admission.lock")
+# The dispatcher's overrides of the artifacts roots (`dispatch.host_runtime.packets`).
+BODY_DIR_ENV = "UMMANU_DISPATCHER_BODY_DIR"
+PROMPT_DIR_ENV = "UMMANU_DISPATCHER_PROMPT_DIR"
 # A rule binds the inode, and the dispatcher replaces its state files atomically, so its directory is
 # the read root: `ummanu sprint status` and `task show` read the production state from there.
 DATA_READ = ("dispatcher", "data-manifest.json")
@@ -131,6 +150,9 @@ STRIPPED_ENV = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_
                 "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "GPG_AGENT_INFO")
 CLAUDE_SETTINGS = {"skipDangerousModePermissionPrompt": True, "theme": "dark",
                    "env": {"DISABLE_AUTOUPDATER": "1"}}
+# Marks the confined child; must equal `ummanu.runtime.redact.HEAD_SANDBOX_ENV` (this launcher runs
+# with `-I` and imports nothing from the product).
+HEAD_SANDBOX_ENV = "UMMANU_HEAD_SANDBOX"
 # The sandbox's own state, beside the head git config the role env already keeps there.
 STATE_DIR = Path(".local") / "state" / "ummanu" / "head-sandbox"
 # Short, so a test that binds a Unix socket under TMPDIR stays within the 108-byte path limit.
@@ -248,7 +270,8 @@ def build_policy(
 ) -> Policy:
     """The roots one head may read and write; missing paths are dropped, nothing else is reachable.
 
-    `private` are the sandbox's own writable directories (its Claude config dir and temp dir).
+    `private` are the sandbox's own writable directories (its Claude config dir and temp dir) and its
+    role's (`role_paths`).
     """
     read = [Path(p) for p in SYSTEM_READ]
     read += [home / p for p in HOME_READ]
@@ -288,6 +311,59 @@ def prepare_data_locks(data_dir: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(FileExistsError):
             os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644))
+
+
+def card_token(reference: str) -> str:
+    """A card's directory name under the artifacts roots (`dispatch.state.request_token`)."""
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", reference).strip("-") or "empty"
+
+
+def role_paths(data_dir: Path, environ: Mapping[str, str]) -> tuple[list[Path], list[Path]]:
+    """Extra read and write roots of this head's role, made private (0700) before the ruleset."""
+    role = environ.get(ROLE_ENV, "").strip()
+    card = environ.get(CARD_ENV, "").strip()
+    read: list[Path] = []
+    write: list[Path] = []
+    if role in CARD_ROLES and card:
+        token = card_token(card)
+        if token in (".", ".."):
+            raise SandboxError(f"card {card!r} names no directory of its own")
+        prompt_root = Path(environ.get(PROMPT_DIR_ENV, "").strip() or data_dir / CARD_READ).expanduser()
+        body_root = Path(environ.get(BODY_DIR_ENV, "").strip().rstrip("/") or data_dir / CARD_WRITE).expanduser()
+        if not (prompt_root.is_absolute() and body_root.is_absolute()):
+            raise SandboxError("the dispatcher's prompt and body directories must be absolute")
+        prompts, bodies = prompt_root / token, body_root / token
+        for path in (prompts.parent, prompts, bodies.parent, bodies):
+            _owned_private_dir(path)
+        read.append(prompts)
+        write.append(bodies)
+    if role in SPRINT_ROLES:
+        (data_dir / SPRINT_READ).mkdir(parents=True, exist_ok=True)
+        read.append(data_dir / SPRINT_READ)
+        for name in SPRINT_LOCKS:
+            write.append(_owned_lock_file(data_dir / name))
+    return read, write
+
+
+def _owned_lock_file(path: Path) -> Path:
+    """`path` as a regular file of this user, created if missing; a link or anything else refuses."""
+    with contextlib.suppress(FileExistsError):
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644))
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        raise SandboxError(f"{path} is not a regular file of this user")
+    return path
+
+
+def _owned_private_dir(path: Path) -> None:
+    """`path` as a 0700 directory of this user; anything else there refuses the launch."""
+    with contextlib.suppress(FileExistsError):
+        path.mkdir(mode=0o700, parents=True)
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise SandboxError(f"{path} is not a directory of this user")
+    if info.st_mode & 0o077:
+        os.chmod(path, 0o700)
 
 
 def installation_data_dir(instance: str) -> Path | None:
@@ -776,6 +852,8 @@ def descendants(root_pid: int) -> set[int]:
 def child_environment(environ: Mapping[str, str], *, claude_home: Path | None, tmp: Path) -> dict[str, str]:
     env = {key: value for key, value in environ.items() if key not in STRIPPED_ENV}
     env["TMPDIR"] = str(tmp)
+    # The board CLI then scrubs with what the head can read rather than failing on the refused store.
+    env[HEAD_SANDBOX_ENV] = "1"
     env["XDG_CACHE_HOME"] = str(tmp / "cache")
     # `~/.gitconfig` is out of reach and git refuses an unreadable one; role env names its own.
     env.setdefault("GIT_CONFIG_GLOBAL", os.devnull)
@@ -903,6 +981,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if data_dir is not None:
             data_dir = data_dir.resolve()
             prepare_data_locks(data_dir)
+            role_read, role_write = role_paths(data_dir, os.environ)
+            args.read += role_read
+            private += role_write
         policy = build_policy(
             workspace, home=home, environ=os.environ, product_root=product_root, private=private,
             data_dir=data_dir, git_store=trusted_git_store(workspace, data_dir=data_dir, instance=instance),

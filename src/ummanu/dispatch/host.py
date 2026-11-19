@@ -149,7 +149,7 @@ from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from ummanu.runtime.local_pty_head import RunEnd, head_run_end, head_run_turn_reading
 from ummanu.runtime.paths import configured_product_root
 from ummanu.runtime.prompt_document import PromptDocumentError
-from ummanu.runtime.role_env import BOARD_ACTOR_ENV
+from ummanu.runtime.role_env import BOARD_ACTOR_ENV, HEAD_CARD_ENV
 from ummanu.tasks import durability_dirt, specification_revision
 
 DESTRUCTIVE_VERDICTS = frozenset(
@@ -1412,6 +1412,8 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
         launch_identity: dict[str, str] = {}
         if role in {"worker", "reviewer"}:
             launch_identity[BOARD_ACTOR_ENV] = head
+            if task is not None:
+                launch_identity[HEAD_CARD_ENV] = str(task["ref"])
         # The backend is the profile's, whatever adapter the command turns out to run.
         heartbeat_owner = self.head_runtime_for(self._head_spec(head, ""))
         if pid_file and not _runtime_writes_launch_identity(heartbeat_owner):

@@ -8,6 +8,7 @@ being masked and, just as important, what must not be: a git sha in a CI-failure
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -166,6 +167,97 @@ class ScrubSecretsTests(unittest.TestCase):
 
             self.assertEqual(redact(f"board is {url}", env_files=[runtime]), f"board is {REDACTED}:env-value")
 
+
+class HeadSandboxRedactionTests(unittest.TestCase):
+    """A confined head (ummanu#887) cannot read the store or the env files; the kernel refuses them."""
+
+    def _refused(self, root: Path) -> Path:
+        env = root / "runtime.env"
+        env.write_text("SERVICE_TOKEN=unreadable-secret-value\n", encoding="utf-8")
+        return env
+
+    def test_inside_the_sandbox_a_refused_env_file_is_skipped_and_the_own_environment_scrubbed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = self._refused(Path(tmpdir))
+            environ = {"UMMANU_HEAD_SANDBOX": "1", "UMMANU_MEMORY_ACCESS_TOKEN": "visible-head-token-value"}
+            with (
+                mock.patch.dict("os.environ", environ),
+                mock.patch("ummanu.runtime.redact.DEFAULT_ENV_FILES", []),
+                mock.patch.object(Path, "read_bytes", side_effect=PermissionError(13, "denied")),
+            ):
+                output = redact("token visible-head-token-value here", env_files=[env])
+
+        self.assertEqual(output, f"token {REDACTED}:env-value here")
+
+    def test_outside_the_sandbox_a_refused_env_file_still_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = self._refused(Path(tmpdir))
+            with (
+                mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": ""}),
+                mock.patch("ummanu.runtime.redact.DEFAULT_ENV_FILES", []),
+                mock.patch.object(Path, "read_bytes", side_effect=PermissionError(13, "denied")),
+                self.assertRaises(PermissionError),
+            ):
+                redact("text", env_files=[env])
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a 0000 directory")
+    def test_a_refused_secrets_directory_counts_even_without_values(self):
+        from ummanu.runtime.redact import secret_store_refused
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            secrets = Path(tmpdir) / "secrets"
+            secrets.mkdir()
+            (secrets / "catalog.yaml").write_text("secrets: []\n", encoding="utf-8")
+            secrets.chmod(0)
+            try:
+                with mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": "1"}):
+                    self.assertTrue(secret_store_refused(secrets / "values"))
+                with mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": ""}):
+                    self.assertFalse(secret_store_refused(secrets / "values"))
+            finally:
+                secrets.chmod(0o700)
+            with mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": "1"}):
+                self.assertFalse(secret_store_refused(secrets / "values"))  # readable, no values/: read as always
+
+    def test_inside_the_sandbox_the_readable_board_credentials_are_scrubbed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir)
+            (instance / "board-store.env").write_text(
+                "UMMANU_DB_HOST=127.0.0.1\nUMMANU_DB_PASSWORD=board-db-password-value\n", encoding="utf-8"
+            )
+            text = "dsn password board-db-password-value"
+            with (
+                mock.patch("ummanu.runtime.redact.DEFAULT_ENV_FILES", []),
+                mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": "1", "UMMANU_INSTANCE": str(instance)}),
+            ):
+                self.assertEqual(redact(text), f"dsn password {REDACTED}:env-value")
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads a 0000 directory")
+    def test_board_redaction_values_inside_and_outside_the_sandbox(self):
+        from types import SimpleNamespace
+
+        from ummanu.tasks import TaskWriter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir)
+            values = instance / "secrets" / "values"
+            values.mkdir(parents=True)
+            writer = SimpleNamespace(instance_dir=instance, _redaction_cache=None)
+            values.chmod(0)
+            try:
+                with mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": "1"}):
+                    self.assertEqual(TaskWriter._redaction_values(writer), ())
+                # Unmarked, a store it cannot list is still an error, never an empty redaction.
+                with mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": ""}), self.assertRaises(PermissionError):
+                    TaskWriter._redaction_values(writer)
+            finally:
+                values.chmod(0o700)
+            # Marked but able to list the store: it is read as always.
+            with (
+                mock.patch.dict("os.environ", {"UMMANU_HEAD_SANDBOX": "1"}),
+                mock.patch("ummanu.secret_store.redaction_values", return_value=("store-secret-value",)),
+            ):
+                self.assertEqual(TaskWriter._redaction_values(writer), ("store-secret-value",))
 
 if __name__ == "__main__":
     unittest.main()

@@ -96,7 +96,8 @@ class CardRoleBoundaryTests(unittest.TestCase):
                                  "sha256:" + hashlib.sha256(self.document.read_bytes()).hexdigest())
                 self.assertEqual(self.catalog.head_launch.call_args.kwargs["role"], role)
                 self.assertIn("local_run_policy", self.catalog.head_launch.call_args.kwargs)
-                self.assertEqual(self.catalog.head_launch.call_args.kwargs["identity"], {"BOARD_ACTOR": "head"})
+                self.assertEqual(self.catalog.head_launch.call_args.kwargs["identity"],
+                                 {"BOARD_ACTOR": "head", "UMMANU_HEAD_CARD": self.task["ref"]})
                 grant.assert_called_once()
                 self.assertEqual(wrap.call_args.args[3],
                                  {"run_id": "run", "role": role, "task": "card:ummanu-253", "leaf": ""})

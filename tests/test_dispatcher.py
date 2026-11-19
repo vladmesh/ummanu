@@ -8950,10 +8950,11 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     def test_report_and_verdict_handoffs_read_their_body_from_the_private_data_dir(self) -> None:
         """ummanu-241: with no override the worker's report and the reviewer's verdict are handed a
-        body path under `<data_dir>/artifacts/bodies` (0700), and the commands they hold read it
-        from there and move the card: report to validate, red verdict to assessment."""
+        body path under `<data_dir>/artifacts/bodies/<ref>` (0700, like the root above it), and the
+        commands they hold read it from there and move the card: report to validate, red verdict to
+        assessment."""
         # The host's own data dir: the fixture roots the fake host at `<data_dir>/workspaces`.
-        bodies = Path(self.host.data_dir) / "artifacts" / "bodies"
+        bodies = Path(self.host.data_dir) / "artifacts" / "bodies" / "ummanu-510"
         with mock.patch.dict(os.environ):
             os.environ.pop("UMMANU_DISPATCHER_BODY_DIR", None)
             self.start_dispatcher()
@@ -8965,6 +8966,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             report_body = bodies / f"ummanu-report-ummanu-510-{record['report_generation']}.md"
             self.assertIn(f"--body-file {report_body}", report_line)
             self.assertEqual(stat.S_IMODE(bodies.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(bodies.parent.stat().st_mode), 0o700)
             report_body.write_text("worker report from the private body file", encoding="utf-8")
 
             argv, code, errors = self._run_handed_command(report_line)
@@ -10806,7 +10808,7 @@ class HeadPromptTests(unittest.TestCase):
 
         self.assertEqual(len(commands), 2, "one green and one red command")
         for command in commands:
-            self.assertIn(f"--body-file {self.bodies}/ummanu-verdict-ummanu-510-3.md", command)
+            self.assertIn(f"--body-file {self.bodies}/ummanu-510/ummanu-verdict-ummanu-510-3.md", command)
             self.assertNotIn("<file>", command)
 
     def test_review_prompt_names_a_worker_head_chosen_by_failover(self) -> None:
@@ -11070,7 +11072,7 @@ class HeadPromptTests(unittest.TestCase):
         # classification, and the worker copies the line rather than editing a placeholder.
         self.assertEqual(len(commands), 4, "one done, one partial and one blocked command per classification")
         for command in commands:
-            self.assertIn(f"--body-file {self.bodies}/ummanu-report-ummanu-510-0.md", command)
+            self.assertIn(f"--body-file {self.bodies}/ummanu-510/ummanu-report-ummanu-510-0.md", command)
             self.assertNotIn("<file>", command)
         blocked = [command for command in commands if "--kind blocked" in command]
         self.assertEqual(
@@ -11090,23 +11092,27 @@ class HeadPromptTests(unittest.TestCase):
             for command in self._command_lines(doc):
                 # The old shared name, not any path under /tmp: the suite's own temp root is /tmp/ummanu-*.
                 self.assertNotRegex(command, r"--body-file /tmp/ummanu-(report|verdict)-")
-                self.assertIn(f"--body-file {self.bodies}/ummanu-", command)
+                self.assertIn(f"--body-file {self.bodies}/ummanu-510/ummanu-", command)
+        card = self.bodies / "ummanu-510"
         self.assertEqual(stat.S_IMODE(self.bodies.stat().st_mode), 0o700)
-        self.assertEqual(list(self.bodies.iterdir()), [], "the head writes the body, not the dispatcher")
+        self.assertEqual(stat.S_IMODE(card.stat().st_mode), 0o700)
+        self.assertEqual(list(self.bodies.iterdir()), [card], "one directory per card")
+        self.assertEqual(list(card.iterdir()), [], "the head writes the body, not the dispatcher")
 
     def test_clearing_report_bodies_takes_every_round_of_one_card_only(self) -> None:
         """Every round of this card goes, including the one about to start. Another card's bodies
-        and anything that is not a numbered report body stay: the sweep runs in a directory every
-        card shares, where deleting by prefix alone would reach other cards' rounds."""
+        and anything that is not a numbered report body stay: each card has its own directory, and the
+        sweep still matches by prefix and round so a stray file there survives."""
         root = Path(self.tmpdir.name)
         with mock.patch.dict(os.environ, {"UMMANU_DISPATCHER_BODY_DIR": str(root)}):
             mine = [Path(_body_file_path(root, "report", "ummanu-510", n)) for n in (0, 1, 12)]
             others = [
                 Path(_body_file_path(root, "report", "ummanu-511", 1)),
                 Path(_body_file_path(root, "verdict", "ummanu-510", 1)),
-                root / "ummanu-report-ummanu-510-notes.md",
+                root / "ummanu-510" / "ummanu-report-ummanu-510-notes.md",
             ]
             for path in mine + others:
+                path.parent.mkdir(exist_ok=True)
                 path.write_text("body", encoding="utf-8")
 
             self.host._clear_report_bodies("ummanu-510")
@@ -11473,7 +11479,8 @@ class HeadPromptTests(unittest.TestCase):
         root = Path(self.tmpdir.name)
         workspace = root / "ws"
         workspace.mkdir()
-        stale = root / "ummanu-verdict-ummanu-510-3.md"
+        stale = root / "ummanu-510" / "ummanu-verdict-ummanu-510-3.md"
+        stale.parent.mkdir()
         stale.write_text("half-written verdict from the head that died", encoding="utf-8")
 
         with mock.patch.dict(  # noqa: SIM117

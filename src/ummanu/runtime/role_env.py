@@ -110,6 +110,8 @@ OBSERVER_GENERATION_ENV = "UMMANU_OBSERVER_GENERATION"
 MEMORY_ACCESS_TOKEN_ENV = "UMMANU_MEMORY_ACCESS_TOKEN"
 # The `--actor` board commands default to: a worker/reviewer head's profile, else the role name.
 BOARD_ACTOR_ENV = "BOARD_ACTOR"
+# The card a worker/reviewer head works on: the head sandbox gives it that card's prompt and body dirs.
+HEAD_CARD_ENV = "UMMANU_HEAD_CARD"
 UNIT_BOUND_ENV = (
     *RUNTIME_ENV_FILE_ENVS,
     *RUNTIME_PYTHONPATH_ENVS,
@@ -119,9 +121,12 @@ UNIT_BOUND_ENV = (
     OBSERVER_GENERATION_ENV,
     MEMORY_ACCESS_TOKEN_ENV,
     BOARD_ACTOR_ENV,
+    HEAD_CARD_ENV,
 )
 # Launcher-supplied identity only: runtime.env must never let a head claim another sprint or name.
-LAUNCHER_ONLY_ENV = (OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV, MEMORY_ACCESS_TOKEN_ENV, BOARD_ACTOR_ENV)
+LAUNCHER_ONLY_ENV = (
+    OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV, MEMORY_ACCESS_TOKEN_ENV, BOARD_ACTOR_ENV, HEAD_CARD_ENV
+)
 # Bearer values: they reach a head through its launch environment, never a command line that sudo
 # logs and every same-user process can read.
 LAUNCH_SECRET_ENV = (MEMORY_ACCESS_TOKEN_ENV,)
@@ -130,8 +135,8 @@ LAUNCH_BOUND_ENV = (RUNTIME_ENV_FILE_ENV, RUNTIME_PYTHONPATH_ENV, "UMMANU_INSTAN
 
 ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "pipeline": NONSECRET_ENV,
-    "worker": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV, BOARD_ACTOR_ENV),
-    "reviewer": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV, BOARD_ACTOR_ENV),
+    "worker": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV, BOARD_ACTOR_ENV, HEAD_CARD_ENV),
+    "reviewer": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV, BOARD_ACTOR_ENV, HEAD_CARD_ENV),
     "observer": (*NONSECRET_ENV, OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV, MEMORY_ACCESS_TOKEN_ENV),
     "steward": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
     "retro": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),

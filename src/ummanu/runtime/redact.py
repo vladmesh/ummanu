@@ -6,8 +6,9 @@
 
 from __future__ import annotations
 
+import os
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from contextlib import suppress
 from pathlib import Path
 
@@ -20,6 +21,45 @@ DEFAULT_ENV_FILES = [
     Path.home() / ".hermes" / ".env",
     default_instance_path() / "runtime.env",
 ]
+
+# Set by the head sandbox launcher on its confined child (`ummanu.runtime.head.sandbox`). Inside it the
+# kernel refuses the secret store and the env files; a value the process cannot read cannot reach its
+# text either, so a refused input is skipped and the process's own environment is scrubbed instead.
+HEAD_SANDBOX_ENV = "UMMANU_HEAD_SANDBOX"
+
+
+def in_head_sandbox(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether this process runs inside the head sandbox, where refused redaction inputs are expected."""
+    return (os.environ if environ is None else environ).get(HEAD_SANDBOX_ENV) == "1"
+
+
+def secret_store_refused(values_dir: Path) -> bool:
+    """Whether this sandboxed process is refused the secret store (`values/` or the `secrets/` above it).
+
+    Only then may board redaction go without the store; outside the sandbox, or when the store can be
+    listed, it is read as always and any failure stays an error.
+    """
+    if not in_head_sandbox():
+        return False
+    for directory in (values_dir.parent, values_dir):
+        try:
+            os.listdir(directory)
+        except PermissionError:
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def environment_values(environ: Mapping[str, str] | None = None) -> list[str]:
+    """The sensitive-named values of a process environment: what a confined head can know."""
+    source = os.environ if environ is None else environ
+    return [
+        value
+        for name, value in source.items()
+        if is_sensitive_env_name(name) and len(value) >= MIN_ENV_VALUE_LEN
+    ]
+
 
 # Shorter values ("true", "8077") are config and would over-redact.
 MIN_ENV_VALUE_LEN = 12
@@ -71,7 +111,13 @@ def _load_env_values(env_files: Iterable[Path | str]) -> list[str]:
         p = Path(path)
         if not p.is_file():
             continue
-        for raw in p.read_bytes().decode("utf-8", errors="replace").split("\n"):
+        try:
+            data = p.read_bytes()
+        except PermissionError:
+            if in_head_sandbox():
+                continue
+            raise
+        for raw in data.decode("utf-8", errors="replace").split("\n"):
             line = raw.removesuffix("\r").lstrip(" \t")
             if not line or line.startswith(("#", ";")) or "=" not in line:
                 continue
@@ -99,6 +145,12 @@ def redact(
         return text
     files = [*DEFAULT_ENV_FILES, *(env_files or ())]
     values = [*(_load_env_values(files)), *(secret_values or ())]
+    if in_head_sandbox():
+        values.extend(environment_values())
+        # The board credentials stay readable to a sandboxed head (it reaches the board with them).
+        instance = os.environ.get("UMMANU_INSTANCE", "").strip()
+        if instance:
+            values.extend(_load_env_values([Path(instance) / "board-store.env"]))
     for val in sorted(
         {str(value) for value in values if len(str(value)) >= MIN_ENV_VALUE_LEN}, key=len, reverse=True
     ):
