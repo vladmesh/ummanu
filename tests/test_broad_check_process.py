@@ -221,6 +221,23 @@ class PrivateCheckTmpdirTests(BroadCheckTestCase):
                 self.assertFalse(Path(directory).exists())
                 self.assertEqual(receipt["environment_provenance"], {"TMPDIR": directory})
 
+    def test_a_sandboxed_head_s_scratch_lives_in_its_own_temp_dir(self) -> None:
+        # The head sandbox refuses `/tmp` itself; only its TMPDIR is writable.
+        suite = self._suite("sandboxedsuite", "import os\nprint(os.environ['TMPDIR'])\n")
+        private = Path(self.tmpdir.name) / "private-tmp"
+        private.mkdir(mode=0o700)
+        for marker, parent in (("1", private), ("", Path("/tmp"))):
+            with self.subTest(marker=marker):
+                self.stream = StringIO()
+                with mock.patch.dict(os.environ, {"UMMANU_HEAD_SANDBOX": marker, "TMPDIR": str(private)}):
+                    code, receipt = self._run(suite)
+                self.assertEqual(code, 0, receipt["tail"])
+                directory = Path(self.stream.getvalue().strip())
+                self.assertEqual(directory.parent, parent)
+                self.assertEqual(receipt["environment_provenance"], {"TMPDIR": str(directory)})
+                self.assertFalse(directory.exists())
+        self.assertEqual(list(private.iterdir()), [])
+
     def test_tmpdir_cleanup_when_interpreter_cannot_start(self) -> None:
         interpreter = self.root / "missing-python"
         suite = CheckSpec.for_module("suite", interpreter=str(interpreter))

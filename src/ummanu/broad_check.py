@@ -49,6 +49,9 @@ from ummanu._fsutil import write_text_atomic
 from ummanu.runtime.role_env import dispatcher_workspace_namespace
 
 SCHEMA_VERSION = 1
+# Marks a process inside the head sandbox; must equal `ummanu.runtime.redact.HEAD_SANDBOX_ENV` (this
+# module stays in the cleanup journal's parser closure, which may not reach `ummanu.runtime.redact`).
+HEAD_SANDBOX_ENV = "UMMANU_HEAD_SANDBOX"
 RECEIPT_DIR_NAME = Path("state") / "checks"
 #: In a dispatcher workspace the receipt is the pipeline's own output, kept in its owned namespace.
 DISPATCHER_RECEIPT_DIR_NAME = Path("checks")
@@ -607,7 +610,7 @@ def run_broad_check(
 
     # A head's workspace TMPDIR can exceed Unix socket address limits before a check
     # creates anything. Keep the child root short, private and owned by this invocation.
-    with tempfile.TemporaryDirectory(prefix="u", dir="/tmp") as scratch:
+    with tempfile.TemporaryDirectory(prefix="u", dir=_scratch_parent()) as scratch:
         environment["TMPDIR"] = scratch
         # Keep provenance outside the workspace whose contents the receipt names.
         record = Path(scratch) / "provenance.json" if spec.attests_provenance else None
@@ -623,6 +626,20 @@ def run_broad_check(
             sink=sink,
             timeout_seconds=timeout_seconds,
         )
+
+
+def _scratch_parent() -> str:
+    """The directory the per-invocation scratch is made in.
+
+    `/tmp` itself everywhere but inside the head sandbox, which refuses `/tmp` and lets a head
+    write only its launcher's private temp dir (`/tmp/ummanu-sandbox-<uid>/<digest>`, exported as
+    TMPDIR). That dir is short too: with the scratch's own name a check's TMPDIR there is 51 bytes
+    for uid 1000, leaving 56 of the 108-byte Unix socket path for the check's own names. A sandboxed
+    process without a TMPDIR keeps `/tmp` and fails plainly rather than drift into the workspace.
+    """
+    if os.environ.get(HEAD_SANDBOX_ENV) == "1":
+        return os.environ.get("TMPDIR") or "/tmp"
+    return "/tmp"
 
 
 def _normalize_pythonpath_for_child(environment: dict[str, str]) -> dict[str, str]:
