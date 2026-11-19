@@ -306,6 +306,51 @@ Route work onto it by pinning the profile on a sprint (`sprint create --observer
 or a card; role defaults keep their profiles. Check a file before routing to it:
 `claude --settings FILE -p --model haiku "Reply only PONG" </dev/null`.
 
+### Confining a profile's heads (`sandbox`)
+
+A head runs as the runtime user and can read whatever that user can: other projects' checkouts,
+agent profiles, every transcript under `~/.claude/projects`, the installation's state. A `claude`
+profile whose heads must not see that (one on an account other people can see, for one) sets:
+
+```toml
+[profiles.claude-opus-high-second]
+# ... as above, plus:
+sandbox = true
+sandbox_read = ["/home/dev/.hermes/hermes-agent"]   # optional extra read-only roots
+```
+
+Each head of the profile then starts under `src/ummanu/runtime/head/sandbox.py`, which forks the
+`claude` command into a Landlock ruleset (Linux 5.13 or later; `cat /sys/kernel/security/lsm` must list
+`landlock`) and brokers its `connect()` calls through seccomp user notification. The head reads the
+system, `~/.local/bin`, `~/.local/share/claude`, `~/.rustup`, `~/.cargo`, the product checkout, the
+installation's configuration (`instance.yaml`, `board-store.env`, `heads`, `projects`, `skills`,
+`adapters`), the git store its workspace belongs to, its profile's `claude_settings` file and the
+`sandbox_read` roots. It writes its workspace, that store's objects, refs and its own worktree admin
+dir, the cargo caches, its own transcript directory, a private `/tmp/ummanu-sandbox-<uid>/<digest>`
+(its `TMPDIR`) and the board's lock files. Everything else in the home is refused by the kernel, as is
+any Unix socket outside the write roots and loopback TCP other than the board, the memory service and
+listeners the head opened itself. The network beyond loopback stays open (GitHub, Anthropic).
+
+Claude Code runs with `CLAUDE_CONFIG_DIR=~/.local/state/ummanu/head-sandbox/claude`, shared by the
+sandboxed heads: settings, trust, `~/.claude/CLAUDE.md` and the skills the product and installation
+manifests declare. Its `projects/` links each workspace to the usual `~/.claude/projects/<workspace>`,
+so transcript and vitality readers are unchanged. The user's hooks, status line and
+`CLAUDE_CODE_OAUTH_TOKEN` are not inherited, so the account comes from `claude_settings` alone.
+
+The launcher refuses to start the head, never runs it unconfined, when the kernel lacks Landlock or
+seccomp user notification, or when any root is the home directory or holds it. Known limits: the
+board store is reached with the installation's credentials, so `ummanu task`, `sprint` and `issue`
+still read every project's cards; `ummanu knowledge write` fails because the knowledge tree is not
+writable. Check a profile by hand from a worktree of its project:
+
+```bash
+cd DATA_DIR/workspaces/PROJECT/SOME-WORKTREE
+~/ummanu/.venv/bin/python3 -I ~/ummanu/src/ummanu/runtime/head/sandbox.py \
+  --workspace "$PWD" --product-root ~/ummanu -- /bin/sh -c 'ls ~/projects; ls ~/.claude/projects'
+```
+
+Both listings must end in `Permission denied`.
+
 ### Codex home (`CODEX_HOME`)
 
 Every Codex head launched by the dispatcher, and the `openai-sub` resource probe, runs with one

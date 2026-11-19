@@ -158,6 +158,52 @@ class ClaudeShapeTests(unittest.TestCase):
         with self.assertRaisesRegex(HeadCommandError, "adapter is 'codex', not 'claude'"):
             validate_launch_shape("codex-second", profile)
 
+    def test_a_sandboxed_profile_runs_claude_under_the_launcher(self) -> None:
+        """The launcher gets the workspace, the profile's read roots and the settings file it must read."""
+        profile = {
+            "adapter": "claude",
+            "model": "opus",
+            "claude_settings": "/srv/accounts/second.settings.json",
+            "sandbox": True,
+            "sandbox_read": ["/srv/reference"],
+        }
+        validate_launch_shape("claude-sandboxed", profile)
+        with mock.patch.dict(os.environ, LAUNCH_ENV, clear=True):
+            rendered = self.render(profile, prompt=None, workspace="/srv/work/card-1")
+        launcher = (
+            "/opt/checkout/.venv/bin/python3 -I /opt/checkout/src/ummanu/runtime/head/sandbox.py "
+            "--workspace /srv/work/card-1 --product-root /opt/checkout --claude "
+            "--read /srv/reference --read /srv/accounts/second.settings.json"
+        )
+        self.assertEqual(
+            rendered,
+            f"{launcher} -- {CLAUDE_BASE} --settings /srv/accounts/second.settings.json --model opus",
+        )
+
+    def test_a_sandboxed_profile_without_a_workspace_is_refused(self) -> None:
+        with self.assertRaisesRegex(HeadCommandError, "needs its workspace"):
+            self.render({"adapter": "claude", "sandbox": True})
+
+    def test_malformed_sandbox_fields_are_refused(self) -> None:
+        cases = [
+            ({"sandbox": "yes"}, "sandbox must be true or false"),
+            ({"sandbox": True, "sandbox_read": "/srv/reference"}, "list of absolute paths"),
+            ({"sandbox": True, "sandbox_read": ["reference"]}, "list of absolute paths"),
+            ({"sandbox_read": ["/srv/reference"]}, "without sandbox = true"),
+        ]
+        for fields, message in cases:
+            with self.subTest(fields=fields), self.assertRaisesRegex(HeadCommandError, message):
+                validate_launch_shape("claude-sandboxed", {"adapter": "claude", **fields})
+
+    def test_an_unconfined_profile_keeps_its_bare_command(self) -> None:
+        profile = {"adapter": "claude", "sandbox": False}
+        validate_launch_shape("claude-plain", profile)
+        self.assertEqual(self.render(profile, workspace="/srv/work/card-1"), CLAUDE_BASE)
+
+    def test_a_sandbox_on_a_non_claude_profile_is_refused(self) -> None:
+        with self.assertRaisesRegex(HeadCommandError, "adapter is 'codex', not 'claude'"):
+            validate_launch_shape("codex-sandboxed", {"adapter": "codex", "sandbox": True})
+
 
 class CodexShapeTests(unittest.TestCase):
     """A Codex head is one interactive TUI session, and its command says so."""
