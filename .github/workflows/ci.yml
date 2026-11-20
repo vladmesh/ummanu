@@ -32,7 +32,7 @@ jobs:
       suites: ${{ steps.select.outputs.suites }}
       mode: ${{ steps.select.outputs.mode }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
@@ -45,7 +45,7 @@ jobs:
           --base-sha "${{ github.event.pull_request.base.sha }}"
           --event "${{ github.event_name }}" --event-ref "${{ github.ref }}"
           >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ci-selection-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/ci-selection/plan.json
@@ -63,13 +63,13 @@ jobs:
       matrix:
         suite: ${{ fromJSON(needs.selection.outputs.suites || '["unit"]') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           # The migration compatibility proof runs the actual pre-migration source tree.
           fetch-depth: 0
       - name: Download exact-SHA selection plan
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ci-selection-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/ci-selection
@@ -123,7 +123,7 @@ jobs:
       - name: Upload suite JUnit and bounded log
         if: ${{ always() }}
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-evidence-${{ matrix.suite }}-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/ci-evidence/${{ matrix.suite }}
@@ -132,7 +132,7 @@ jobs:
       - name: Upload raw suite coverage
         if: ${{ always() }}
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-coverage-${{ matrix.suite }}-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/ci-coverage/${{ matrix.suite }}/coverage.${{ matrix.suite }}
@@ -152,7 +152,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: ./.github/actions/python-setup
@@ -170,7 +170,7 @@ jobs:
       BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
       CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
@@ -192,12 +192,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       - name: Download exact-SHA selection plan
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ci-selection-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/ci-selection
@@ -207,7 +207,7 @@ jobs:
       - name: Download suite evidence
         if: ${{ always() }}
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: ci-evidence-*
           path: ${{ runner.temp }}/ci-evidence
@@ -215,7 +215,7 @@ jobs:
       - name: Download raw suite coverage
         if: ${{ always() }}
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: ci-coverage-*
           path: ${{ runner.temp }}/ci-coverage
@@ -239,7 +239,7 @@ jobs:
       - name: Upload combined coverage evidence
         if: ${{ always() }}
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-coverage-combined-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/ci-coverage-combined
@@ -265,7 +265,7 @@ jobs:
           ${{ github.ref == 'refs/heads/main' && steps.coverage_aggregate.outcome == 'success' &&
           steps.suite_aggregate.outcome == 'success' && needs.typecheck.result == 'success' &&
           needs.lint.result == 'success' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-coverage-baseline-${{ github.sha }}
           path: ${{ runner.temp }}/ci-coverage-combined
