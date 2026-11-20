@@ -337,18 +337,90 @@ REPORT_ROUND_TWO = """\
 """
 
 VERDICT = """\
-## Verdict: changes requested
+## Verdict: RED
 
-1. `SpooledUpload` never calls `abort_multipart_upload` when the encoder raises, so a failed export
-   leaves an incomplete upload that is billed until the lifecycle rule removes it.
-2. The retry test asserts on the log line, not on the uploaded parts; assert the part numbers.
+- BLOCKER-abort-on-failure: `SpooledUpload` never calls `abort_multipart_upload` when the encoder
+  raises (`exports/jobs.py`, failure path of `run_export`), so a failed export leaves an incomplete
+  upload that is billed until the lifecycle rule removes it. The card's "Done when" asks for abort
+  on failure.
+- BLOCKER-retry-test-asserts-log: `test_retry_one_part` asserts on the log line, not on the uploaded
+  parts; a retry that silently re-sends part 1 would still pass. Assert the part numbers.
 
-Everything else reads well: the threshold default and the progress reporting are fine.
+Open blockers: BLOCKER-abort-on-failure, BLOCKER-retry-test-asserts-log
+
+## Non-blocking observations
+- The progress line every 5 000 rows is noisy on 25 M-row exports; consider every 1 %.
+- Tail issue: `docs/runbooks/exports.md` should name the bucket lifecycle rule.
 """
 
 DECISION = """\
-Keep the card in this sprint. The review findings are small and inside the card's scope; send it
-back to the same worker profile with the verdict as context.
+Rework. Both blockers are inside the card's scope and small: send the card back to the same worker
+profile with the verdict as context. The progress-line observation is not part of this card.
+"""
+
+#: A GREEN verdict for a card whose review passed on the first round.
+VERDICT_GREEN = """\
+## Verdict: GREEN
+
+Reviewed `{sha}` against the card's "Done when".
+
+- {title}: the change does what the card asks and nothing more.
+- Tests cover the new path and the failure path; CI on the exact SHA is green.
+- No blocker found in this round.
+
+## Non-blocking observations
+- A short note in the changelog would help the next release notes.
+"""
+
+#: The observer's accept after a GREEN verdict.
+DECISION_ACCEPT = """\
+Accept. Review is GREEN on the exact SHA and the gate is green; release the card to main.
+"""
+
+#: acme-api-229 is in its second review round: round one ended RED and was reworked.
+VERDICT_229_RED = """\
+## Verdict: RED
+
+- BLOCKER-flag-still-read: `settings.EXPORT_XML_ENABLED` is removed from `settings.py`, but
+  `exports/router.py` still reads it through `getattr(..., False)`; the dead branch keeps the XML
+  serializer imported. The card asks to drop the route **and** its flag.
+- BLOCKER-410-contract: `GET /v1/exports/{id}.xml` now answers `404`; the public API changelog
+  promised `410 Gone` for one release. Add the `410` handler and a test.
+
+Open blockers: BLOCKER-flag-still-read, BLOCKER-410-contract
+
+## Non-blocking observations
+- `docs/api/exports.md` still lists `format=xml` in the query table.
+"""
+
+DECISION_229 = """\
+Rework. Both blockers are in scope; the 410 contract is a promise in the public changelog.
+"""
+
+REPORT_229_TWO = """\
+## What changed
+- `exports/router.py`: the XML branch and the flag read are gone.
+- `GET /v1/exports/{{id}}.xml` answers `410 Gone` with a pointer to `format=ndjson`.
+
+## Verification
+- `pytest tests/exports -q`: 41 passed.
+
+## Commits
+- `{sha}`
+"""
+
+#: nimbus-cli-76: the reviewer has answered GREEN and the card waits for the observer's decision.
+VERDICT_76_GREEN = """\
+## Verdict: GREEN
+
+Reviewed `{sha}`.
+
+- `config.discover()` stops at the first directory holding `.git` or `.nimbus.toml`, whichever is
+  nearer; `tests/test_config_discovery.py` covers both, plus a symlinked working directory.
+- `nimbus config path` prints the file it picked, which answers the card's "Done when".
+
+## Non-blocking observations
+- `NIMBUS_CONFIG` overriding discovery is documented only in `--help`; worth a line in the README.
 """
 
 
@@ -398,10 +470,10 @@ def _showcase_events() -> list[dict[str, Any]]:
         ("card.reported", 198, "worker", "codex-xhigh", REPORT_ROUND_ONE, "success", ("in_progress", "validate"),
          {"marker": "report:done", "body": REPORT_ROUND_ONE}),
         ("card.validated", 196, "dispatcher", "dispatcher", "report schema and branch checks passed", "success", ("validate", "review"), {}),
-        ("card.verdict", 160, "reviewer", "opus-max", VERDICT, "success", None, {"marker": "review:changes_requested", "body": VERDICT}),
+        ("card.verdict", 160, "reviewer", "opus-max", VERDICT, "success", None, {"marker": "review:red", "status": "red", "body": VERDICT}),
         ("card.decided", 151, "observer", "observer-acme", DECISION, "success", ("review", "in_progress"),
-         {"decision": "decision:rework", "body": DECISION}),
-        ("outcome_round_context", 150.5, "dispatcher", "dispatcher", "round 2: verdict review:changes_requested carried to the worker", "success", None, {}),
+         {"marker": "decision:rework", "decision": "rework", "body": DECISION}),
+        ("outcome_round_context", 150.5, "dispatcher", "dispatcher", "round 2: verdict review:red (2 open blockers) carried to the worker", "success", None, {}),
         ("head_changed", 121, "dispatcher", "dispatcher", None, "success", None, {
             "role": "worker", "change": "replaced", "cause": "provider_failover",
             "reason": "the codex resource answered 429 for 6 minutes; the run continues on the same profile after the window reset",
@@ -427,9 +499,13 @@ def _card_events(card: Card) -> list[dict[str, Any]]:
     walk = _walk(card)
     created = _created_minutes(card)
     observer = f"observer-{card.project.split('-')[0]}" if card.sprint else "po"
-    events = [_event(card.ref, 1, "created", created, role="observer" if card.sprint else "po", actor=observer,
-                     reason="cut from the sprint goal" if card.sprint else "filed from the PO session", outcome="success")]
+    rows: list[tuple[str, float, str, str, str | None, tuple[str, str] | None, dict[str, Any]]] = [
+        ("created", created, "observer" if card.sprint else "po", observer,
+         "cut from the sprint goal" if card.sprint else "filed from the PO session", None, {}),
+    ]
     step = (created - card.minutes) / max(len(walk), 1)
+    reviewer = card.review_head or "opus-max"
+    sha = _sha(card.ref, 2)
     for index, (source, target) in enumerate(zip(walk, walk[1:], strict=False), start=1):
         minutes = created - step * index if target != card.state else card.minutes
         kind, role, actor, reason = "card.moved", "dispatcher", "dispatcher", None
@@ -440,16 +516,48 @@ def _card_events(card: Card) -> list[dict[str, Any]]:
             kind = "card.started"
         elif source == "in_progress" and target != "blocked":
             kind, role, actor = "card.reported", "worker", card.head or "codex-high"
-            reason = f"## What changed\n- {card.title}.\n\n## Verification\n- tests pass."
-            data = {"marker": "report:done", "body": reason}
+            reason = f"## What changed\n- {card.title}.\n\n## Verification\n- tests pass.\n\n## Commits\n- `{sha}`"
+            data = {"marker": "report:done", "status": "done", "body": reason}
         elif target == "blocked":
             kind, role, actor, reason = "card.blocked", "observer", observer, card.blocked
-        elif target == "done" and source == "review":
-            kind, role, actor, reason = "card.verdict", "reviewer", card.review_head or "opus-max", "approved"
-            data = {"marker": "review:approved", "body": "Approved: the change does what the card asks."}
-        events.append(_event(card.ref, index + 1, kind, minutes, role=role, actor=actor, reason=reason,
-                             outcome="success", transition=(source, target), data=data))
-    return events
+        elif source == "review":
+            # The reviewer answers GREEN, then the observer accepts and the card is released.
+            green = VERDICT_GREEN.format(sha=sha, title=card.title)
+            rows.append(("card.verdict", minutes + min(step / 2, 20), "reviewer", reviewer, green, None,
+                         {"marker": "review:green", "status": "green", "body": green}))
+            kind, role, actor, reason = "card.decided", "observer", observer, DECISION_ACCEPT
+            data = {"marker": "decision:accept", "decision": "accept", "body": DECISION_ACCEPT}
+        rows.append((kind, minutes, role, actor, reason, (source, target), data))
+    rows.extend(_review_story(card, observer, reviewer, sha))
+    rows.sort(key=lambda row: -row[1])
+    return [
+        _event(card.ref, number, kind, minutes, role=role, actor=actor, reason=reason, outcome="success",
+               transition=transition, data=data)
+        for number, (kind, minutes, role, actor, reason, transition, data) in enumerate(rows, start=1)
+    ]
+
+
+def _review_story(card: Card, observer: str, reviewer: str, sha: str) -> list[tuple[Any, ...]]:
+    """The extra rounds of the two cards that sit in Review with a verdict to show."""
+    if card.ref == "acme-api-229":
+        # Round one ended RED and was reworked; round two is with the reviewer now.
+        return [
+            ("card.moved", card.minutes + 116, "dispatcher", "dispatcher", None, ("ci", "review"), {}),
+            ("card.verdict", card.minutes + 86, "reviewer", reviewer, VERDICT_229_RED, None,
+             {"marker": "review:red", "status": "red", "body": VERDICT_229_RED}),
+            ("card.decided", card.minutes + 76, "observer", observer, DECISION_229, ("review", "in_progress"),
+             {"marker": "decision:rework", "decision": "rework", "body": DECISION_229}),
+            ("card.reported", card.minutes + 36, "worker", card.head or "codex-high", REPORT_229_TWO.format(sha=_sha(card.ref, 5)),
+             ("in_progress", "validate"),
+             {"marker": "report:done", "status": "done", "body": REPORT_229_TWO.format(sha=_sha(card.ref, 5))}),
+            ("card.validated", card.minutes + 31, "dispatcher", "dispatcher", "report schema and branch checks passed",
+             ("validate", "ci"), {}),
+        ]
+    if card.ref == "nimbus-cli-76":
+        green = VERDICT_76_GREEN.format(sha=sha)
+        return [("card.verdict", card.minutes - 150, "reviewer", reviewer, green, None,
+                 {"marker": "review:green", "status": "green", "body": green})]
+    return []
 
 
 def _runs_of(card: Card) -> list[dict[str, Any]]:
@@ -476,11 +584,12 @@ def _runs_of(card: Card) -> list[dict[str, Any]]:
         })
     if card.review_head and (card.state in {"review", "post_merge_ci", "done"} or card.ref == SHOWCASE):
         profile = HEADS[card.review_head]
+        reviewing = card.state == "review" and card.ref != "nimbus-cli-76"
         runs.append({
             "role": "reviewer", "run_id": f"run-r-{_sha(card.ref, 8)[:6]}", "attempt": 1,
-            "state": "running" if card.state == "review" else "stopped", "head": card.review_head,
+            "state": "running" if reviewing else "stopped", "head": card.review_head,
             "model": profile["model"], "effort": profile["effort"], "resolved_model": profile["model"],
-            "adapter": profile["adapter"], "local_pty": True, "current": card.state == "review",
+            "adapter": profile["adapter"], "local_pty": True, "current": reviewing,
             "reason": "paused by the owner while CI runs" if card.ref == SHOWCASE else None,
         })
     return runs
@@ -491,7 +600,7 @@ def _work(card: Card, events: list[dict[str, Any]]) -> dict[str, Any]:
     latest = None
     for event in events:
         data = event["data"]
-        marker = data.get("marker") or data.get("decision")
+        marker = data.get("marker")
         if not marker:
             continue
         family, _, value = marker.partition(":")
