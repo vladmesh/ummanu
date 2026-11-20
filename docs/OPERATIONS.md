@@ -903,7 +903,8 @@ cursor) into the watchdog's `panel` field; `--offline` reports it as `not-probed
 
 `ummanu doctor --json --instance INSTANCE` evaluates invariants over the same snapshot and exits
 non-zero for a broken or unavailable host. Use `status` for what is running and `doctor` for what
-needs repair.
+needs repair. `--findings-only` prints only `schema_version`, `ok` and `findings` with the same exit
+code and does not collect the status snapshot.
 
 Doctor measures free bytes on the filesystem containing the configured `data_dir` (or its nearest
 existing ancestor). Below 10 GiB it reports `root_disk_low` with `free_bytes` and
@@ -2799,7 +2800,8 @@ timer must be enabled/active; its triggered oneshot need not remain active. Comp
 declarations retain their existing ownership boundary. Daily instance Git maintenance is independent.
 
 The rendered command is `PRODUCT_ROOT/.venv/bin/ummanu doctor-record --instance INSTANCE --data-dir DATA_DIR`.
-It calls this installed product's `python -P -m ummanu doctor --instance INSTANCE --json`, whose
+It calls this installed product's `python -P -m ummanu doctor --instance INSTANCE --json --findings-only`,
+so the record does not grow with the number of sprints. That command's
 `run_doctor_json`/`collect_doctor_inspection` remain the sole diagnostic evaluator. Manual fixture/offline
 runs can pass `--host-fixture DIR`/`--offline`; records retain their mode, and a live web reader refuses
 to treat those modes as a live diagnostic success. No scheduler runs in dispatcher ticks or page requests.

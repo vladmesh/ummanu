@@ -199,6 +199,19 @@ class DoctorRecordTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(main(["doctor", "--instance", str(other), "--dry-run", "--offline", "--json"]), 1)
 
+    def test_findings_only_keeps_findings_and_exit_without_collecting_status(self):
+        self.seed_doctor_findings()
+        code, full = self.native_doctor()
+        self.assertIn("status", full)
+        out = io.StringIO()
+        with mock.patch("ummanu.status.collect_status", side_effect=AssertionError("status collected")), \
+                contextlib.redirect_stdout(out):
+            only_code = main(["doctor", "--instance", str(self.instance), "--dry-run", "--offline",
+                              "--json", "--findings-only"])
+        only = json.loads(out.getvalue())
+        self.assertEqual(only_code, code)
+        self.assertEqual(only, {key: full[key] for key in ("schema_version", "ok", "findings")})
+
     def test_native_record_publication_reads_all_accepted_and_mixed_reports(self):
         self.seed_doctor_findings()
         command = [sys.executable, "-P", "-m", "ummanu", "doctor", "--instance", str(self.instance), "--offline", "--json"]
