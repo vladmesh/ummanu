@@ -193,7 +193,7 @@ ci = [
     "pytest>=9,<10",
 ]
 typecheck = [
-    "mypy==1.18.2",
+    "mypy==2.4.1",
 ]
 memory = [
     "mcp==1.30.0",
