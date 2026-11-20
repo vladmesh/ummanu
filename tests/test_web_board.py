@@ -194,14 +194,14 @@ class TileTests(unittest.TestCase):
         self.assertIn('<a href="/sprints/sprint%3A7">sprint:7</a>', linked)
         self.assertIn(">3h</span>", linked)
         outside = text(tile_of(html, "u-2"))
-        self.assertIn("research · codegen · вне спринта", outside)
+        self.assertIn("research codegen вне спринта", outside)
 
     def test_each_metadata_item_is_one_unbreakable_item(self) -> None:
         client = BoardClient([row("u-1", "ready", project="codegen-orchestrator", sprint=None, type="code")])
         _status, html = page(client)
         meta = re.search(r'<p class="tile-meta">.*?</p>', tile_of(html, "u-1")).group(0)
-        items = re.findall(r'<span class="meta-item">(.*?)</span>(?: · |</p>)', meta)
-        self.assertEqual([text(item) for item in items], ["code", "codegen-orchestrator", "вне спринта", "—"])
+        items = re.findall(r'<span class="meta-item [a-z]+">(.*?)</span>', meta)
+        self.assertEqual([text(item) for item in items], ["code", "codegen-orchestrator", "вне спринта"])
 
     def test_the_head_is_the_worker_in_progress_the_reviewer_in_validate_and_none_elsewhere(self) -> None:
         heads = {
@@ -222,7 +222,7 @@ class TileTests(unittest.TestCase):
         )
         _status, html = page(client)
         shown = {
-            ref: re.search(r'<span title="current head">(.*?)</span>', tile_of(html, ref)).group(1)
+            ref: re.search(r'<span class="tile-who" title="current head">(.*?)</span>', tile_of(html, ref)).group(1)
             for ref in ("u-1", "u-2", "u-3", "u-4", "u-5", "u-6")
         }
         self.assertEqual(

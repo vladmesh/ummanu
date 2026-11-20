@@ -12,13 +12,40 @@ let polling = true;
 function render(item) {
   if (seen.has(item.event_id)) return;
   seen.add(item.event_id);
-  const li = document.createElement('li');
+  // The same entry the server draws; a long text stays plain here, the next reload renders it.
+  const part = (tag, className, text) => {
+    const node = document.createElement(tag);
+    node.className = className;
+    if (text) node.textContent = text;
+    return node;
+  };
+  const li = part('li', 'ev');
+  li.id = 'ev-' + item.event_id;
   li.dataset.eventId = item.event_id;
+  const dot = part('span', 'ev-dot');
+  dot.setAttribute('aria-hidden', 'true');
+  const head = part('div', 'ev-head');
+  const actor = item.actor || {};
+  const who = [...new Set([actor.role, actor.id].filter(Boolean))].join(' · ');
+  const said = (item.reason || '').trim();
+  const long = said.length > 160 || said.includes('\n');
   const time = document.createElement('time');
-  time.textContent = item.occurred_at || '';
-  const kind = document.createElement('b');
-  kind.textContent = item.kind || '';
-  li.append(time, kind, ' ' + (item.reason || item.outcome || ''));
+  time.dateTime = item.occurred_at || '';
+  time.title = item.occurred_at || '';
+  time.textContent = 'just now';
+  const link = part('a', 'ev-time');
+  link.href = '#' + li.id;
+  link.append(time);
+  head.append(part('span', 'ev-kind chip', item.kind || ''));
+  if (who) head.append(part('span', 'ev-actor', who));
+  if (!long && (said || item.outcome)) head.append(part('span', 'ev-summary', said || item.outcome));
+  head.append(link);
+  li.append(dot, head);
+  if (long) {
+    const text = part('div', 'ev-text');
+    text.append(part('div', 'ev-body prose', said));
+    li.append(text);
+  }
   list.append(li);
   const empty = document.getElementById('events-empty');
   if (empty) empty.remove();

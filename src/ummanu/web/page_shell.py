@@ -346,7 +346,7 @@ def _page(
                 parts.append(f'<span class="here">{escape(label)}</span>')
             else:
                 parts.append(f'<a href="{escape(href)}">{escape(label)}</a><span class="sep">/</span>')
-        trail = f'<div class="crumbs">{"".join(parts)}</div>'
+        trail = f'<nav class="crumbs" aria-label="breadcrumb">{"".join(parts)}</nav>'
     return "\n".join(
         [
             "<!doctype html>",
@@ -359,13 +359,13 @@ def _page(
             '<header class="top"><div class="row">',
             f'<a class="brand" href="/">{escape(TITLE)}</a>',
             f'<nav class="primary" aria-label="primary">{links}</nav>',
-            trail,
             f'<p class="notice" title="{escape(LOOPBACK_NOTICE)}">local only</p>',
             _bell(),
             '<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle color theme" title="Toggle color theme"><span class="sun" aria-hidden="true">☀</span><span class="moon" aria-hidden="true">☾</span></button>',
             '<a class="top-action" href="/sprints/new">New sprint</a>',
             "</div></header>",
             "<main>",
+            trail,
             body,
             "</main>",
             _limits_bar(),
