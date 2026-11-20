@@ -185,7 +185,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "ruff==0.16.4",
+    "ruff==0.17.5",
 ]
 ci = [
     "coverage>=7.6",
@@ -197,12 +197,12 @@ typecheck = [
 ]
 memory = [
     "mcp==1.28.1",
-    "fastembed==0.8.0",
-    "onnxruntime==1.30.0",
+    "fastembed==0.9.1",
+    "onnxruntime==1.32.0",
     "huggingface-hub==1.33.0",
-    "tokenizers==0.23.2",
+    "tokenizers==0.23.3",
     "sqlite-vec==0.1.9",
-    "numpy==2.4.6",
+    "numpy==2.5.4",
 ]
 
 [project.scripts]
