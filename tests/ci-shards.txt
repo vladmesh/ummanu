@@ -349,6 +349,7 @@ unit tests/test_web_cursor.py
 unit tests/test_webproto_contracts.py
 unit tests/test_web_card_waits.py
 unit tests/test_web_board.py
+unit tests/test_web_preview.py
 integration-board tests/test_web_board_store.py
 integration-board tests/test_web_delegation_reads.py
 unit tests/test_po_store_connections.py
