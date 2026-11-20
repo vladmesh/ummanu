@@ -398,8 +398,8 @@ cold imports, checks shared identities and mocked lock acquisition/order, and us
 for replay waits, nested deadlines, before-effect reservation and publication after work exhaustion.
 Small released-source journal goldens compare persisted byte hashes for state, retained head evidence,
 v1 migration and copy/publication/archive crash recovery. Actual concurrent locks and runtime effects
-remain in integration-dispatcher (`bounded_cleanup_replay`, `owned_cleanup`, `narrow_cleanup_lock`,
-`cleanup_journal_layout`), integration-recovery (`cleanup_journal_migration`, `bulk_ownership_lane`)
+remain in integration-dispatcher (`owned_cleanup`, `narrow_cleanup_lock`, `cleanup_journal_layout`),
+integration-recovery (`bounded_cleanup_replay`, `cleanup_journal_migration`, `bulk_ownership_lane`)
 and integration-board (`cleanup_lock_sql`). These suites run in CI only.
 
 The historical ummanu-202 routing baseline, measured on the control host on 2026-10-10, contained
@@ -590,7 +590,7 @@ prefixes or escaped site directories, and failures installing the required works
 fail preparation. Upgrade/live
 delivery is a separate observer step; these changes do not update production. Fast policy and fake
 backend regressions are local unit/component tests. Real interpreter, role launch and native
-whitelist/absolute-child-pytest and bash/subshell/PATH-child proof belongs to `integration-dispatcher` CI.
+whitelist/absolute-child-pytest and bash/subshell/PATH-child proof belongs to `integration-heads` CI.
 The bounded runner model covers an empty PYTHONPATH and a per-suite PYTHONPATH override; it simplifies
 codegen's suite scheduling and is not an exact copy of its native host argv. That fixture
 is not live codegen evidence: live main `ec96fa79` still needs its next acting head's declared
@@ -834,8 +834,9 @@ a separate CI proof PR and must never enter the candidate or main.
 
 Timing rollout exposed four modules containing real integration work. Their assertions and
 fixtures are retained in CI: `test_docker_guard` executes installed role wrappers and native
-tool subprocesses in runtime-component; `test_owned_cleanup` and `test_bounded_cleanup_replay`
-exercise real Git, process termination, journals and runtime cleanup in integration-dispatcher;
+tool subprocesses in runtime-component; `test_owned_cleanup` (integration-dispatcher) and
+`test_bounded_cleanup_replay` (integration-recovery) exercise real Git, process termination,
+journals and runtime cleanup;
 `test_measurement_script` runs loopback HTTP in integration-board.
 The original component CI report observed a 94.627437s cleanup replay module, a 10.425188s
 guard test and an 18.513881s measurement test. The journal-layout component tests remain local.
