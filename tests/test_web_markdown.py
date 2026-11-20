@@ -279,7 +279,7 @@ class FeedPageTest(unittest.TestCase):
         self.assertIn("min-width:0; max-width:100%;", page_assets.STYLE)
         self.assertIn(".po-entry .md { overflow-wrap:anywhere; word-break:break-word;", page_assets.STYLE)
         self.assertIn(".po-entry .md pre { white-space:pre; max-width:100%; min-width:0; overflow-x:auto;", page_assets.STYLE)
-        self.assertIn(".panel > .body { padding: .75rem .9rem; min-width:0; max-width:100%; }", page_assets.STYLE)
+        self.assertIn(".panel > .body { padding: .75rem 1rem; min-width:0; max-width:100%; }", page_assets.STYLE)
 
 
 class PageShellTest(unittest.TestCase):
