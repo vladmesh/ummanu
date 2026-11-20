@@ -1,5 +1,9 @@
 # ummanu
 
+[![CI](https://github.com/pasekahq/ummanu/actions/workflows/ci.yml/badge.svg)](https://github.com/pasekahq/ummanu/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/pasekahq/ummanu/badge)](https://scorecard.dev/viewer/?uri=github.com/pasekahq/ummanu)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](LICENSE)
+
 Portable personal appliance for running multiple AI agent heads across many projects from a remote
 VPS. The repository contains the CLI, the task and memory protocols, the dispatcher runtime, restore
 logic, schemas and generic skills.
@@ -83,4 +87,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-[Apache License 2.0](LICENSE).
+Copyright (C) 2026 the ummanu contributors.
+
+Licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (SPDX: `AGPL-3.0-only`).
+If you run a modified ummanu for users over a network, section 13 asks you to offer them its source.

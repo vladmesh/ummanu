@@ -103,7 +103,7 @@ jobs:
     env:
       CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
@@ -128,7 +128,7 @@ jobs:
           result={'sha':os.environ['CANDIDATE_SHA'],'source_modules':len([n for n in snap.modules if n.startswith('ummanu')]),'nodes':len(graph),'product_modules':len(product),'product_membership':sorted(product),'sccs':groups,'config_closure':config};
           pathlib.Path(os.environ['RUNNER_TEMP']+'/task-protocol-graph/uncut.json').write_text(json.dumps(result,indent=2));
           print(json.dumps(result,indent=2)); assert len(groups[0])<=60; assert len(config)<=10"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ always() }}
         with:
           name: task-protocol-graph-${{ github.event.pull_request.head.sha || github.sha }}

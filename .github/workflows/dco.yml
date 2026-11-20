@@ -1,0 +1,51 @@
+# Developer Certificate of Origin (https://developercertificate.org/), no CLA.
+# Every commit of a pull request must carry `Signed-off-by: Name <email>` matching the commit
+# author (`git commit -s`). Like the DCO app's `require.members: false`, pull requests opened by
+# the repository's owners, organization members and collaborators are not checked; bots are skipped.
+# The job only reads git metadata of the pull request; it never runs code from it.
+name: DCO
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  dco:
+    name: dco
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Check Signed-off-by
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+        run: |
+          set -euo pipefail
+          case "$ASSOCIATION" in
+            OWNER|MEMBER|COLLABORATOR)
+              echo "PR by $AUTHOR ($ASSOCIATION): maintainers are exempt from the DCO check."; exit 0;;
+          esac
+          if [ "$AUTHOR_TYPE" = "Bot" ]; then echo "PR by bot $AUTHOR: skipped."; exit 0; fi
+          git fetch --no-tags --quiet origin "$BASE"
+          missing=0
+          for c in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            email=$(git log -1 --format='%ae' "$c")
+            if git log -1 --format='%(trailers:key=Signed-off-by,valueonly)' "$c" \
+                 | grep -qiF "<$email>"; then
+              echo "ok      $c"
+            else
+              echo "::error::commit $c has no 'Signed-off-by: ... <$email>' (use git commit -s)"
+              missing=1
+            fi
+          done
+          if [ "$missing" = 1 ]; then
+            echo "Sign off your commits: git rebase --signoff $BASE && git push --force-with-lease"
+            exit 1
+          fi
+          echo "All commits are signed off."
