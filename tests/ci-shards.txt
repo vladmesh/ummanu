@@ -78,7 +78,7 @@ integration-recovery tests/test_postgres_recovery.py
 integration-recovery tests/test_fresh_postgres_install.py
 unit tests/test_ci_shards.py
 unit tests/test_ci_selection.py
-integration-dispatcher tests/test_ci_selection_git.py
+integration-heads tests/test_ci_selection_git.py
 integration-board tests/test_cli.py
 component tests/test_codex_capability_matrix.py
 component tests/test_codex_fanout_policy.py
@@ -95,10 +95,10 @@ integration-dispatcher tests/test_dispatcher_claim_contract.py
 integration-dispatcher tests/test_dispatcher_stage_resume.py
 integration-heads tests/test_dispatcher_review_lifecycle.py
 integration-dispatcher tests/test_dispatcher_no_candidate.py
-integration-dispatcher tests/test_e2e_stage.py
-integration-dispatcher tests/test_e2e_budget.py
+integration-board tests/test_e2e_stage.py
+integration-board tests/test_e2e_budget.py
 unit tests/test_manual_e2e_charge.py
-integration-dispatcher tests/test_e2e_after_merge.py
+integration-board tests/test_e2e_after_merge.py
 integration-dispatcher tests/test_dispatcher_sprint_admission.py
 integration-dispatcher tests/test_git_workspace_manager.py
 integration-dispatcher tests/test_observer_git_workspace.py
@@ -221,10 +221,10 @@ runtime-component tests/test_docker_guard.py
 unit tests/test_procfs.py
 unit tests/test_test_guard.py
 component tests/test_head_command_guards.py
-integration-dispatcher tests/test_test_guard_interpreters.py
+integration-heads tests/test_test_guard_interpreters.py
 component tests/test_memory_token_launch.py
 unit tests/test_observer_voice.py
-integration-dispatcher tests/test_dispatcher_runtime_isolation.py
+integration-heads tests/test_dispatcher_runtime_isolation.py
 unit tests/test_live_root_project.py
 integration-dispatcher tests/test_dispatcher_audit_backend.py
 packaging tests/test_runtime_provenance.py
@@ -301,7 +301,7 @@ unit tests/test_instance_maintenance.py
 integration-dispatcher tests/test_owned_cleanup.py
 integration-dispatcher tests/test_card_cancel.py
 integration-dispatcher tests/test_dispatcher_dead_head_release.py
-integration-dispatcher tests/test_bounded_cleanup_replay.py
+integration-recovery tests/test_bounded_cleanup_replay.py
 integration-board tests/test_status.py
 integration-board tests/test_measurement_script.py
 integration-board tests/test_web_command_protocol.py
