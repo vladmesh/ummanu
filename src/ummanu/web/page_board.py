@@ -7,7 +7,7 @@ from typing import Any
 from urllib.parse import quote
 
 from ummanu.web.page_assets import _BOARD_SCRIPT
-from ummanu.web.page_parts import _age, _link, _or_dash, _pipeline
+from ummanu.web.page_parts import STATE_TONES, _age, _link, _or_dash, _pipeline
 from ummanu.web.page_shell import _page
 from ummanu.web.page_values import _mapping
 from ummanu.webproto import board_view
@@ -57,9 +57,12 @@ def _column(column: dict[str, Any]) -> str:
     cards = [_tile(_mapping(card), blocked=blocked) for card in column.get("cards") or []]
     tiles = f'<ol class="tiles">{"".join(cards)}</ol>' if cards else '<p class="empty">no cards</p>'
     kind = "board-column" if cards else "board-column board-column-empty"
+    state = STATE_TONES.get(str(column.get("state") or ""), "")
+    tone = f" tone-{state}" if state else ""
     return (
         f'<section class="{kind}" aria-label="{escape(f"{title}: {count} cards")}">'
-        f'<header><h2>{escape(title)}</h2><span class="count">{escape(str(count))}</span></header>'
+        f'<header><span class="dot{tone}" aria-hidden="true"></span><h2>{escape(title)}</h2>'
+        f'<span class="count">{escape(str(count))}</span></header>'
         f"{tiles}</section>"
     )
 
@@ -80,13 +83,12 @@ def _tile(tile: dict[str, Any], *, blocked: bool) -> str:
         if waiting
         else ""
     )
-    meta = " · ".join(
-        f'<span class="meta-item">{item}</span>'
-        for item in (
-            escape(str(tile.get("type") or NO_TYPE)),
-            escape(str(tile.get("project") or NO_PROJECT)),
-            _sprint(_mapping(tile.get("sprint"))),
-            f'<span title="current head">{_or_dash(tile.get("head"))}</span>',
+    meta = "".join(
+        f'<span class="meta-item {kind}">{item}</span>'
+        for kind, item in (
+            ("chip", escape(str(tile.get("type") or NO_TYPE))),
+            ("chip", escape(str(tile.get("project") or NO_PROJECT))),
+            ("sprint", _sprint(_mapping(tile.get("sprint")))),
         )
     )
     said = escape(str(tile.get("blocked_reason") or NO_REASON))
@@ -101,13 +103,15 @@ def _tile(tile: dict[str, Any], *, blocked: bool) -> str:
     return "".join(
         [
             f'<li class="tile{" tile-owner" if waiting else ""}">',
-            owner,
             f'<div class="tile-head">{reference}{age}</div>',
             f'<p class="tile-title" title="{escape(str(title or NO_TITLE))}">{escape(str(title or NO_TITLE))}</p>',
-            f'<p class="tile-meta">{meta}</p>',
-            _pipeline(_mapping(tile.get("pipeline"))),
             reason,
             skipped,
+            f'<p class="tile-meta">{meta}</p>',
+            (
+                f'<div class="tile-foot"><span class="tile-who" title="current head">{_or_dash(tile.get("head"))}</span>'
+                f"{owner}{_pipeline(_mapping(tile.get('pipeline')))}</div>"
+            ),
             "</li>",
         ]
     )

@@ -11,6 +11,7 @@ from urllib.parse import quote
 from ummanu.web import markdown
 from ummanu.web.page_assets import _ACTIONS_SCRIPT, _TASK_SCRIPT
 from ummanu.web.page_parts import (
+    STATE_TONES,
     _chip,
     _comment_form,
     _effort,
@@ -22,15 +23,19 @@ from ummanu.web.page_parts import (
     _js,
     _link,
     _long,
+    _mid,
     _move_form,
     _or_dash,
     _panel,
     _pipeline,
+    _props,
+    _render_now,
     _rows,
     _source_block,
     _state_cell,
     _state_chip,
     _tabs,
+    _when,
 )
 from ummanu.web.page_shell import _page
 from ummanu.web.page_values import _mapping
@@ -66,13 +71,15 @@ def task(snapshot: dict[str, Any], *, runs: dict[str, Any], sessions: dict[str, 
     body = "\n".join(
         [
             '<div class="hero">',
+            (
+                f'<div class="eyebrow"><span class="ref">{escape(ref)}</span>'
+                f'<span class="age">read at {escape(str(snapshot.get("observed_at") or "an unknown time"))}</span></div>'
+            ),
             f"<h1>{escape(title)}</h1>" if title else f"<h1>{escape(ref)}</h1>",
-            f'<span class="age" style="margin-left:auto">read at {escape(str(snapshot.get("observed_at") or "an unknown time"))}</span>',
-            f'<div class="chips">{"".join(chips)}</div>',
-            _pipeline(_mapping(snapshot.get("pipeline")), details=True),
+            f'<div class="chips">{"".join(chips)}{_pipeline(_mapping(snapshot.get("pipeline")), details=True)}</div>',
             "</div>",
             _source_block(card.get("source"), what="what this card is"),
-            '<div class="grid">',
+            '<div class="card-layout">',
             '<div class="col">',
             '<section class="panel">',
             _tabs(
@@ -95,13 +102,13 @@ def task(snapshot: dict[str, Any], *, runs: dict[str, Any], sessions: dict[str, 
             ),
             "</section>",
             "</div>",
-            '<div class="col">',
-            _panel("Heads", _card_heads_panel(ref, snapshot.get("heads") or {}, agents)),
-            *_card_blocks(value, sessions),
+            '<aside class="col side">',
             _panel(
                 "Card",
                 _card(card.get("value"), project) + _attempt(snapshot.get("attempt") or {}),
             ),
+            _panel("Heads", _card_heads_panel(ref, snapshot.get("heads") or {}, agents)),
+            *_card_blocks(value, sessions),
             _panel(
                 # A handed card's comment is written as the owner's and reaches the PO
                 # (`card_ops._comment_role`).
@@ -120,7 +127,7 @@ def task(snapshot: dict[str, Any], *, runs: dict[str, Any], sessions: dict[str, 
                 ),
             ),
             _panel("Product runs", _runs(ref, runs), open_=False),
-            "</div></div>",
+            "</aside></div>",
         ]
     )
     cursor = escape(str(events.get("next_cursor") or ""))
@@ -344,14 +351,15 @@ def _card(card: dict[str, Any] | None, project: dict[str, Any]) -> str:
     if card is None:
         return '<p class="empty">no card was read, so there is nothing to show here.</p>'
     registered = "registered" if project.get("registered") else "not registered on this installation"
+    now = _render_now()
     rows = [
         [
             "project",
             f'{_or_dash(project.get("id") or card.get("project"))} <span class="age">({escape(registered)})</span>',
         ],
         ["claimed by", _or_dash(card.get("claimed_by"))],
-        ["created", _or_dash(card.get("created_at"))],
-        ["updated", _or_dash(card.get("updated_at"))],
+        ["created", _when(card.get("created_at"), now)],
+        ["updated", _when(card.get("updated_at"), now)],
     ]
     if card.get("blocked_by"):
         rows.append(["blocked by", _or_dash(card.get("blocked_by"))])
@@ -364,7 +372,7 @@ def _card(card: dict[str, Any] | None, project: dict[str, Any]) -> str:
             f"at {_or_dash(handed.get('since'))})</span>"
         )
         rows.append(["handed to the owner", said])
-    return _rows(["", ""], rows)
+    return _props(rows)
 
 
 #: The prefix a wait's PO return address carries (`board/wait_card.PO_SESSION_PREFIX`).
@@ -619,21 +627,24 @@ def _attempt(attempt: dict[str, Any]) -> str:
         return "\n".join(part for part in parts if part)
     paused = value.get("paused") or {}
     parts.append(
-        _rows(
-            ["", ""],
+        _props(
             [
-                ["dispatcher record", _or_dash(value.get("state"))],
+                ["record", _or_dash(value.get("state"))],
                 [
                     "attempt",
-                    f"{_or_dash(value.get('attempt_id'))} (round {_or_dash(value.get('attempt_round'))})",
+                    (
+                        f'<span class="ref">{_or_dash(value.get("attempt_id"))}</span> '
+                        f"(round {_or_dash(value.get('attempt_round'))})"
+                    ),
                 ],
                 ["gate", _or_dash(value.get("gate_state"))],
-                ["workspace", _or_dash(value.get("workspace"))],
+                ["workspace", _mid(value.get("workspace"))],
                 [
                     "paused",
                     f"worker {'yes' if paused.get('worker') else 'no'}, reviewer {'yes' if paused.get('reviewer') else 'no'}",
                 ],
             ],
+            title="Dispatcher",
         )
     )
     return "\n".join(part for part in parts if part)
@@ -723,7 +734,7 @@ def _work(work: dict[str, Any]) -> str:
             f"<h3>{escape(title)}</h3>"
             f'<p><span class="state">{escape(str(entry.get("marker") or ""))}</span>{marked} '
             f'<span class="age">at {_or_dash(entry.get("at"))}</span></p>'
-            f"{_long(entry.get('body'), chars=200)}"
+            f"{_body(entry.get('body'), f'work-{slot}') or _long(entry.get('body'))}"
         )
     outcome = work.get("outcome")
     if isinstance(outcome, dict):
@@ -739,17 +750,84 @@ def _work(work: dict[str, Any]) -> str:
 
 
 def _events(items: list[dict[str, Any]]) -> str:
+    """Every event as a timeline entry: kind, actor and time on one line, a long text under it."""
     if not items:
-        return '<ol class="events" id="events"></ol><p class="empty" id="events-empty">no event has been recorded for this card.</p>'
-    return '<ol class="events" id="events">' + "".join(_event(item) for item in items) + "</ol>"
+        return '<ol class="events feed" id="events"></ol><p class="empty" id="events-empty">no event has been recorded for this card.</p>'
+    now = _render_now()
+    return '<ol class="events feed" id="events">' + "".join(_event(item, now) for item in items) + "</ol>"
 
 
-def _event(item: dict[str, Any]) -> str:
-    detail = item.get("reason") or item.get("outcome") or ""
+#: The tone of an event kind's badge; a failed outcome reads `bad` whatever the kind.
+EVENT_TONES = {
+    "card.readied": "accent",
+    "card.started": "violet",
+    "routing": "violet",
+    "outcome_round_context": "violet",
+    "head_changed": "warn",
+    "commented": "accent",
+    "card.reported": "ok",
+    "card.validated": "ok",
+    "card.verdict": "ok",
+    "card.decided": "ok",
+    "card.blocked": "bad",
+    "gate.started": "warn",
+}
+
+#: Outcomes that colour an event as a failure.
+BAD_OUTCOMES = {"failure", "refused", "error", "process_failed"}
+
+#: A text longer than this, or holding a line break, is a body under the event rather than its summary.
+SUMMARY_CHARS = 160
+
+#: A body past either bound opens collapsed, with a toggle.
+BODY_LINES = 8
+BODY_CHARS = 600
+
+
+def _event(item: dict[str, Any], now: datetime) -> str:
+    event_id = str(item.get("event_id") or "")
+    kind = str(item.get("kind") or "")
+    outcome = str(item.get("outcome") or "")
+    tone = "bad" if outcome in BAD_OUTCOMES else EVENT_TONES.get(kind, "")
+    said = str(item.get("reason") or "").strip()
+    long = [said] if len(said) > SUMMARY_CHARS or "\n" in said else []
+    summary = "" if long else (said or outcome)
+    marked = outcome if outcome not in ("", "success", summary) else ""
+    head = [
+        _chip(kind, tone).replace('class="chip', 'class="ev-kind chip', 1),
+        _actor(item.get("actor")),
+        f'<span class="ev-summary">{escape(summary)}</span>' if summary else "",
+        _chip(marked, "bad" if marked in BAD_OUTCOMES else "") if marked else "",
+        f'<a class="ev-time" href="#ev-{escape(event_id)}">{_when(item.get("occurred_at"), now)}</a>',
+    ]
+    bodies = "".join(_body(text, f"raw-{event_id}-{index}") for index, text in enumerate(long))
     return (
-        f'<li data-event-id="{escape(str(item.get("event_id") or ""))}">'
-        f"<time>{escape(str(item.get('occurred_at') or ''))}</time>"
-        f"<b>{escape(str(item.get('kind') or ''))}</b> {escape(str(detail))}</li>"
+        f'<li class="ev{" ev-" + tone if tone else ""}" id="ev-{escape(event_id)}" data-event-id="{escape(event_id)}">'
+        f'<span class="ev-dot" aria-hidden="true"></span><div class="ev-head">{"".join(head)}</div>{bodies}</li>'
+    )
+
+
+def _actor(actor: Any) -> str:
+    """Who recorded an event: `role · id`, one word when they are the same."""
+    who = _mapping(actor)
+    role, name = str(who.get("role") or ""), str(who.get("id") or "")
+    said = " · ".join(part for part in dict.fromkeys((role, name)) if part)
+    return f'<span class="ev-actor">{escape(said)}</span>' if said else ""
+
+
+def _body(text: Any, key: str) -> str:
+    """A long text rendered as Markdown at the full width of the feed, collapsed past a few lines."""
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    drawn = markdown.render(value)
+    if value.count("\n") < BODY_LINES and len(value) <= BODY_CHARS:
+        return f'<div class="ev-text"><div class="ev-body doc">{drawn}</div></div>'
+    box = escape(f"more-{key}")
+    return (
+        f'<div class="ev-text"><input type="checkbox" class="more" id="{box}" aria-label="show the whole text">'
+        f'<div class="ev-body doc clamp-body">{drawn}</div>'
+        f'<label class="more-toggle" for="{box}"><span class="m">Show more</span><span class="l">Show less</span></label></div>'
     )
 
 
@@ -762,53 +840,67 @@ RECORD_KINDS = {
 
 
 def _timeline(items: list[dict[str, Any]]) -> str:
-    """Every card transition and head change, oldest first; a transition opens on the records since
-    the previous transition."""
+    """Every card transition and head change, oldest first, under a line per day; a transition
+    opens on the records since the previous transition."""
     ordered = sorted(items, key=lambda item: str(item.get("occurred_at") or ""))
+    now = _render_now()
     steps: list[str] = []
     pending: list[dict[str, Any]] = []
+    day = ""
     for item in ordered:
+        step = ""
         if item.get("kind") == HEAD_CHANGED_KIND:
-            steps.append(_head_change_step(item))
+            step = _head_change_step(item, now)
+        else:
+            if item.get("kind") in RECORD_KINDS and (item.get("data") or {}).get("body"):
+                pending.append(item)
+            if isinstance(item.get("transition"), dict) and item["transition"]:
+                step = _transition_step(item, pending, now)
+                pending = []
+        if not step:
             continue
-        if item.get("kind") in RECORD_KINDS and (item.get("data") or {}).get("body"):
-            pending.append(item)
-        if isinstance(item.get("transition"), dict) and item["transition"]:
-            steps.append(_transition_step(item, pending))
-            pending = []
+        stamp = str(item.get("occurred_at") or "")[:10]
+        if stamp and stamp != day:
+            day = stamp
+            steps.append(f'<li class="ev-break"><span>{escape(day)}</span></li>')
+        steps.append(step)
     if not steps:
         return '<p class="empty">no transition has been recorded for this card yet.</p>'
-    return "\n".join(['<ol class="timeline">', *steps, "</ol>"])
+    return "\n".join(['<ol class="timeline feed">', *steps, "</ol>"])
 
 
-def _transition_step(event: dict[str, Any], records: list[dict[str, Any]]) -> str:
+def _transition_step(event: dict[str, Any], records: list[dict[str, Any]], now: datetime) -> str:
     transition = event["transition"]
     when = str(event.get("occurred_at") or "")
-    clock = when[11:19] if len(when) >= 19 else when
-    actor = _mapping(event.get("actor"))
     reason = str(event.get("reason") or "")
-    short = reason if len(reason) <= 120 else reason[:117].rstrip() + "…"
+    # A reason that is one of the records below is drawn once, as that record.
+    recorded = reason.strip() in {str((record.get("data") or {}).get("body") or "").strip() for record in records}
+    line = "" if recorded else " ".join(reason.split()).lstrip("# ")
+    short = line if len(line) <= 120 else line[:117].rstrip() + "…"
+    if recorded:
+        short = " · ".join(RECORD_KINDS[str(record.get("kind"))] for record in records)
+    key = str(event.get("event_id") or when)
     detail = [
-        f'<p class="why">{escape(when)} · {escape(str(actor.get("role") or ""))} {escape(str(actor.get("id") or ""))} · <span class="mono">{escape(str(event.get("kind") or ""))}</span></p>',
-        (f"<div>{_long(reason, chars=300)}</div>" if reason else ""),
+        f'<p class="why">{escape(when)} · {_actor(event.get("actor"))} · <span class="mono">{escape(str(event.get("kind") or ""))}</span></p>',
+        _body(reason, f"tl-{key}") if not recorded and (line != short or "\n" in reason) else "",
     ]
-    for record in records:
+    for index, record in enumerate(records):
         data = record.get("data") or {}
-        who = _mapping(record.get("actor"))
-        stamp = str(record.get("occurred_at") or "")
         marker = str(data.get("marker") or data.get("decision") or data.get("status") or "")
         detail.append(
             '<div class="record">'
             f'<div class="who"><b>{escape(RECORD_KINDS[str(record.get("kind"))])}</b>'
-            f"{' · ' + escape(marker) if marker else ''} · {escape(stamp[11:19] if len(stamp) >= 19 else stamp)}"
-            f" · {escape(str(who.get('id') or who.get('role') or ''))}</div>"
-            f"{_long(data.get('body'), chars=200)}"
+            f"{' · ' + escape(marker) if marker else ''} · {_when(record.get('occurred_at'), now)}"
+            f" {_actor(record.get('actor'))}</div>"
+            f"{_body(data.get('body'), f'tl-{key}-{index}')}"
             "</div>"
         )
+    tone = STATE_TONES.get(str(transition.get("target")), "")
     return (
-        f'<li><details><summary><time title="{escape(when)}">{escape(clock)}</time>'
-        f'<span>{_state_chip(transition.get("source"))}<span class="arrow">→</span>{_state_chip(transition.get("target"))}'
-        f' <span class="why">{escape(short)}</span></span></summary>'
+        f'<li class="ev{" ev-" + tone if tone else ""}"><span class="ev-dot" aria-hidden="true"></span>'
+        f'<details{" open" if records else ""}><summary>'
+        f'<span class="move">{_state_chip(transition.get("source"))}<span class="arrow">→</span>{_state_chip(transition.get("target"))}</span>'
+        f' <span class="why">{escape(short)}</span><span class="ev-time">{_when(when, now)}</span></summary>'
         f'<div class="detail">{"".join(part for part in detail if part)}</div></details></li>'
     )
 
@@ -825,7 +917,7 @@ HEAD_CHANGE_CAUSES = {
 }
 
 
-def _head_change_step(item: dict[str, Any]) -> str:
+def _head_change_step(item: dict[str, Any], now: datetime) -> str:
     """One head change: role, stop or replacement, cause, time and profile before -> after."""
     data = _mapping(item.get("data"))
     before = _mapping(data.get("before"))
@@ -834,7 +926,6 @@ def _head_change_step(item: dict[str, Any]) -> str:
     replaced = data.get("change") == "replaced"
     cause = str(data.get("cause") or "")
     when = str(item.get("occurred_at") or "")
-    clock = when[11:19] if len(when) >= 19 else when
     successor = str(after.get("profile") or "") if replaced else "no successor"
     if replaced and after.get("profile") == before.get("profile"):
         successor += " (same profile, new run)"
@@ -850,8 +941,9 @@ def _head_change_step(item: dict[str, Any]) -> str:
     if requested and requested != before.get("profile"):
         detail.append(f'<p class="why">requested profile {escape(requested)}</p>')
     return (
-        f'<li><details><summary><time title="{escape(when)}">{escape(clock)}</time>'
-        f'<span>{_chip(f"{role} {"replaced" if replaced else "stopped"}", "warn")}'
-        f' <span class="why">{escape(HEAD_CHANGE_CAUSES.get(cause, cause))}: {escape(profiles)}</span></span></summary>'
+        '<li class="ev ev-warn"><span class="ev-dot" aria-hidden="true"></span><details><summary>'
+        f'<span class="move">{_chip(f"{role} {"replaced" if replaced else "stopped"}", "warn")}</span>'
+        f' <span class="why">{escape(HEAD_CHANGE_CAUSES.get(cause, cause))}: {escape(profiles)}</span>'
+        f'<span class="ev-time">{_when(when, now)}</span></summary>'
         f'<div class="detail">{"".join(detail)}</div></details></li>'
     )

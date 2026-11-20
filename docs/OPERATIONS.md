@@ -2578,7 +2578,8 @@ fault; if both agree, the source is. A port in use fails the bind naming it; a n
 Every fact is drawn once. What the bottom bar carries on every page — the provider windows and the
 doctor lamp — has no panel of its own anywhere, and a page repeats nothing its header already says.
 Long text (a goal, a decision, a report body) is in the page once, in the reading face: held to two
-lines and grown in place by `show more`, never a one-line preview followed by the whole text again.
+lines (eight for a report body on a card) and grown in place by `show more`, never a one-line preview
+followed by the whole text again.
 
 The dashboard (`/`) has three parts that fail apart:
 
@@ -2600,10 +2601,15 @@ does: projects, repositories, the declared observer and whether it is up (the he
 it is not the declared one), and the worker and reviewer pins. Closing an open sprint is under `More
 actions`.
 
-A card page (`/tasks/{ref}`) is headed by the card's title and opens on its **Task** tab: the card's full
-description, rendered from its Markdown. Beside it are the work (report, verdict, decision, result), the
-timeline of transitions with the records that made them and the head changes between them
-([Protocols](PROTOCOLS.md#head-changes)), and the raw event tail. The side panel's `Heads`
+A card page (`/tasks/{ref}`) is headed by its ref and the card's title, which wraps rather than being
+cut, and opens on its **Task** tab: the card's full description, rendered from its Markdown. Beside it
+are the work (report, verdict, decision, result), the timeline of transitions with the records that made
+them and the head changes between them ([Protocols](PROTOCOLS.md#head-changes)), and the raw event tail.
+The timeline and the raw events are one vertical feed: each entry's kind, actor, one-line reason and
+time (`3h ago`, the exact moment on hover and a link to the entry) on one line, and a long text under it
+rendered from its Markdown at the full width of the column, collapsed past eight lines behind
+`Show more`. The side panel starts with the card's facts as label and value; a long path or id keeps its
+end in view and is cut in the middle, the whole value on hover. The side panel's `Heads`
 lists every run the card recorded, by role: the latest run of each role is a chip with the model that ran
 it — the exact id the run reported (`claude-opus-5-5`, shown as `Opus 5.5`), else the configured one
 marked as configured — its effort (five bars and a word; hollow bars when no effort flag was passed and

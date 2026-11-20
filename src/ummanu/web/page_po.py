@@ -12,7 +12,6 @@ from ummanu.web.page_assets import _PO_FORM_SCRIPT, _PO_SESSION_SCRIPT
 from ummanu.web.page_parts import (
     EFFORT_DEFAULT,
     PO_EFFORT_UNSET,
-    _age,
     _chip,
     _effort,
     _entries,
@@ -26,6 +25,7 @@ from ummanu.web.page_parts import (
     _rows,
     _selected,
     _state_chip,
+    _when,
 )
 from ummanu.web.page_shell import _page
 from ummanu.web.page_values import _mapping
@@ -140,9 +140,9 @@ def _po_session_row(item: dict[str, Any], *, closed: bool, now: datetime) -> str
     ]
     meta.append(f'<span class="effort">{_effort(item.get("effort"), unset=PO_EFFORT_UNSET)}</span>')
     if closed:
-        meta.append(f"<span>closed {_po_when(item.get('closed_at'), now)}</span>")
+        meta.append(f"<span>closed {_when(item.get('closed_at'), now)}</span>")
     else:
-        meta.append(f"<span>{_po_when(item.get('last_activity_at'), now)}</span>")
+        meta.append(f"<span>{_when(item.get('last_activity_at'), now)}</span>")
     meta.append(f'<span class="id">{escape(session_id[:8])}</span>')
     transition = _po_transition(item.get("first_message_metadata"))
     if transition:
@@ -165,21 +165,6 @@ def _po_session_row(item: dict[str, Any], *, closed: bool, now: datetime) -> str
         f"{_po_first_message(item.get('first_message'))}</a>"
         f'<div class="meta">{"".join(meta)}</div>{side}</li>'
     )
-
-
-def _po_when(value: Any, now: datetime) -> str:
-    """A moment as time ago (the moment on hover); a date once it is days old."""
-    if value in (None, ""):
-        return "—"
-    text = value.isoformat() if isinstance(value, datetime) else str(value)
-    try:
-        moment = value if isinstance(value, datetime) else datetime.fromisoformat(text)
-    except ValueError:
-        return escape(text)
-    moment = moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
-    seconds = max(0.0, (now - moment).total_seconds())
-    said = f"{_age(seconds)} ago" if seconds < 48 * 3600 else moment.date().isoformat()
-    return f'<time datetime="{escape(text)}" title="{escape(text)}">{escape(said)}</time>'
 
 
 def _po_close_form(session_id: str) -> str:

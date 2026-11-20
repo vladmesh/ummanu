@@ -656,13 +656,14 @@ class DashboardPageTests(FakeAppFixture):
             }
         )
         page = self.text(self.get("/tasks/ummanu-9"))
-        self.assertEqual(page.count("<li><details><summary><time"), 2)
-        self.assertIn(">12:31:00</time>", page)
+        self.assertEqual(page.count('<span class="ev-dot" aria-hidden="true"></span><details'), 2)
+        self.assertIn('datetime="2026-09-13T12:31:00Z"', page)
         self.assertIn("worker report:done", page)
         self.assertIn("worker report", page)
         self.assertIn("report:done", page)
-        # The long body is held to two lines and opened in place, never cut and never printed twice.
-        self.assertIn('<details class="text"><summary><span class="prose">Done the thing.', page)
+        # The long body is rendered once, collapsed with a toggle that opens it in place, never cut.
+        self.assertEqual(page.count('<div class="ev-body doc clamp-body"><p>Done the thing.'), 1)
+        self.assertEqual(page.count("Details follow Done the thing."), 19)
         self.assertNotIn("<pre>Done the thing.", page)
         self.assertIn("Details follow", page)
         # The card page asks for the whole timeline, not the API's short tail.
@@ -760,6 +761,43 @@ class DashboardPageTests(FakeAppFixture):
         self.assertEqual(self.get("/tasks/ummanu-9", "events=7").status, 200)
         self.assertEqual(self.reads.calls[-1][1]["events"], 7)
 
+    def test_the_card_feed_reads_a_long_report_as_markdown_and_a_short_event_on_one_line(self) -> None:
+        report = "## What changed\n" + "".join(f"- change {n}\n" for n in range(12))
+        events = [
+            {"event_id": "e1", "kind": "routing", "occurred_at": "2026-09-13T12:00:00Z",
+             "actor": {"role": "dispatcher", "id": "dispatcher"}, "reason": "complexity standard",
+             "outcome": "success", "transition": None, "data": {}},
+            {"event_id": "e2", "kind": "card.reported", "occurred_at": "2026-09-13T12:30:00Z",
+             "actor": {"role": "worker", "id": "w"}, "reason": report, "outcome": "success",
+             "transition": None, "data": {}},
+        ]
+        workspace = "/srv/work/acme-api/.wt/acme-api-142/checkout"
+        self.reads = Recording(
+            task_snapshot={
+                "ref": "acme-api-142",
+                "observed_at": "2026-09-13T12:40:00Z",
+                "card": {"source": available(), "value": {"title": "a card", "state": "ci", "project": "acme-api"}},
+                "project": {"id": "acme-api", "registered": True},
+                "attempt": {"source": available(), "value": {"state": "gate_pending", "attempt_id": "att-1",
+                                                              "attempt_round": 2, "gate_state": "pending",
+                                                              "workspace": workspace, "paused": {}}},
+                "agents": {"source": available(), "items": []},
+                "work": {},
+                "events": {"source": available(), "items": events, "next_cursor": "c"},
+            }
+        )
+        page = self.text(self.get("/tasks/acme-api-142"))
+        routing = page[page.index('id="ev-e1"'):page.index('id="ev-e2"')]
+        self.assertIn('<span class="ev-summary">complexity standard</span>', routing)
+        self.assertIn('<span class="ev-actor">dispatcher</span>', routing)
+        self.assertIn('href="#ev-e1"><time datetime="2026-09-13T12:00:00Z"', routing)
+        self.assertNotIn("ev-body", routing)
+        reported = page[page.index('id="ev-e2"'):]
+        self.assertIn('<div class="ev-body doc clamp-body"><h4>What changed</h4><ul>', reported)
+        self.assertIn('<label class="more-toggle" for="more-raw-e2-0">', reported)
+        self.assertIn(f'<span class="mid" title="{workspace}"><span class="mid-a">/srv/work/acme-api/.wt/acme-api-142/</span>'
+                      '<span class="mid-b">checkout</span></span>', page)
+
     def test_top_level_pages_carry_no_crumbs_and_nested_pages_only_the_identifier(self) -> None:
         self.assertNotIn('class="crumbs"', self.text(self.get("/history")))
         self.assertNotIn('class="crumbs"', self.text(self.get("/sprints")))
@@ -776,7 +814,7 @@ class DashboardPageTests(FakeAppFixture):
             }
         )
         page = self.text(self.get("/sprints/sprint:7"))
-        self.assertIn('<div class="crumbs"><span class="here">sprint:7</span></div>', page)
+        self.assertIn('<nav class="crumbs" aria-label="breadcrumb"><span class="here">sprint:7</span></nav>', page)
 
     def test_the_sprint_page_carries_the_comment_and_close_forms_on_an_open_sprint(self) -> None:
         self.sprint_reads = Recording(

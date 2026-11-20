@@ -310,17 +310,23 @@ def sprint(document: dict[str, Any]) -> str:
             chips.append(_chip(str(value.get("product"))))
         chips.append(_waiting_chip(work))
     is_open = str((value or {}).get("status") or "") == "open"
+    goal = str((value or {}).get("goal") or "").strip()
+    # A goal that reads as one line is the page's title; a longer one stays clamped under the ref.
+    headline = goal if goal and len(goal) <= HEADLINE_CHARS and "\n" not in goal else ""
     body = "\n".join(
         part
         for part in [
             '<div class="hero">',
-            f"<h1>{escape(ref)}</h1>",
-            f'<div class="chips">{"".join(chips)}</div>',
-            f'<a href="{escape(_board_link(sprint=ref))}">board</a>',
-            f'<span class="age" style="margin-left:auto">read at {escape(str(document.get("observed_at") or "an unknown time"))}</span>',
             (
-                f'<div class="title">{_long((value or {}).get("goal"), chars=200)}</div>'
-                if value and value.get("goal")
+                f'<div class="eyebrow"><span class="ref">{escape(ref)}</span>'
+                f'<a href="{escape(_board_link(sprint=ref))}">board</a>'
+                f'<span class="age">read at {escape(str(document.get("observed_at") or "an unknown time"))}</span></div>'
+            ),
+            f"<h1>{escape(headline)}</h1>" if headline else f'<h1 class="ref">{escape(ref)}</h1>',
+            f'<div class="chips">{"".join(chips)}</div>',
+            (
+                f'<div class="title">{_long(goal, chars=200)}</div>'
+                if goal and not headline
                 else ""
             ),
             "</div>",
@@ -359,6 +365,10 @@ def sprint(document: dict[str, Any]) -> str:
         nav="sprints",
         crumbs=((ref, ""),),
     )
+
+
+#: The longest goal drawn as the sprint page's title.
+HEADLINE_CHARS = 240
 
 
 def _sprint_now(work: dict[str, Any], observer: dict[str, Any]) -> str:

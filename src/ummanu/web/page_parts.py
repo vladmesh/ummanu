@@ -34,15 +34,16 @@ def _chip(text: str, tone: str = "") -> str:
 
 #: The tone of each card state, shown beside the state's word, never instead of it.
 STATE_TONES: dict[str, str] = {
-    "in_progress": "accent",
-    "validate": "accent",
-    "ci": "accent",
-    "review": "accent",
-    "reviewing": "accent",
-    "assessment": "warn",
+    "in_progress": "violet",
+    "validate": "violet",
+    "ci": "warn",
+    "post_merge_ci": "warn",
+    "review": "violet",
+    "reviewing": "violet",
+    "assessment": "violet",
     "blocked": "bad",
     "done": "ok",
-    "ready": "",
+    "ready": "accent",
     "issues": "",
 }
 
@@ -71,6 +72,41 @@ def _section(source: dict[str, Any] | None, items: list[Any], *, what: str, empt
     elif (source or {}).get("state") == "available":
         parts.append(f'<p class="empty">{escape(empty)}</p>')
     return "\n".join(part for part in parts if part)
+
+
+def _when(value: Any, now: datetime) -> str:
+    """A moment as time ago (the moment on hover); a date once it is days old."""
+    if value in (None, ""):
+        return "—"
+    text = value.isoformat() if isinstance(value, datetime) else str(value)
+    try:
+        moment = value if isinstance(value, datetime) else datetime.fromisoformat(text)
+    except ValueError:
+        return escape(text)
+    moment = moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+    seconds = max(0.0, (now - moment).total_seconds())
+    said = f"{_age(seconds)} ago" if seconds < 48 * 3600 else moment.date().isoformat()
+    return f'<time datetime="{escape(text)}" title="{escape(text)}">{escape(said)}</time>'
+
+
+def _mid(value: Any) -> str:
+    """A path or id cut in the middle when it does not fit: the last segment stays, the whole is the title."""
+    text = str(value or "")
+    if not text:
+        return "—"
+    cut = text.rstrip("/").rfind("/") + 1 if "/" in text.rstrip("/") else max(len(text) - 8, 0)
+    head, tail = text[:cut], text[cut:]
+    return (
+        f'<span class="mid" title="{escape(text)}"><span class="mid-a">{escape(head)}</span>'
+        f'<span class="mid-b">{escape(tail)}</span></span>'
+    )
+
+
+def _props(rows: list[list[str]], *, title: str = "") -> str:
+    """Label/value facts as a definition list; values are already markup."""
+    heading = f'<h3 class="props-title">{escape(title)}</h3>' if title else ""
+    body = "".join(f"<div><dt>{label}</dt><dd>{value}</dd></div>" for label, value in rows)
+    return f'{heading}<dl class="props">{body}</dl>'
 
 
 def _age(seconds: Any) -> str:
