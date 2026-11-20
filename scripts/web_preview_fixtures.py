@@ -460,8 +460,8 @@ def _runs_of(card: Card) -> list[dict[str, Any]]:
         profile = HEADS[card.head]
         if card.ref == SHOWCASE:
             for attempt, run_id, state, resolved in (
-                (1, "run-w-1a9f02", "stopped", "gpt-6.1-sol-2026-10-14"),
-                (2, "run-w-5c21e0", "stopped", "gpt-6.1-sol-2026-10-14"),
+                (1, "run-w-1a9f02", "stopped", "gpt-6-sol"),
+                (2, "run-w-5c21e0", "stopped", "gpt-6.1-sol"),
             ):
                 runs.append({"role": "worker", "run_id": run_id, "attempt": attempt, "state": state,
                              "head": card.head, "model": profile["model"], "effort": profile["effort"],
@@ -471,7 +471,7 @@ def _runs_of(card: Card) -> list[dict[str, Any]]:
             "role": "worker", "run_id": f"run-w-{_sha(card.ref, 9)[:6]}" if card.ref != SHOWCASE else "run-w-8d04a7",
             "attempt": 2 if card.ref == SHOWCASE else 1,
             "state": "running" if current else "stopped", "head": card.head, "model": profile["model"],
-            "effort": profile["effort"], "resolved_model": f"{profile['model']}-2026-10-14" if profile["adapter"] == "codex" else profile["model"],
+            "effort": profile["effort"], "resolved_model": profile["model"],
             "adapter": profile["adapter"], "local_pty": True, "current": current,
         })
     if card.review_head and (card.state in {"review", "post_merge_ci", "done"} or card.ref == SHOWCASE):
@@ -924,7 +924,7 @@ def _sprint_work(ref: str) -> dict[str, Any]:
         if card.sprint == ref:
             states.setdefault(card.state, []).append(card.ref)
     is_open = spec["status"] == "open"
-    gate = {"ci": "pending", "review": "green", "done": "green"}.get(current.state if current else "", "pending")
+    gate = {"ci": "pending", "review": "green", "done": "green"}.get(current.state if current else "")
     waiting_on = []
     if ref == "sprint:41":
         waiting_on = [
@@ -943,8 +943,7 @@ def _sprint_work(ref: str) -> dict[str, Any]:
         "cards": section("cards", states=states),
         "degraded_cards": section("degraded_cards", items=[]),
         "ready_skips": section("ready_skips", items=[]),
-        "checks": section("checks", state="not_green" if gate != "green" else "green", gate={"state": gate},
-                          reason=f"gate {gate} for {current.ref}" if current else None) if is_open else section("checks", state="not_applicable", gate={}),
+        "checks": _checks(gate, current) if is_open else section("checks", state="not_applicable", gate={}),
         "waiting": section("waiting", **spec["waiting"]),
         "waiting_on": waiting_on,
         "attention": {"state": "waiting" if spec["attention"] else "none", "event_ids": [30] if spec["attention"] else [], "reason": None},
@@ -952,6 +951,14 @@ def _sprint_work(ref: str) -> dict[str, Any]:
             role: {**HEADS[spec[role]], "profile": spec[role]} for role in ("observer", "worker", "reviewer")
         }),
     }
+
+
+def _checks(gate: str | None, current: Card | None) -> dict[str, Any]:
+    if gate is None or current is None:
+        reason = f"{current.ref} has no candidate commit yet" if current else "no current card"
+        return section("checks", state="not_green", gate={}, reason=reason)
+    state = "green" if gate == "green" else "not_green"
+    return section("checks", state=state, gate={"state": gate}, reason=f"exact-SHA gate {gate} for {current.ref}")
 
 
 def _observer(ref: str) -> dict[str, Any]:

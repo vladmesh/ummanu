@@ -4,7 +4,8 @@
 
 Playwright is not a dependency of this repository; run this with an interpreter that has it and a
 Chromium installed. Each page is shot at 1440 px wide, the board and the card also at 390 px. A card
-tab is selected by clicking its label, as a person would; the tabs need no script.
+tab is selected by clicking its label, as a person would; the tabs need no script. The fixed
+status bar is drawn at the end of the page rather than over its middle.
 """
 
 from __future__ import annotations
@@ -27,6 +28,9 @@ SHOTS: tuple[tuple[str, str, str | None, bool], ...] = (
     *((f"card-{tab.lower().replace(' ', '-')}", CARD, tab, tab in {"Task", "Raw events"}) for tab in CARD_TABS),
 )
 
+#: The status bar is fixed to the viewport; in a full-page shot it goes to the end of the page instead.
+UNPIN = ".statusbar { position: static !important; }"
+
 DESKTOP = {"width": 1440, "height": 900}
 MOBILE = {"width": 390, "height": 844}
 
@@ -45,6 +49,7 @@ def shoot(base: str, out: Path) -> list[str]:
                         continue
                     url = base.rstrip("/") + path
                     page.goto(url, wait_until="load")
+                    page.add_style_tag(content=UNPIN)
                     if tab is not None:
                         page.locator(".tab-bar label", has_text=tab).first.click()
                     page.screenshot(path=str(out / f"{stem}-{width}.png"), full_page=True)
