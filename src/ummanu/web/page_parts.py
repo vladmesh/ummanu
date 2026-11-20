@@ -412,10 +412,21 @@ def _short(text: Any, chars: int) -> str:
     return value if len(value) <= chars else value[: chars - 1].rstrip() + "…"
 
 
-def _dod_scale(dod: dict[str, Any], *, compact: bool = False) -> str:
-    """The sprint's progress: one segment per DoD item in scope, as wide as the reader's share, met ones filled.
+#: The scale's groups, in the order the track draws them from its left edge.
+DOD_GROUPS = ("met", "main", "open")
 
-    Compact keeps the scale and met / in-scope; the other words move to the hover title.
+
+def _dod_group(item: dict[str, Any]) -> str:
+    if item["state"] == "met":
+        return "met"
+    return "main" if item["delivery"]["state"] == "in_main" else "open"
+
+
+def _dod_scale(dod: dict[str, Any], *, compact: bool = False) -> str:
+    """The sprint's progress: one segment per in-scope DoD item, as wide as its share.
+
+    Segments run met, then in main awaiting the live check, then open, in item order within a group,
+    so the filled part is one bar from the left edge. Compact keeps met / in-scope; the rest goes to the title.
     """
     if not dod.get("structured"):
         if compact:
@@ -427,39 +438,62 @@ def _dod_scale(dod: dict[str, Any], *, compact: bool = False) -> str:
             '<div class="dod-scale none"><span class="label">progress</span>'
             f'<span class="muted">no scale: {escape(str(dod.get("reason") or ""))}</span></div>'
         )
-    segments = []
     items = _entries(dod.get("items"))
-    for item in items:
-        if item.get("state") == "descoped":
-            continue
-        weight = item.get("weight") if item.get("weight") is not None else "not weighed"
-        said = f"{item.get('id')} · weight {weight} · {item.get('text')}"
-        if item.get("evidence"):
-            said += f" · evidence: {item['evidence']}"
-        state = "met" if item.get("state") == "met" else "open"
-        segments.append(
-            f'<i class="seg {state}" style="flex:{float(item.get("share") or 0):.4f} 1 0" '
-            f'title="{escape(said)}"></i>'
-        )
+    scoped = [item for item in items if item["state"] != "descoped"]
+    groups = {group: [item for item in scoped if _dod_group(item) == group] for group in DOD_GROUPS}
+    segments = []
+    for group, members in groups.items():
+        for index, item in enumerate(members):
+            weight = item.get("weight") if item.get("weight") is not None else "not weighed"
+            said = f"{item.get('id')} · weight {weight} · {item.get('text')}"
+            if item.get("evidence"):
+                said += f" · evidence: {item['evidence']}"
+            split = " split" if index == 0 and segments else ""
+            segments.append(
+                f'<i class="seg {group}{split}" style="flex:{float(item.get("share") or 0):.4f} 1 0" '
+                f'title="{escape(said)}"></i>'
+            )
+    counts = {group: len(members) for group, members in groups.items()}
+    if dod.get("in_main") is None:
+        legend = [
+            ("met", f"{counts['met']} met"),
+            ("open", f"{counts['main'] + counts['open']} open"),
+            (None, "delivery unknown"),
+        ]
+    else:
+        legend = [
+            ("met", f"{counts['met']} met"),
+            ("main", f"{counts['main']} in main"),
+            ("open", f"{counts['open']} open"),
+        ]
     progress = dod.get("progress")
-    descoped = sum(1 for item in items if item.get("state") == "descoped")
-    words = (
-        f"{dod.get('met')} of {dod.get('total')} items met"
-        + (f" · {float(progress) * 100:.0f}%" if progress is not None else "")
-        + (f" · {descoped} descoped" if descoped else "")
+    descoped = len(items) - len(scoped)
+    tail = (f" · {float(progress) * 100:.0f}%" if progress is not None else "") + (
+        f" · {descoped} descoped" if descoped else ""
+    )
+    words = f"{dod.get('met')} of {dod.get('total')} items met"
+    track = (
+        f'<span class="track" role="progressbar" aria-valuemin="0" aria-valuemax="{dod.get("total")}" '
+        f'aria-valuenow="{dod.get("met")}" aria-label="{escape(words)}">{"".join(segments)}</span>'
     )
     if compact:
-        said = words + ("" if dod.get("estimated") else " · not estimated")
+        said = (
+            " · ".join(text for _, text in legend)
+            + tail
+            + ("" if dod.get("estimated") else " · not estimated")
+        )
         return (
             f'<div class="dod-scale compact" title="{escape(said)}"><span class="label">DoD</span>'
-            f'<span class="track">{"".join(segments)}</span>'
-            f'<span class="mono">{dod.get("met")} / {dod.get("total")}</span></div>'
+            f'{track}<span class="mono">{dod.get("met")} / {dod.get("total")}</span></div>'
         )
     unweighed = "" if dod.get("estimated") else _chip("not estimated")
+    keys = " · ".join(
+        f'<span class="key {group}">{escape(text)}</span>' if group else escape(text)
+        for group, text in legend
+    )
     return (
         '<div class="dod-scale"><span class="label">progress</span>'
-        f'<span class="track">{"".join(segments)}</span>'
-        f'<span class="mono">{words}</span>{unweighed}</div>'
+        f'{track}<span class="legend mono">{keys}{escape(tail)}</span>{unweighed}</div>'
     )
 
 
