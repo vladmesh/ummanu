@@ -259,9 +259,10 @@ class DodScaleTests(unittest.TestCase):
 
         drawn = page_parts._dod_scale(sprint_dod.section(items))
 
-        self.assertIn('class="seg open" style="flex:0.7500 1 0"', drawn)
         self.assertIn('class="seg met" style="flex:0.2500 1 0"', drawn)
-        self.assertIn("1 of 2 items met · 25%", drawn)
+        self.assertIn('class="seg open split" style="flex:0.7500 1 0"', drawn)
+        self.assertIn('aria-valuenow="1" aria-label="1 of 2 items met"', drawn)
+        self.assertIn(" · 25%", drawn)
         self.assertNotIn("not estimated", drawn)
 
     def test_the_compact_scale_counts_met_over_in_scope_and_draws_no_zeros_without_a_structure(self) -> None:
@@ -270,7 +271,7 @@ class DodScaleTests(unittest.TestCase):
         drawn = page_parts._dod_scale(sprint_dod.section(items), compact=True)
         unstructured = page_parts._dod_scale(sprint_dod.section(None), compact=True)
 
-        self.assertIn('<span class="track">', drawn)
+        self.assertIn('<span class="track" role="progressbar"', drawn)
         self.assertIn('<span class="mono">1 / 2</span>', drawn)
         self.assertNotIn("%</span>", drawn)
         self.assertIn(">no scale</span>", unstructured)
@@ -288,11 +289,59 @@ class DodScaleTests(unittest.TestCase):
         page = _sprint_tabs("sprint:7", _sprint_value({"dod": dod}), {})
 
         self.assertNotIn("seg descoped", drawn)
-        self.assertIn("1 of 2 items met · 25% · 1 descoped", drawn)
+        self.assertIn("25% · 1 descoped", drawn)
         self.assertIn('<span class="chip chip-warn">descoped</span>', page)
         self.assertIn('descoped: <span class="prose">the owner dropped the &lt;live&gt; check</span>', page)
         self.assertIn('<span class="chip chip-ok">met</span>', page)
         self.assertIn('<span class="chip">open</span>', page)
+
+    def interleaved(self) -> dict:
+        """d2 and d4 met, d5 in main awaiting its check, d6 descoped, d1 and d3 open; d4 also in main."""
+        po = {"role": "po", "actor": "po", "at": "now"}
+        items = self.items(1, 1, 1, 1, 1, 1)
+        items = sprint_dod.met(sprint_dod.met(items, "d4", "PR 4", po), "d2", "PR 2", po)
+        items = sprint_dod.marked_in_main(items, "d5", "merged", po)
+        items = sprint_dod.marked_in_main(items, "d4", "merged", po)
+        items = sprint_dod.descoped(items, "d6", "dropped", po)
+        return sprint_dod.section(items, cards=[], events=[])
+
+    @staticmethod
+    def drawn_segments(drawn: str) -> list[tuple[str, str]]:
+        return re.findall(r'<i class="seg (\w+)[^"]*"[^>]*title="(d\d)', drawn)
+
+    def test_the_scale_runs_met_then_in_main_then_open_in_item_order(self) -> None:
+        drawn = page_parts._dod_scale(self.interleaved())
+
+        self.assertEqual(
+            self.drawn_segments(drawn),
+            [("met", "d2"), ("met", "d4"), ("main", "d5"), ("open", "d1"), ("open", "d3")],
+        )
+        self.assertEqual(drawn.count(" split"), 2)
+        self.assertIn('role="progressbar" aria-valuemin="0" aria-valuemax="5" aria-valuenow="2"', drawn)
+
+    def test_the_legend_partitions_the_in_scope_items_by_the_scale_groups(self) -> None:
+        drawn = page_parts._dod_scale(self.interleaved())
+
+        self.assertIn('<span class="key main">1 in main</span>', drawn)
+        self.assertIn("2 met · 1 in main · 2 open · 40% · 1 descoped", re.sub(r"<[^>]+>", "", drawn))
+
+    def test_the_compact_scale_keeps_the_order_and_names_the_groups_in_its_title(self) -> None:
+        drawn = page_parts._dod_scale(self.interleaved(), compact=True)
+        states = [state for state, _ in self.drawn_segments(drawn)]
+
+        self.assertEqual(states, ["met", "met", "main", "open", "open"])
+        self.assertIn('title="2 met · 1 in main · 2 open · 40% · 1 descoped"', drawn)
+        self.assertIn('<span class="mono">2 / 5</span>', drawn)
+
+    def test_an_unknown_delivery_draws_no_in_main_group(self) -> None:
+        po = {"role": "po", "actor": "po", "at": "now"}
+        items = sprint_dod.met(self.items(1, 1, 1), "d3", "PR 3", po)
+        items = sprint_dod.marked_in_main(items, "d1", "merged", po)
+
+        drawn = page_parts._dod_scale(sprint_dod.section(items))
+
+        self.assertEqual(self.drawn_segments(drawn), [("met", "d3"), ("open", "d1"), ("open", "d2")])
+        self.assertIn("1 met · 2 open · delivery unknown", re.sub(r"<[^>]+>", "", drawn))
 
     def test_an_unweighed_scale_says_so_and_a_free_text_dod_draws_none(self) -> None:
         self.assertIn("not estimated", page_parts._dod_scale(sprint_dod.section(sprint_dod.new_items(["a"]))))
