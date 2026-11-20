@@ -196,7 +196,7 @@ typecheck = [
     "mypy==1.18.2",
 ]
 memory = [
-    "mcp==1.28.1",
+    "mcp==2.3.0",
     "fastembed==0.8.0",
     "onnxruntime==1.30.0",
     "huggingface-hub==1.33.0",
