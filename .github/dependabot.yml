@@ -1,0 +1,28 @@
+version: 2
+updates:
+  - package-ecosystem: pip        # reads pyproject.toml; switch to "uv" if ummanu adopts uv.lock
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      python:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "deps"
+    labels: [dependencies]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+    labels: [dependencies, ci]

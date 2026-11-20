@@ -149,7 +149,7 @@ name = "ummanu"
 version = "0.1.0"
 description = "Single-owner ummanu appliance: a task board, dispatcher and agent heads on one host."
 readme = "README.md"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [

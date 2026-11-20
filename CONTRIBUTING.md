@@ -79,6 +79,20 @@ are described in [Operations](docs/OPERATIONS.md).
 In the pull request, say what changed and what you verified, including any manual check the suite
 does not cover.
 
+## Sign-off (DCO), no CLA
+
+Every commit must be signed off under the
+[Developer Certificate of Origin 1.1](https://developercertificate.org/):
+
+```
+Signed-off-by: Your Name <you@example.com>
+```
+
+Use `git commit -s` (or `git rebase --signoff main` for commits you already made). The sign-off
+must match the commit author. The `dco` check enforces it on pull requests from outside the
+organization.
+
 ## License
 
-Contributions are accepted under the [Apache License 2.0](LICENSE).
+ummanu is licensed under [AGPL-3.0-only](LICENSE). By signing off you certify that you have the
+right to submit your contribution under that license, and you license it under the same terms.
