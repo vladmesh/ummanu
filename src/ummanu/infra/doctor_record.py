@@ -147,7 +147,8 @@ def record(instance: Path, *, data_dir: Path | None = None, offline: bool = Fals
                 "collecting": {key: attempt[key] for key in ("run_at", "mode")},
             }
             publish(path, document)
-            command = [sys.executable, "-P", "-m", "ummanu", "doctor", "--instance", str(instance), "--json"]
+            command = [sys.executable, "-P", "-m", "ummanu", "doctor", "--instance", str(instance), "--json",
+                       "--findings-only"]
             if offline:
                 command.append("--offline")
             if host_fixture:

@@ -202,6 +202,11 @@ def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
         help="treat migration warnings as findings",
     )
     doctor.add_argument("--json", action="store_true", help="print structured findings")
+    doctor.add_argument(
+        "--findings-only",
+        action="store_true",
+        help="with --json, print only the findings envelope without the status snapshot",
+    )
     doctor.set_defaults(handler=run_doctor)
 
     status = subparsers.add_parser("status", help="show the current installation state")
@@ -901,7 +906,6 @@ def _duration_text(value: float | None) -> str:
 def run_doctor_json(args: argparse.Namespace, report) -> int:
     """Structured counterpart to doctor without changing its default transcript."""
     from ummanu.infra.doctor_findings import active_findings
-    from ummanu.status import collect_status
 
     if not report.ok:
         print(
@@ -918,6 +922,22 @@ def run_doctor_json(args: argparse.Namespace, report) -> int:
         )
         return 1 if args.dry_run else 2
     inspection = collect_doctor_inspection(report, args)
+    payload = {
+        "schema_version": 1,
+        "ok": not active_findings(inspection.findings),
+        "findings": inspection.findings,
+    }
+    if not args.findings_only:
+        payload.update(_doctor_status_sections(args, report, inspection))
+    print(json.dumps(payload, sort_keys=True))
+    if inspection.unavailable:
+        return 2
+    return 1 if active_findings(inspection.findings) else 0
+
+
+def _doctor_status_sections(args: argparse.Namespace, report, inspection: DoctorInspection) -> dict[str, object]:
+    from ummanu.status import collect_status
+
     snapshot = collect_status(
         report,
         host_fixture=args.host_fixture,
@@ -927,19 +947,12 @@ def run_doctor_json(args: argparse.Namespace, report) -> int:
         sprints=not (args.offline or args.host_fixture),
     )
     codex_home_status = _codex_home_status(report)
-    payload = {
-        "schema_version": 1,
-        "ok": not active_findings(inspection.findings),
-        "findings": inspection.findings,
+    return {
         "board_schema": inspection.board_schema,
         "status": snapshot,
         "codex_home": codex_home_status,
         "po_codex_home": _po_codex_home_status(report, codex_home_status),
     }
-    print(json.dumps(payload, sort_keys=True))
-    if inspection.unavailable:
-        return 2
-    return 1 if active_findings(inspection.findings) else 0
 
 
 def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspection:
