@@ -1,7 +1,8 @@
 # Developer Certificate of Origin (https://developercertificate.org/), no CLA.
 # Every commit of a pull request must carry `Signed-off-by: Name <email>` matching the commit
 # author (`git commit -s`). Like the DCO app's `require.members: false`, pull requests opened by
-# the repository's owners, organization members and collaborators are not checked; bots are skipped.
+# maintainers are not checked: the logins in MAINTAINERS (author_association alone is not enough,
+# a private org membership reports CONTRIBUTOR) and owners/members/collaborators; bots are skipped.
 # The job only reads git metadata of the pull request; it never runs code from it.
 name: DCO
 on:
@@ -25,8 +26,12 @@ jobs:
           ASSOCIATION: ${{ github.event.pull_request.author_association }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
           AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          MAINTAINERS: vladmesh
         run: |
           set -euo pipefail
+          for m in $MAINTAINERS; do
+            if [ "$AUTHOR" = "$m" ]; then echo "PR by maintainer $AUTHOR: exempt from the DCO check."; exit 0; fi
+          done
           case "$ASSOCIATION" in
             OWNER|MEMBER|COLLABORATOR)
               echo "PR by $AUTHOR ($ASSOCIATION): maintainers are exempt from the DCO check."; exit 0;;
